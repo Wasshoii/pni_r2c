@@ -1,0 +1,25 @@
+# Build directories
+build/
+bin/
+
+# Data and Results
+Data/
+result/
+
+# Object files and libraries
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# Qt Creator user settings
+*.pro.user
+*.pro.user.*
+
+# VS Code settings
+.vscode/
+
+# OS generated files
+.DS_Store
+Thumbs.db

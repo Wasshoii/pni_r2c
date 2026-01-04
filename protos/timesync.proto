@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package openpni.distributed.timesync;
+
+message ClockSyncRequest {
+    uint64 client_local_time_ns = 1;      // 客户端本地纳秒时间
+    uint32 client_id = 2;                 // 客户端标识
+    string client_hostname = 3;           // 客户端主机名
+}
+
+message ClockSyncResponse {
+    uint64 server_time_ns = 1;            // 服务器时间（纳秒）
+    uint64 client_request_time_ns = 2;    // 客户端请求时间回显
+    uint64 response_time_ns = 3;          // 服务器响应时间（纳秒）
+    int64 estimated_clock_offset_ns = 4;  // 估计的时钟偏差（纳秒）
+    float network_delay_estimate_ms = 5;  // 网络延迟估计（毫秒）
+}
+
+message TimeSyncStats {
+    uint32 client_id = 1;
+    uint64 last_sync_time = 2;
+    int64 clock_offset_ns = 3;
+    float clock_drift_rate = 4;           // ppm (parts per million)
+    uint32 sync_count = 5;
+}
+
+message AllClientStats {
+    repeated ClientStats clients = 1;
+}
+
+message ClientStats {
+    uint32 client_id = 1;
+    string hostname = 2;
+    uint64 last_sync_time = 3;
+    int64 clock_offset_ns = 4;
+    float clock_drift_rate = 5;
+    uint32 sync_count = 6;
+}
+
+message EmptyRequest {
+    // 空请求消息
+}
+
+service TimeSyncService {
+    // 客户端向服务器进行时钟同步
+    rpc SyncClock(ClockSyncRequest) returns (ClockSyncResponse);
+    
+    // 查询同步统计信息
+    rpc GetSyncStats(EmptyRequest) returns (AllClientStats);
+    
+    // 流式同步（持续保持时钟同步）
+    rpc StreamingSync(stream ClockSyncRequest) returns (stream ClockSyncResponse);
+}

@@ -6,6 +6,10 @@
 #include <grpcpp/grpcpp.h>
 #include <iostream>
 #include <memory>
+#include <random>
+#include <mutex>
+#include <atomic>
+#include <thread>
 
 namespace openpni::distributed::timesync
 {
@@ -26,6 +30,23 @@ namespace openpni::distributed::timesync
         virtual ~TimeSyncServiceImpl() = default;
 
         /**
+         * @brief 设置模拟延迟（用于测试）
+         */
+        void SetSimulatedDelay(uint64_t delay_ms)
+        {
+            SetSimulatedDelayRange(delay_ms, delay_ms);
+        }
+
+        /**
+         * @brief 设置模拟随机延迟范围（用于测试）
+         */
+        void SetSimulatedDelayRange(uint64_t min_ms, uint64_t max_ms)
+        {
+            simulated_delay_min_ms_ = min_ms;
+            simulated_delay_max_ms_ = max_ms;
+        }
+
+        /**
          * @brief 处理时钟同步请求 (RPC: SyncClock)
          */
         ::grpc::Status SyncClock(
@@ -35,18 +56,50 @@ namespace openpni::distributed::timesync
         {
             try
             {
+                // 1. 精确记录 T2 (Server Receive Time)
+                // 务必在任何模拟延迟之前记录
+                uint64_t t2_server_recv_ns = TimeUtil::GetMonotonicTimeNs();
+
+                // 模拟网络/处理延迟
+                uint64_t min_delay = simulated_delay_min_ms_.load();
+                uint64_t max_delay = simulated_delay_max_ms_.load();
+
+                if (max_delay > 0)
+                {
+                    uint64_t delay = 0;
+                    if (min_delay >= max_delay)
+                    {
+                        delay = min_delay;
+                    }
+                    else
+                    {
+                        std::lock_guard<std::mutex> lock(rng_mutex_);
+                        std::uniform_int_distribution<uint64_t> dist(min_delay, max_delay);
+                        delay = dist(rng_);
+                    }
+
+                    if (delay > 0)
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                    }
+                }
+
+                // 3. 精确记录 T3 (Server Send Time)
+                uint64_t t3_server_send_ns = TimeUtil::GetMonotonicTimeNs();
+
                 uint64_t server_time_ns = 0;
                 int64_t offset_ns = 0;
                 float network_delay_ms = 0.0f;
 
-                // 调用服务器逻辑
+                // 调用服务器逻辑，传入 T2
                 bool success = server_->SyncClock(
                     request->client_id(),
                     request->client_hostname(),
                     request->client_local_time_ns(),
                     server_time_ns,
                     offset_ns,
-                    network_delay_ms);
+                    network_delay_ms,
+                    t2_server_recv_ns);
 
                 if (!success)
                 {
@@ -55,9 +108,9 @@ namespace openpni::distributed::timesync
                 }
 
                 // 填充响应
-                response->set_server_time_ns(server_time_ns);
+                response->set_server_time_ns(t2_server_recv_ns);
                 response->set_client_request_time_ns(request->client_local_time_ns());
-                response->set_response_time_ns(TimeUtil::GetMonotonicTimeNs());
+                response->set_response_time_ns(t3_server_send_ns);
                 response->set_estimated_clock_offset_ns(offset_ns);
                 response->set_network_delay_estimate_ms(network_delay_ms);
 
@@ -169,6 +222,10 @@ namespace openpni::distributed::timesync
 
     private:
         std::unique_ptr<TimeSyncServer> server_;
+        std::atomic<uint64_t> simulated_delay_min_ms_{0};
+        std::atomic<uint64_t> simulated_delay_max_ms_{0};
+        std::mt19937 rng_{std::random_device{}()};
+        std::mutex rng_mutex_;
     };
 
 } // namespace openpni::distributed::timesync

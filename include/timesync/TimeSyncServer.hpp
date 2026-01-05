@@ -59,11 +59,12 @@ namespace openpni::distributed::timesync
         bool SyncClock(uint32_t client_id, const std::string &hostname,
                        uint64_t client_time_ns,
                        uint64_t &server_time_ns, int64_t &offset_ns,
-                       float &network_delay_ms)
+                       float &network_delay_ms,
+                       uint64_t external_server_time_ns = 0)
         {
 
             // 记录服务器接收时间
-            uint64_t server_recv_time = TimeUtil::GetMonotonicTimeNs();
+            uint64_t server_recv_time = (external_server_time_ns > 0) ? external_server_time_ns : TimeUtil::GetMonotonicTimeNs();
 
             // 验证客户端时间合理性
             if (client_time_ns == 0)
@@ -75,8 +76,9 @@ namespace openpni::distributed::timesync
             // 估计网络延迟（简化模型：假设上行和下行延迟相等）
             int64_t half_trip_time = static_cast<int64_t>(server_recv_time) - static_cast<int64_t>(client_time_ns);
 
-            // 基本合理性检查
-            if (half_trip_time < -1'000'000'000LL || half_trip_time > 10'000'000'000LL)
+            // 基本合理性检查 (放宽限制以允许未同步的客户端)
+            // 允许 +/- 1小时的偏差
+            if (half_trip_time < -3600'000'000'000LL || half_trip_time > 3600'000'000'000LL)
             {
                 std::cerr << "Unreasonable round trip time: " << half_trip_time << " ns" << std::endl;
                 return false;

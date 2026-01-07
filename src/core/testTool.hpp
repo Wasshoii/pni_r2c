@@ -69,16 +69,20 @@ bool extract_channel_from_rawdata(
         fs::path outputPath = outputDir / outputFileName;
 
         openpni::io::RawFileOutput outputFile;
-        outputFile.setChannelNum(1); // 只有一个通道
+        // 关键修正：为了保留原始Channel ID，文件头中的通道数量必须足够涵盖该ID
+        // 因此这里使用原始文件的通道数量，而不是 1
+        outputFile.setChannelNum(channelNum);
 
-        // 获取原通道的类型名称
-        std::string channelTypeName = inputFile.typeNameOfChannel(channelIndexToExtract);
-        outputFile.setTypeNameOfChannel(0, channelTypeName); // 输出文件中该通道索引为0
+        // 复制所有通道的类型名称，保持文件元数据一致
+        for (uint16_t i = 0; i < channelNum; i++)
+        {
+            outputFile.setTypeNameOfChannel(i, inputFile.typeNameOfChannel(i));
+        }
 
         outputFile.open(outputPath.string());
 
         std::cout << "Output file: " << outputPath << std::endl;
-        std::cout << "Channel type: " << channelTypeName << std::endl;
+        std::cout << "Channel header count: " << channelNum << " (Preserved to maintain ID: " << channelIndexToExtract << ")" << std::endl;
 
         // 4. 逐段处理数据
         uint64_t totalPacketsExtracted = 0;
@@ -142,7 +146,7 @@ bool extract_channel_from_rawdata(
 
                     filteredLength.push_back(packetLength);
                     filteredOffset.push_back(currentOffset);
-                    filteredChannel.push_back(0); // 输出文件中通道索引为0
+                    filteredChannel.push_back(channelIndexToExtract); // 保持原始通道ID
 
                     currentOffset += packetLength;
                 }
@@ -261,15 +265,13 @@ bool extract_multiple_channels_from_rawdata(
         fs::path outputPath = outputDir / outputFileName;
 
         openpni::io::RawFileOutput outputFile;
-        outputFile.setChannelNum(channelIndices.size());
+        // 关键修正：为了保留原始Channel ID，文件头必须保持原始通道维度
+        outputFile.setChannelNum(channelNum);
 
-        // 设置每个通道的类型
-        for (size_t i = 0; i < channelIndices.size(); i++)
+        // 复制所有通道的类型名称
+        for (uint16_t i = 0; i < channelNum; i++)
         {
-            std::string channelTypeName = inputFile.typeNameOfChannel(channelIndices[i]);
-            outputFile.setTypeNameOfChannel(i, channelTypeName);
-            std::cout << "  Channel " << channelIndices[i] << " -> Output index "
-                      << i << " (type: " << channelTypeName << ")" << std::endl;
+            outputFile.setTypeNameOfChannel(i, inputFile.typeNameOfChannel(i));
         }
 
         outputFile.open(outputPath.string());
@@ -329,9 +331,6 @@ bool extract_multiple_channels_from_rawdata(
                 auto it = std::find(channelIndices.begin(), channelIndices.end(), view.channel[i]);
                 if (it != channelIndices.end())
                 {
-                    // 找到该通道在输出文件中的索引
-                    uint16_t outputChannelIndex = std::distance(channelIndices.begin(), it);
-
                     // 复制数据
                     uint64_t packetStart = view.offset[i];
                     uint16_t packetLength = view.length[i];
@@ -342,7 +341,7 @@ bool extract_multiple_channels_from_rawdata(
 
                     filteredLength.push_back(packetLength);
                     filteredOffset.push_back(currentOffset);
-                    filteredChannel.push_back(outputChannelIndex);
+                    filteredChannel.push_back(view.channel[i]); // 保持原始通道ID
 
                     currentOffset += packetLength;
                 }

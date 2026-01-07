@@ -87,13 +87,17 @@ void test_bdm2()
 }
 int main()
 {
-    // 示例：打印文件信息
+    // 分通道模拟
+    // for (int i = 0; i < 4; i++)
+    // {
+    //     extract_channel_from_rawdata("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/bdmbid/raw_data/rawdata_100.data", i, "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/bdmbid/raw_data/split_Data/");
+    // }
     // print_rawdata_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/bdmbid/raw_data/split_Data/rawdata_100_channel_0.raw");
     // print_rawdata_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/bdmbid/raw_data/split_Data/rawdata_100_channel_1.raw");
     // print_rawdata_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/bdmbid/raw_data/split_Data/rawdata_100_channel_2.raw");
     // print_rawdata_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/bdmbid/raw_data/split_Data/rawdata_100_channel_3.raw");
 
-    // 示例：运行 BDMBiD 测试
+    // R2S 测试
     // test_bdmbid();
     // std::string resPath = "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split";
     // std::vector<std::string> calibrationFilePaths = {
@@ -123,6 +127,8 @@ int main()
         "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split/singles_channel_1.single",
         "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split/singles_channel_2.single",
         "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split/singles_channel_3.single"};
+    // std::vector<std::string> files = {
+    //     "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/singles.single"};
     auto time_ms = timer(
         [&]
         {
@@ -136,8 +142,8 @@ int main()
         },
         1);
 
-    // print_single_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/singles.single");
-    // print_single_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split/merged.single");
+    print_single_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/singles.single");
+    print_single_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split/merged.single");
 
     std::cout << "Merging time: " << time_ms << " ms" << std::endl;
 

@@ -1,5 +1,6 @@
 #pragma once
 #include <pni/io/IO.hpp>
+#include <pni/io/ListmodeIO.hpp>
 #include <filesystem>
 #include <iostream>
 #include <vector>
@@ -19,7 +20,7 @@
 namespace fs = std::filesystem;
 
 /**
- * @brief R2S 处理配置结构体
+ * @brief 符合 处理配置结构体
  */
 struct CoincidenceProcessConfig
 {
@@ -31,12 +32,12 @@ struct CoincidenceProcessConfig
 };
 
 /**
- * @brief IO Context to keep files open across chunks
+ * @brief IO Context to keep files open across chunks (Modified for Listmode Output)
  */
 struct CoincidenceIOContext
 {
-    std::unique_ptr<std::ofstream> promptStream;
-    std::unique_ptr<std::ofstream> delayStream;
+    std::unique_ptr<openpni::io::listmode::ListmodeFileOutput> promptWriter;
+    std::unique_ptr<openpni::io::listmode::ListmodeFileOutput> delayWriter;
     std::string outputDir;
 
     CoincidenceIOContext(const std::string &dir) : outputDir(dir)
@@ -44,71 +45,99 @@ struct CoincidenceIOContext
         fs::create_directories(dir);
     }
 
-    std::ofstream &getStream(const std::string &type)
+    openpni::io::listmode::ListmodeFileOutput &getStream(const std::string &type, uint32_t totalCrystals)
     {
         if (type == "prompt")
         {
-            if (!promptStream)
+            if (!promptWriter)
             {
-                std::string path = outputDir + "/prompt.data";
-                promptStream = std::make_unique<std::ofstream>(path, std::ios::binary | std::ios::app);
-                if (!*promptStream)
-                    throw std::runtime_error("Failed to open " + path);
+                std::string path = outputDir + "/prompt.lmf";
+                promptWriter = std::make_unique<openpni::io::listmode::ListmodeFileOutput>();
+                promptWriter->setBytes4CrystalIndex(openpni::io::single::CrystalIndexType::UINT32);
+                promptWriter->setBytes4TimeValue1_2(openpni::io::listmode::TimeValue1_2Type::INT16);
+                promptWriter->setTotalCrystalNum(totalCrystals);
+                promptWriter->open(path);
             }
-            return *promptStream;
+            return *promptWriter;
         }
         else // delay
         {
-            if (!delayStream)
+            if (!delayWriter)
             {
-                std::string path = outputDir + "/delay.data";
-                delayStream = std::make_unique<std::ofstream>(path, std::ios::binary | std::ios::app);
-                if (!*delayStream)
-                    throw std::runtime_error("Failed to open " + path);
+                std::string path = outputDir + "/delay.lmf";
+                delayWriter = std::make_unique<openpni::io::listmode::ListmodeFileOutput>();
+                delayWriter->setBytes4CrystalIndex(openpni::io::single::CrystalIndexType::UINT32);
+                delayWriter->setBytes4TimeValue1_2(openpni::io::listmode::TimeValue1_2Type::INT16);
+                delayWriter->setTotalCrystalNum(totalCrystals);
+                delayWriter->open(path);
             }
-            return *delayStream;
+            return *delayWriter;
         }
     }
 };
 
 /**
- * @brief 追加 Coincidence 结果到流
+ * @brief 保存符合结果到 Listmode 文件
  */
-void appendCoinToStream(
-    std::ofstream &ofs,
-    std::span<openpni::experimental::node::LocalListmode const> coins)
+void saveCoincidenceEvents(
+    openpni::io::listmode::ListmodeFileOutput &output,
+    std::span<openpni::experimental::node::LocalListmode const> coins,
+    uint32_t crystalsPerChannel)
 {
     if (coins.empty())
         return;
 
-    SegmentHeader header;
-    header.count = static_cast<uint32_t>(coins.size());
-    header.timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                              std::chrono::system_clock::now().time_since_epoch())
-                              .count();
+    std::vector<openpni::experimental::node::LocalListmode> hostBuf;
+    const openpni::experimental::node::LocalListmode *srcPtr = coins.data();
 
-    ofs.write(reinterpret_cast<const char *>(&header), sizeof(header));
-
-    const void *srcPtr = coins.data();
-    size_t bytes = coins.size() * sizeof(openpni::experimental::node::LocalListmode);
-
-    if (isDevicePointer(srcPtr))
+    // Check if pointer is on Device
+    bool isDevice = false;
+    cudaPointerAttributes attr;
+    if (cudaPointerGetAttributes(&attr, srcPtr) == cudaSuccess)
     {
-        // GPU -> Host copy
-        std::vector<openpni::experimental::node::LocalListmode> hostBuf(coins.size());
-        cudaError_t err = cudaMemcpy(hostBuf.data(), srcPtr, bytes, cudaMemcpyDeviceToHost);
+#if CUDART_VERSION >= 10000
+        if (attr.type == cudaMemoryTypeDevice)
+            isDevice = true;
+#else
+        if (attr.memoryType == cudaMemoryTypeDevice)
+            isDevice = true;
+#endif
+    }
+
+    // GPU -> Host copy if needed
+    if (isDevice)
+    {
+        hostBuf.resize(coins.size());
+        cudaError_t err = cudaMemcpy(hostBuf.data(), srcPtr, coins.size() * sizeof(openpni::experimental::node::LocalListmode), cudaMemcpyDeviceToHost);
         if (err != cudaSuccess)
         {
             throw std::runtime_error("cudaMemcpyDeviceToHost failed: " +
                                      std::string(cudaGetErrorString(err)));
         }
-        ofs.write(reinterpret_cast<const char *>(hostBuf.data()), bytes);
+        srcPtr = hostBuf.data();
     }
-    else
-    {
-        // Host -> File direct write
-        ofs.write(reinterpret_cast<const char *>(srcPtr), bytes);
-    }
+
+    // Convert LocalListmode (Host) to Standard Listmode_t
+    std::vector<openpni::basic::Listmode_t> listmodeData(coins.size());
+
+    // Parallel conversion
+    openpni::experimental::tools::parallel_for_each(
+        coins.size(),
+        [&](size_t i)
+        {
+            const auto &loc = srcPtr[i];
+            auto &glob = listmodeData[i];
+
+            // Calculate Global Indices
+            glob.globalCrystalIndex1 = (uint32_t)loc.channelIndex1 * crystalsPerChannel + loc.crystalIndex1;
+            glob.globalCrystalIndex2 = (uint32_t)loc.channelIndex2 * crystalsPerChannel + loc.crystalIndex2;
+
+            // Copy time difference directly (LocalListmode has 'time1_2pico' member)
+            glob.time1_2pico = static_cast<int16_t>(loc.time1_2pico);
+        });
+
+    // Write segment (using 0 for clock/duration as they are stream segments)
+    output.appendSegment(listmodeData.data(), listmodeData.size(), 0, 0);
 }
 
 /**
@@ -158,7 +187,7 @@ void processCoincidenceForChunk(
         return;
     }
 
-    // 3. Perform Coincidence
+    // 3. Perform Coincidence & Save
     try
     {
         std::span<openpni::experimental::interface::LocalSingle const> d_span(d_singles_ptr, localSingles.size());
@@ -168,8 +197,23 @@ void processCoincidenceForChunk(
 
         auto [prompt, delay] = coinNode.getDListmode(inputList, config.protocol);
 
-        appendCoinToStream(ioCtx->getStream("prompt"), prompt);
-        appendCoinToStream(ioCtx->getStream("delay"), delay);
+        // Process Prompt
+        if (!prompt.empty())
+        {
+            saveCoincidenceEvents(
+                ioCtx->getStream("prompt", config.channelNum * config.crystalsPerChannel),
+                prompt,
+                config.crystalsPerChannel);
+        }
+
+        // Process Delay
+        if (!delay.empty())
+        {
+            saveCoincidenceEvents(
+                ioCtx->getStream("delay", config.channelNum * config.crystalsPerChannel),
+                delay,
+                config.crystalsPerChannel);
+        }
     }
     catch (const std::exception &e)
     {
@@ -595,6 +639,12 @@ bool merge_single_files(
 
             auto mergeProcessStart = std::chrono::high_resolution_clock::now();
 
+            std::vector<std::unique_ptr<std::mutex>> fileMutexes;
+            for (size_t i = 0; i < inputs.size(); ++i)
+            {
+                fileMutexes.push_back(std::make_unique<std::mutex>());
+            }
+
             // 处理每个组
             uint64_t totalWritten = 0;
             uint32_t segmentsWritten = 0;
@@ -674,7 +724,11 @@ bool merge_single_files(
                             const auto &segInfo = allSegments[globalIdx];
                             auto &input = *inputs[segInfo.fileIndex];
 
-                            auto segBytes = input.readSegment(segInfo.segmentIndex);
+                            auto segBytes = [&]()
+                            {
+                                std::lock_guard<std::mutex> lock(*fileMutexes[segInfo.fileIndex]);
+                                return input.readSegment(segInfo.segmentIndex);
+                            }();
                             auto fileHeader = input.header();
 
                             // 直接写入大数组的特定偏移位置

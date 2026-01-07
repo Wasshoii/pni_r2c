@@ -7,15 +7,6 @@
 #include <iostream>
 #include <fstream>
 
-constexpr size_t MAX_READ_BYTES = size_t(3ULL * 1024ULL * 1024ULL * 1024ULL); // 3GB
-constexpr uint32_t SEG_MAGIC = 0x53474D54;                                    // 'SGMT'
-struct SegmentHeader
-{
-    uint32_t magic = SEG_MAGIC; // 'SGMT' 用于校验与同步
-    uint32_t count;             // 本段包含的事件条数
-    uint64_t timestamp_ns;      // 可记录写入时刻 or 数据采样时刻（可选）
-};
-
 // 判断 ptr 是否为 GPU Device 内存
 inline bool isDevicePointer(const void *ptr)
 {
@@ -259,9 +250,8 @@ bool processR2S(const R2SProcessConfig &config)
             }
         }
 
-        // 4. 设置 R2S 和符合处理器
+        // 4. 设置 R2S
         auto R2S = openpni::experimental::node::ConvergedR2S();
-        auto Coin = openpni::experimental::node::Coincidence();
 
         // std::vector<uint32_t> crystalNumOfEachChannel(channelNum, config.crystalsPerChannel);
         // Coin.setTotalCrystalNumOfEachChannel(crystalNumOfEachChannel);

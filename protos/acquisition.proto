@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package openpni.distributed.acquisition;
+
+// 探测器通道配置
+message ChannelConfig {
+    uint32 ip_source = 1;        // 源IP地址 (integer representation)
+    uint32 port_source = 2;      // 源端口号
+    uint32 ip_destination = 3;   // 目的IP地址 (integer representation)
+    uint32 port_destination = 4; // 目的端口号
+    uint32 channel_index = 5;    // 通道索引
+}
+
+// 采集任务配置
+message AcquisitionTask {
+    // 全局配置
+    uint32 storage_unit_size = 1;
+    uint64 max_buffer_size = 2;
+    uint32 time_switch_buffer_ms = 3;
+    uint32 total_channel_num = 4; // 总通道数
+    uint32 min_packet_size = 6;   // 最小包大小，用于过滤
+
+    // 分配给该节点的通道列表
+    repeated ChannelConfig channels = 5;
+}
+
+// 节点信息
+message NodeInfo {
+    string node_id = 1;       // 节点唯一标识
+    string hostname = 2;      // 主机名
+    string ip_address = 3;    // 节点IP
+    uint32 cpu_cores = 4;     // CPU核心数 (可选，用于负载均衡)
+    uint64 memory_size = 5;   // 内存大小 (可选)
+}
+
+// 指令类型
+enum CommandType {
+    CMD_UNKNOWN = 0;
+    CMD_CONFIGURE = 1; // 配置参数
+    CMD_START = 2;     // 开始采集
+    CMD_STOP = 3;      // 停止采集
+    CMD_SHUTDOWN = 4;  // 关闭节点
+}
+
+// 主服务器下发的指令
+message MasterCommand {
+    CommandType type = 1;
+    AcquisitionTask task = 2; // 仅在 CMD_CONFIGURE 时有效
+    string message = 3;       // 附加消息
+}
+
+// 节点状态
+enum NodeState {
+    STATE_UNKNOWN = 0;
+    STATE_IDLE = 1;         // 空闲
+    STATE_CONFIGURED = 2;   // 已配置
+    STATE_RUNNING = 3;      // 正在采集
+    STATE_ERROR = 4;        // 错误状态
+}
+
+// 节点上报的状态
+message NodeStatus {
+    NodeInfo info = 1;      // 节点基本信息 (首次连接或变更时发送)
+    NodeState state = 2;    // 当前状态
+    string error_message = 3; // 错误信息
+    // 可以添加统计信息，如采集速率等
+    double current_speed_mpps = 4;
+    double current_bandwidth_mbps = 5;
+}
+
+service AcquisitionControlService {
+    // 节点连接到主服务器，建立双向流
+    // 节点发送 NodeStatus，主服务器发送 MasterCommand
+    rpc Connect (stream NodeStatus) returns (stream MasterCommand);
+}

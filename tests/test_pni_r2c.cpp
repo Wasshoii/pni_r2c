@@ -11,214 +11,9 @@
 #include <vector>
 #include <iostream>
 #include <pni/detector/BDMBiD.hpp>
-#include "R2S.hpp"
-#include "testTool.hpp"
-#include "MergeAndCoin.hpp"
-
-// template <typename T>
-// void save_vector(std::vector<T> const &data, std::string fileName)
-// {
-//     std::ofstream file(fileName);
-//     if (!file.is_open())
-//         std::cerr << "Cannot open file " << fileName << std::endl;
-//     file.write((char *)&data[0], data.size() * sizeof(T));
-// }
-
-// #pragma pack(push, 1)
-// struct LocalListmode
-// {
-//     unsigned short channelIndex1;
-//     unsigned short crystalIndex1;
-//     unsigned short channelIndex2;
-//     unsigned short crystalIndex2;
-//     unsigned short time1_2pico;
-// };
-// #pragma pack(pop)
-
-// void appendCoinToDataFile(
-//     const std::string &dir,
-//     const std::string &filename,
-//     std::span<openpni::experimental::node::LocalListmode const> coins)
-// {
-//     std::string filepath = dir + "/" + filename + ".data";
-
-//     std::ofstream ofs(filepath, std::ios::binary | std::ios::app);
-//     if (!ofs)
-//     {
-//         throw std::runtime_error("Failed to open file: " + filepath);
-//         return;
-//     }
-
-//     SegmentHeader header;
-//     header.count = static_cast<uint32_t>(coins.size());
-//     header.timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-//                               std::chrono::system_clock::now().time_since_epoch())
-//                               .count();
-
-//     ofs.write(reinterpret_cast<const char *>(&header), sizeof(header));
-
-//     const void *srcPtr = coins.data();
-//     size_t bytes = coins.size() * sizeof(openpni::experimental::node::LocalListmode);
-
-//     if (isDevicePointer(srcPtr))
-//     {
-//         // GPU -> Host copy
-//         std::vector<openpni::experimental::node::LocalListmode> hostBuf(coins.size());
-//         cudaError_t err = cudaMemcpy(hostBuf.data(), srcPtr, bytes, cudaMemcpyDeviceToHost);
-//         if (err != cudaSuccess)
-//         {
-//             throw std::runtime_error("cudaMemcpyDeviceToHost failed: " +
-//                                      std::string(cudaGetErrorString(err)));
-//         }
-//         ofs.write(reinterpret_cast<const char *>(hostBuf.data()), bytes);
-//     }
-//     else
-//     {
-//         // Host -> File direct write
-//         ofs.write(reinterpret_cast<const char *>(srcPtr), bytes);
-//     }
-// }
-
-// #include "testTool.hpp"
-
-// std::vector<uint32_t> rearrange(std::vector<uint32_t> vector)
-// {
-//     auto copy = std::vector<uint32_t>(vector.size(), 0);
-//     for (auto layer = 0; layer < 4; layer++)
-//     {
-//         for (auto i = 0; i < 169 * 4 * 48; i++)
-//         {
-//             auto detector = i / (169 * 4);
-//             auto crystal = i % (169 * 4);
-//             auto dRing = detector / 24;
-//             auto inRing = detector % 24;
-//             auto v = crystal / (13 * 4);
-//             auto u = crystal % (13 * 4);
-//             auto x = v + inRing * 13;
-//             auto y = u + dRing * 13 * 4;
-//             copy[x + y * 312 + layer * 312 * 104] = vector[i + layer * 312 * 104];
-//         }
-//     }
-//     return copy;
-// }
-
-// bool loadDataFile(
-//     const std::string &filepath,
-//     std::vector<std::vector<openpni::basic::LocalSingle>> &resultStorage)
-// {
-//     std::ifstream ifs(filepath, std::ios::binary);
-//     if (!ifs)
-//     {
-//         throw std::runtime_error("Cannot open data file: " + filepath);
-//     }
-
-//     size_t totalBytesRead = 0;
-
-//     uint32_t channelNum = resultStorage.size();
-//     while (true)
-//     {
-//         SegmentHeader header;
-//         if (!ifs.read(reinterpret_cast<char *>(&header), sizeof(header)))
-//         {
-//             break; // EOF 正常结束
-//         }
-//         if (header.magic != SEG_MAGIC)
-//         {
-//             throw std::runtime_error("Segment magic mismatch, file corrupted: " + filepath);
-//         }
-
-//         size_t segmentBytes = size_t(header.count) * sizeof(openpni::experimental::interface::LocalSingle);
-//         totalBytesRead += sizeof(header) + segmentBytes;
-//         if (totalBytesRead > MAX_READ_BYTES)
-//         {
-//             // 超过最大读取限制，避免 OOM
-//             break;
-//         }
-
-//         // 为本段读取分配临时缓冲区（host 内存）
-//         std::vector<openpni::experimental::interface::LocalSingle> buf(header.count);
-//         if (!ifs.read(reinterpret_cast<char *>(buf.data()), segmentBytes))
-//         {
-//             throw std::runtime_error("Unexpected EOF when reading singles data.");
-//         }
-
-//         // 分发到 48 通道对应存储
-//         for (const auto &s : buf)
-//         {
-//             if (s.channelIndex >= channelNum)
-//             {
-//                 // 若出现异常通道，跳过或可做 log
-//                 continue;
-//             }
-//             openpni::basic::LocalSingle out;
-//             out.crystalIndex = s.crystalIndex;
-//             out.timevalue_pico = s.timevalue_pico;
-//             out.energy = s.energy;
-
-//             resultStorage[s.channelIndex].push_back(out);
-//         }
-//     }
-//     return true;
-// }
-
-// bool loadCoinFile(
-//     const std::string &filepath,
-//     std::vector<std::vector<openpni::basic::LocalSingle>> &resultStorage)
-// {
-//     std::ifstream ifs(filepath, std::ios::binary);
-//     if (!ifs)
-//     {
-//         throw std::runtime_error("Cannot open data file: " + filepath);
-//     }
-
-//     size_t totalBytesRead = 0;
-
-//     uint32_t channelNum = resultStorage.size();
-//     while (true)
-//     {
-//         SegmentHeader header;
-//         if (!ifs.read(reinterpret_cast<char *>(&header), sizeof(header)))
-//         {
-//             break; // EOF 正常结束
-//         }
-//         if (header.magic != SEG_MAGIC)
-//         {
-//             throw std::runtime_error("Segment magic mismatch, file corrupted: " + filepath);
-//         }
-
-//         size_t segmentBytes = size_t(header.count) * sizeof(openpni::experimental::interface::LocalSingle);
-//         totalBytesRead += sizeof(header) + segmentBytes;
-//         if (totalBytesRead > MAX_READ_BYTES)
-//         {
-//             // 超过最大读取限制，避免 OOM
-//             break;
-//         }
-
-//         // 为本段读取分配临时缓冲区（host 内存）
-//         std::vector<openpni::experimental::interface::LocalSingle> buf(header.count);
-//         if (!ifs.read(reinterpret_cast<char *>(buf.data()), segmentBytes))
-//         {
-//             throw std::runtime_error("Unexpected EOF when reading singles data.");
-//         }
-
-//         // 分发到 48 通道对应存储
-//         for (const auto &s : buf)
-//         {
-//             if (s.channelIndex >= channelNum)
-//             {
-//                 // 若出现异常通道，跳过或可做 log
-//                 continue;
-//             }
-//             openpni::basic::LocalSingle out;
-//             out.crystalIndex = s.crystalIndex;
-//             out.timevalue_pico = s.timevalue_pico;
-//             out.energy = s.energy;
-
-//             resultStorage[s.channelIndex].push_back(out);
-//         }
-//     }
-//     return true;
-// }
+#include "../src/core/aquisition-and-r2s/R2S.hpp"
+#include "../src/core/testTool.hpp"
+#include "../src/core/merge-and-coin/MergeAndCoin.hpp"
 
 void test_bdmbid()
 {
@@ -319,10 +114,10 @@ int main()
 
     // 测试single合并
 
-    print_single_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split/singles_channel_0.single");
-    print_single_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split/singles_channel_1.single");
-    print_single_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split/singles_channel_2.single");
-    print_single_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split/singles_channel_3.single");
+    // print_single_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split/singles_channel_0.single");
+    // print_single_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split/singles_channel_1.single");
+    // print_single_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split/singles_channel_2.single");
+    // print_single_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split/singles_channel_3.single");
     std::vector<std::string> files = {
         "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split/singles_channel_0.single",
         "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split/singles_channel_1.single",
@@ -331,16 +126,24 @@ int main()
     auto time_ms = timer(
         [&]
         {
-            merge_single_files(files, "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split/merged.single", true);
+            CoincidenceProcessConfig mergeConfig;
+            mergeConfig.enable = true;
+            mergeConfig.channelNum = 4;
+            mergeConfig.crystalsPerChannel = 400 * 8;
+            mergeConfig.outputDir = "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/coin";
+
+            merge_single_files(files, "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split/merged.single", mergeConfig);
         },
         1);
 
-    std::cout << "Merging time: " << time_ms << " ms" << std::endl;
+    // print_single_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/singles.single");
+    // print_single_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split/merged.single");
 
-    print_single_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/singles.single");
-    print_single_file_info("/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/split/merged.single");
+    std::cout << "Merging time: " << time_ms << " ms" << std::endl;
 
     return 0;
 }
 
-// g++ -std=c++20 raw2coin.cpp $(pkg-config --cflags --libs libpni) -o r2s_test
+// g++ -fdiagnostics-color=always -g /media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/tests/test_pni_r2c.cpp \
+-o /media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/build/test_pni_r2c.o \
+-std=c++20 -O3 -march=native -fopenmp $(pkg-config --cflags --libs libpni) -ltbb && ./build/test_pni_r2c.o

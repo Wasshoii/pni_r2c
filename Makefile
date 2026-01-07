@@ -32,11 +32,15 @@ TEST_GRPC_TARGET = $(BIN_DIR)/test_distributed_clock_sync_grpc
 
 # Proto files
 PROTO_DIR = protos
-PROTO_SRC = $(PROTO_DIR)/timesync.proto
-PROTO_CC = $(PROTO_DIR)/timesync.pb.cc
-PROTO_H = $(PROTO_DIR)/timesync.pb.h
-PROTO_GRPC_CC = $(PROTO_DIR)/timesync.grpc.pb.cc
-PROTO_GRPC_H = $(PROTO_DIR)/timesync.grpc.pb.h
+PROTO_SRCS = $(wildcard $(PROTO_DIR)/*.proto)
+PROTO_PB_CCS = $(PROTO_SRCS:.proto=.pb.cc)
+PROTO_PB_HS = $(PROTO_SRCS:.proto=.pb.h)
+PROTO_GRPC_CCS = $(PROTO_SRCS:.proto=.grpc.pb.cc)
+PROTO_GRPC_HS = $(PROTO_SRCS:.proto=.grpc.pb.h)
+
+# Object files for protos
+PROTO_OBJS = $(patsubst $(PROTO_DIR)/%.proto,$(BUILD_DIR)/%.pb.o,$(PROTO_SRCS)) \
+             $(patsubst $(PROTO_DIR)/%.proto,$(BUILD_DIR)/%.grpc.pb.o,$(PROTO_SRCS))
 
 # Targets
 all: directories $(TEST_TARGET) $(TEST_GRPC_TARGET)
@@ -52,17 +56,24 @@ $(TEST_TARGET): $(TEST_SRC) | directories
 	@echo "Run: $(TEST_TARGET)"
 
 # 生成 Proto 和 gRPC 代码
-$(PROTO_CC) $(PROTO_H) $(PROTO_GRPC_CC) $(PROTO_GRPC_H): $(PROTO_SRC)
-	$(PROTOC) -I $(PROTO_DIR) --cpp_out=$(PROTO_DIR) $(PROTO_SRC)
-	$(PROTOC) -I $(PROTO_DIR) --grpc_out=$(PROTO_DIR) --plugin=protoc-gen-grpc=$(GRPC_CPP_PLUGIN) $(PROTO_SRC)
-	@echo "✓ Proto files generated"
+.PRECIOUS: $(PROTO_PB_CCS) $(PROTO_PB_HS) $(PROTO_GRPC_CCS) $(PROTO_GRPC_HS)
+
+$(PROTO_DIR)/%.pb.cc $(PROTO_DIR)/%.pb.h $(PROTO_DIR)/%.grpc.pb.cc $(PROTO_DIR)/%.grpc.pb.h: $(PROTO_DIR)/%.proto
+	$(PROTOC) -I $(PROTO_DIR) --cpp_out=$(PROTO_DIR) $<
+	$(PROTOC) -I $(PROTO_DIR) --grpc_out=$(PROTO_DIR) --plugin=protoc-gen-grpc=$(GRPC_CPP_PLUGIN) $<
+	@echo "✓ Proto files generated for $<"
+
+# 编译 Proto 对象文件
+$(BUILD_DIR)/%.pb.o: $(PROTO_DIR)/%.pb.cc | directories
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/%.grpc.pb.o: $(PROTO_DIR)/%.grpc.pb.cc | directories
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # 编译 gRPC 测试程序
-$(TEST_GRPC_TARGET): $(TEST_GRPC_SRC) $(PROTO_CC) $(PROTO_GRPC_CC) | directories
-	$(CXX) $(CXXFLAGS) -c $(PROTO_CC) -o build/timesync.pb.o
-	$(CXX) $(CXXFLAGS) -c $(PROTO_GRPC_CC) -o build/timesync.grpc.pb.o
+$(TEST_GRPC_TARGET): $(TEST_GRPC_SRC) $(PROTO_OBJS) | directories
 	$(CXX) $(CXXFLAGS) -c $(TEST_GRPC_SRC) -o build/test_grpc.o
-	$(CXX) $(CXXFLAGS) -o $(TEST_GRPC_TARGET) build/timesync.pb.o build/timesync.grpc.pb.o build/test_grpc.o $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) -o $(TEST_GRPC_TARGET) build/test_grpc.o $(PROTO_OBJS) $(LDFLAGS)
 	@echo "✓ gRPC test program compiled successfully"
 	@echo "Run: $(TEST_GRPC_TARGET)"
 

@@ -261,7 +261,12 @@ bool extract_multiple_channels_from_rawdata(
         }
 
         // 3. 创建输出文件
-        std::string outputFileName = inputPath.stem().string() + "_extracted.raw";
+        std::string outputFileName = inputPath.stem().string();
+        for (auto ch : channelIndices)
+        {
+            outputFileName += "_ch" + std::to_string(ch);
+        }
+        outputFileName += +".raw";
         fs::path outputPath = outputDir / outputFileName;
 
         openpni::io::RawFileOutput outputFile;

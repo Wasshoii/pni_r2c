@@ -90,22 +90,8 @@ void saveCoincidenceEvents(
     std::vector<openpni::experimental::node::LocalListmode> hostBuf;
     const openpni::experimental::node::LocalListmode *srcPtr = coins.data();
 
-    // Check if pointer is on Device
-    bool isDevice = false;
-    cudaPointerAttributes attr;
-    if (cudaPointerGetAttributes(&attr, srcPtr) == cudaSuccess)
-    {
-#if CUDART_VERSION >= 10000
-        if (attr.type == cudaMemoryTypeDevice)
-            isDevice = true;
-#else
-        if (attr.memoryType == cudaMemoryTypeDevice)
-            isDevice = true;
-#endif
-    }
-
     // GPU -> Host copy if needed
-    if (isDevice)
+    if (isDevicePointer(srcPtr))
     {
         hostBuf.resize(coins.size());
         cudaError_t err = cudaMemcpy(hostBuf.data(), srcPtr, coins.size() * sizeof(openpni::experimental::node::LocalListmode), cudaMemcpyDeviceToHost);
@@ -440,10 +426,6 @@ private:
 /**
  * @brief 合并多个 Single 文件为一个文件（支持分布式采集的时间偏差处理）
  *
- * 针对符合处理优化：
- * - 时间重叠的段会被合并到一起，避免重复符合
- * - 按时间排序后重新分段，确保时间连续性
- * - 自动检测并处理时间偏差
  *
  * @param inputFiles 输入的 Single 文件路径列表
  * @param outputFile 输出的合并后的 Single 文件路径
@@ -463,6 +445,7 @@ bool merge_single_files(
         return false;
     }
 
+    // 设置符合参数
     openpni::experimental::node::Coincidence coinNode;
     std::vector<uint32_t> crystalNumOfEachChannel(coinConfig.channelNum, coinConfig.crystalsPerChannel);
     coinNode.setTotalCrystalNumOfEachChannel(crystalNumOfEachChannel);

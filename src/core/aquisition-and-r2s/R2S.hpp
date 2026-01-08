@@ -4,6 +4,7 @@
 #include <pni/experimental/node/BDM2R2S.hpp>
 #include <pni/experimental/node/ConvergedR2S.hpp>
 #include <pni/experimental/node/Coincidence.hpp>
+#include "../tools/SinglesProcess.hpp"
 #include <iostream>
 #include <fstream>
 
@@ -55,6 +56,7 @@ struct R2SProcessConfig
     std::string outputFileName;                // 输出文件名
     u_int16_t channelNums;                     // 通道总数
     std::vector<uint16_t> channelIndices;      // 要处理的通道索引列表（空则处理所有通道）
+    bool sortDataByTime = false;               // 是否按时间排序输出数据
 
     R2SProcessConfig()
         : detectorType(DetectorType::Unknown), crystalsPerChannel(0), r2sResultIndex(0), outputFileName("singles")
@@ -313,10 +315,22 @@ bool processR2S(const R2SProcessConfig &config)
                         //     view.count);
 
                         // 保存单事件（使用标准格式）
-                        auto &singles = r2sResults[config.r2sResultIndex];
+                        auto &singlesSpan = r2sResults[config.r2sResultIndex];
+
+                        if (config.sortDataByTime)
+                        {
+                            // Sort data by time on GPU if needed
+                            if (isDevicePointer(singlesSpan.data()))
+                            {
+                                openpni::distributed::r2s::d_sortSinglesByTime_R2S(
+                                    const_cast<openpni::experimental::interface::LocalSingle *>(singlesSpan.data()),
+                                    singlesSpan.size());
+                            }
+                        }
+
                         bool success = appendSinglesToSingleFile(
                             singleOutput,
-                            singles,
+                            singlesSpan,
                             config.crystalsPerChannel,
                             segHeader.clock,
                             segHeader.duration);
@@ -326,12 +340,12 @@ bool processR2S(const R2SProcessConfig &config)
                             std::cerr << "Failed to append segment " << i << " to single file" << std::endl;
                         }
 
-                        totalCount_single += singles.size();
+                        totalCount_single += singlesSpan.size();
                         if (i % 10 == 0 || i == segmentNum - 1)
                         {
                             std::cout << "Segment " << i << "/" << segmentNum
                                       << ": Processed " << count << " packets, generated "
-                                      << singles.size() << " singles" << std::endl;
+                                      << singlesSpan.size() << " singles" << std::endl;
                         }
                     },
                     1);

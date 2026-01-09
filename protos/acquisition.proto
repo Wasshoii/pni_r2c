@@ -66,6 +66,16 @@ message NodeStatus {
     // 可以添加统计信息，如采集速率等
     double current_speed_mpps = 4;
     double current_bandwidth_mbps = 5;
+
+    // Buffer usage statistics
+    uint64 buffer_used = 6;
+    uint64 buffer_volume = 7;
+    float buffer_usage_percent = 8;
+
+    // Error statistics
+    uint64 total_rx_packets = 9;
+    uint64 total_rx_bytes = 10;
+    uint64 error_packets = 11; // unknown + dpdk errors
 }
 
 service AcquisitionControlService {

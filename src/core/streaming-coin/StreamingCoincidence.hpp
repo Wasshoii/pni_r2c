@@ -123,6 +123,9 @@ namespace openpni::distributed::streaming
 
             chunk.updateTimeRange();
 
+            // 更新水位线追踪：记录已收到数据的最大事件时间
+            m_maxEventTimeReceived = std::max(m_maxEventTimeReceived, chunk.maxTime_pico);
+
             // 乱序处理：按 minTime_pico 插入到正确位置
             // 由于同节点数据段不重叠，通常只需要检查末尾几个元素
             if (m_buffer.empty() || chunk.minTime_pico >= m_buffer.back().minTime_pico)
@@ -186,6 +189,85 @@ namespace openpni::distributed::streaming
         }
 
         /**
+         * @brief 提取所有 timeValue_pico <= boundary 的事件（精确时间边界）
+         *
+         * 与完整段提取不同，此方法会拆分跨越边界的段：
+         * - 完全在边界内的段（maxTime <= boundary）：整个提取
+         * - 跨越边界的段（minTime <= boundary < maxTime）：只提取边界内的事件
+         * - 完全在边界外的段（minTime > boundary）：不提取
+         *
+         * @param boundary 时间边界（pico）
+         * @return 提取的单事件数据
+         */
+        std::vector<openpni::basic::GlobalSingle_t> extractSinglesBefore(uint64_t boundary)
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            std::vector<openpni::basic::GlobalSingle_t> result;
+
+            while (!m_buffer.empty())
+            {
+                auto &frontChunk = m_buffer.front();
+
+                if (frontChunk.maxTime_pico <= boundary)
+                {
+                    // 情况1：整个段都在边界内，全部提取
+                    result.insert(result.end(),
+                                  std::make_move_iterator(frontChunk.singles.begin()),
+                                  std::make_move_iterator(frontChunk.singles.end()));
+                    m_buffer.pop_front();
+                }
+                else if (frontChunk.minTime_pico <= boundary)
+                {
+                    // 情况2：段跨越边界，需要拆分
+                    // 段内数据已按 timeValue_pico 排序，使用二分查找 O(log n)
+                    // upper_bound 找到第一个 > boundary 的位置
+                    auto splitPoint = std::upper_bound(
+                        frontChunk.singles.begin(),
+                        frontChunk.singles.end(),
+                        boundary,
+                        [](uint64_t bound, const openpni::basic::GlobalSingle_t &s)
+                        {
+                            return bound < s.timeValue_pico;
+                        });
+
+                    // 提取边界内的事件 [begin, splitPoint)
+                    if (splitPoint != frontChunk.singles.begin())
+                    {
+                        result.insert(result.end(),
+                                      std::make_move_iterator(frontChunk.singles.begin()),
+                                      std::make_move_iterator(splitPoint));
+
+                        // 移除已提取的事件
+                        frontChunk.singles.erase(frontChunk.singles.begin(), splitPoint);
+
+                        // 更新时间范围
+                        frontChunk.updateTimeRange();
+                    }
+
+                    // 如果段为空，移除
+                    if (frontChunk.singles.empty())
+                    {
+                        m_buffer.pop_front();
+                    }
+
+                    // 跨越边界的段处理完后停止（后续段必然在边界外）
+                    break;
+                }
+                else
+                {
+                    // 情况3：整个段都在边界外（minTime > boundary），停止
+                    break;
+                }
+            }
+
+            if (!result.empty())
+            {
+                m_cvNotFull.notify_one();
+            }
+            return result;
+        }
+
+        /**
          * @brief 提取所有 maxTime_pico <= boundary 的完整段
          */
         std::vector<TimestampedSingleChunk> extractCompleteBefore(uint64_t boundary)
@@ -213,6 +295,17 @@ namespace openpni::distributed::streaming
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             return m_buffer.empty() ? UINT64_MAX : m_buffer.front().minTime_pico;
+        }
+
+        /**
+         * @brief 获取已收到数据的最大事件时间（水位线追踪）
+         *
+         * 这代表该节点"已报告到的时间点"，用于计算全局水位线
+         */
+        uint64_t getMaxEventTime() const
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return m_maxEventTimeReceived;
         }
 
         /**
@@ -270,8 +363,9 @@ namespace openpni::distributed::streaming
 
         bool m_closed = false;
         uint64_t m_expectedChunkId = 0;
-        size_t m_outOfOrderCount = 0; // chunkId 乱序计数
-        size_t m_reorderedCount = 0;  // 实际重排序次数
+        size_t m_outOfOrderCount = 0;        // chunkId 乱序计数
+        size_t m_reorderedCount = 0;         // 实际重排序次数
+        uint64_t m_maxEventTimeReceived = 0; // 已收到数据的最大事件时间（水位线追踪）
     };
 
     /**
@@ -279,8 +373,19 @@ namespace openpni::distributed::streaming
      */
     struct TimeAlignerConfig
     {
-        // 安全边距配置
-        uint64_t safetyMargin_pico = 10'000'000'000; // 10ms 安全边距
+        // ==================== 水位线与安全裕量配置 ====================
+        /**
+         * @brief 网络延迟安全裕量（pico）
+         *
+         * 考虑因素：
+         * - 网络传输延迟
+         * - 各节点处理延迟不一致
+         * - 数据块不是严格按时间顺序到达
+         *
+         * 例：节点A在 T=100μs 发送时间戳为 T=95μs 的事件，
+         * 由于网络延迟，可能在其他节点已报告 T=98μs 后才到达。
+         */
+        uint64_t networkLatencyMargin_pico = 5'000'000'000; // 5ms 网络延迟裕量
 
         // 符合处理配置
         openpni::experimental::node::CoincidenceProtocol coinProtocol;
@@ -295,6 +400,24 @@ namespace openpni::distributed::streaming
         // 性能配置
         size_t maxChunksPerNode = 100;     // 每节点最大缓冲块数
         uint32_t processingIntervalMs = 5; // 处理循环间隔
+
+        /**
+         * @brief 计算总安全裕量
+         *
+         * 总安全裕量 = 网络延迟裕量 + 符合时间窗口 + 延迟符合窗口
+         * 确保在水位线之前的所有可能形成符合对的事件都已到达
+         */
+        uint64_t getTotalSafetyMargin() const
+        {
+            // 符合时间窗口（ps -> pico）
+            uint64_t coinWindow_pico = static_cast<uint64_t>(coinProtocol.timeWindow_ps);
+            // 延迟符合窗口（ps -> pico）
+            uint64_t delayWindow_pico = static_cast<uint64_t>(coinProtocol.delayTime_ps);
+
+            // 总裕量 = 网络延迟 + max(符合窗口, 延迟窗口)
+            // 延迟窗口通常更大，是主要考虑因素
+            return networkLatencyMargin_pico + std::max(coinWindow_pico, delayWindow_pico);
+        }
     };
 
     // ==================== 统计信息 ====================
@@ -458,62 +581,90 @@ namespace openpni::distributed::streaming
         }
 
         /**
-         * @brief 计算全局安全时间边界
+         * @brief 计算全局水位线（Watermark）
          *
-         * 安全边界 = min(各节点队首段的 minTime_pico) - safetyMargin
-         * 只提取 maxTime_pico <= 安全边界 的完整段
+         * 水位线设计原理：
+         * ```
+         * 节点A的数据流:  ──●──●────●──●──────●───────→ 时间
+         *                            ↑
+         *                     A的最大事件时间 = 50μs
+         *
+         * 节点B的数据流: ──●────●──●──────●───────────→ 时间
+         *                               ↑
+         *                        B的最大事件时间 = 45μs
+         *
+         * 节点C的数据流: ──●──●──●────●────────────────→ 时间
+         *                           ↑
+         *                    C的最大事件时间 = 40μs
+         *
+         * 全局水位线 = min(50, 45, 40) - 安全裕量 = 40 - 5 = 35μs
+         * 在35μs之前的所有数据都可以安全处理！
+         * ```
+         *
+         * @return 水位线时间（pico），0 表示数据不足
          */
-        uint64_t calculateSafeTimeBoundary() const
+        uint64_t calculateWatermark() const
         {
-            uint64_t globalMinTime = UINT64_MAX;
+            uint64_t globalMinMaxTime = UINT64_MAX;
             size_t nodesWithData = 0;
 
             for (const auto &buf : m_nodeBuffers)
             {
-                uint64_t frontMinTime = buf->getFrontMinTime();
-                if (frontMinTime != UINT64_MAX)
+                uint64_t nodeMaxTime = buf->getMaxEventTime();
+                if (nodeMaxTime > 0)
                 {
-                    globalMinTime = std::min(globalMinTime, frontMinTime);
+                    // 取各节点"最大事件时间"的最小值
+                    globalMinMaxTime = std::min(globalMinMaxTime, nodeMaxTime);
                     nodesWithData++;
                 }
             }
 
-            // 如果没有数据或不是所有节点都有数据，返回0
-            if (nodesWithData == 0 || nodesWithData < m_nodeCount)
+            // 要求所有节点都有数据才能计算有效水位线
+            // 否则可能遗漏某个节点的早期数据
+            if (nodesWithData < m_nodeCount || globalMinMaxTime == UINT64_MAX)
             {
                 return 0;
             }
 
-            // 安全边界 = 全局最小时间 - 安全边距
-            if (globalMinTime > m_config.safetyMargin_pico)
+            // 水位线 = 全局最小的"最大事件时间" - 总安全裕量
+            uint64_t safetyMargin = m_config.getTotalSafetyMargin();
+
+            if (globalMinMaxTime > safetyMargin)
             {
-                return globalMinTime - m_config.safetyMargin_pico;
+                return globalMinMaxTime - safetyMargin;
             }
             return 0;
         }
 
         /**
-         * @brief 核心处理循环（简化版）
+         * @brief 核心处理循环（水位线版）
          *
-         * 简化策略：
-         * 1. 计算安全边界 = min(各节点队首段的 minTime_pico) - safetyMargin
-         * 2. 提取所有 maxTime_pico <= 安全边界 的完整段
+         * 水位线策略：
+         * 1. 计算全局水位线 = min(各节点最大事件时间) - 安全裕量
+         * 2. 提取所有 maxTime_pico <= 水位线 的完整段
          * 3. 直接拼接（不预排序），符合计算内部处理排序
+         *
+         * 为什么用水位线而不是队首 minTime？
+         * - 水位线基于各节点"已报告到的时间点"
+         * - 确保在水位线之前的所有事件都已到达
+         * - 避免因某个节点数据延迟导致的符合对丢失
          */
         void processingLoop()
         {
             size_t consecutiveEmptyRounds = 0;
             const size_t maxEmptyRounds = 100;
+            uint64_t lastWatermark = 0;
 
             while (m_running.load())
             {
                 auto startTime = std::chrono::high_resolution_clock::now();
 
-                // 1. 计算安全边界
-                uint64_t safeTimeBoundary = calculateSafeTimeBoundary();
+                // 1. 计算全局水位线
+                uint64_t watermark = calculateWatermark();
 
-                if (safeTimeBoundary == 0)
+                if (watermark == 0 || watermark <= lastWatermark)
                 {
+                    // 水位线未前进，等待更多数据
                     consecutiveEmptyRounds++;
                     if (consecutiveEmptyRounds > maxEmptyRounds && !m_running.load())
                     {
@@ -526,20 +677,18 @@ namespace openpni::distributed::streaming
 
                 consecutiveEmptyRounds = 0;
 
-                // 2. 从各节点提取完整段并直接拼接
+                // 2. 从各节点精确提取水位线之前的事件
                 std::vector<openpni::basic::GlobalSingle_t> allSingles;
-                size_t chunksExtracted = 0;
 
                 for (auto &buf : m_nodeBuffers)
                 {
-                    auto chunks = buf->extractCompleteBefore(safeTimeBoundary);
-                    for (auto &chunk : chunks)
+                    // 使用精确时间边界提取，会拆分跨越边界的段
+                    auto singles = buf->extractSinglesBefore(watermark);
+                    if (!singles.empty())
                     {
-                        // 直接追加，无需排序（符合计算内部处理）
                         allSingles.insert(allSingles.end(),
-                                          std::make_move_iterator(chunk.singles.begin()),
-                                          std::make_move_iterator(chunk.singles.end()));
-                        chunksExtracted++;
+                                          std::make_move_iterator(singles.begin()),
+                                          std::make_move_iterator(singles.end()));
                     }
                 }
 
@@ -549,10 +698,12 @@ namespace openpni::distributed::streaming
                     processCoincidence(allSingles);
 
                     m_stats.totalSinglesProcessed += allSingles.size();
-                    m_stats.chunksProcessed += chunksExtracted;
+                    m_stats.chunksProcessed++;
                 }
 
-                m_stats.currentTimeBoundary_pico = safeTimeBoundary;
+                // 更新水位线记录
+                lastWatermark = watermark;
+                m_stats.currentTimeBoundary_pico = watermark;
 
                 // 计算处理时间
                 auto endTime = std::chrono::high_resolution_clock::now();

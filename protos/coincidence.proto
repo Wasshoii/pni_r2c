@@ -1,0 +1,192 @@
+// 符合计算服务 gRPC 协议定义
+// 用于分布式 PET 数据处理系统
+
+syntax = "proto3";
+
+package openpni.distributed.coincidence;
+
+option cc_enable_arenas = true;
+
+// ==================== 消息定义 ====================
+
+// 单个单事件数据
+message SingleEvent {
+    uint32 crystal_index = 1;    // 全局晶体索引
+    float energy = 2;            // 能量 (eV)
+    uint64 time_pico = 3;        // PET 时钟时间戳 (pico秒)
+}
+
+// 单事件数据块（从分布式节点发送到主节点）
+message SingleChunkMessage {
+    uint32 node_id = 1;           // 节点ID
+    uint64 chunk_id = 2;          // 块序号（用于顺序保证）
+    uint64 computer_clock_ms = 3; // 计算机时钟（ms，粗略参考）
+    uint32 duration_ms = 4;       // 持续时间（ms）
+    repeated SingleEvent singles = 5; // 单事件数据列表
+}
+
+// 流式传输响应
+message StreamResponse {
+    bool success = 1;
+    uint64 singles_received = 2;
+    string message = 3;
+}
+
+// 状态请求
+message StatusRequest {
+    // 可选：指定要查询的详细信息
+    bool include_node_stats = 1;
+}
+
+// 节点状态
+message NodeStatus {
+    uint32 node_id = 1;
+    uint64 chunks_received = 2;
+    uint64 singles_received = 3;
+    uint64 buffer_size = 4;
+    bool connected = 5;
+}
+
+// 状态响应
+message StatusResponse {
+    uint64 total_singles_received = 1;
+    uint64 total_singles_processed = 2;
+    uint64 total_prompt_pairs = 3;
+    uint64 total_delay_pairs = 4;
+    uint64 alignment_windows_processed = 5;
+    double avg_processing_time_ms = 6;
+    uint64 current_time_boundary_pico = 7;
+    bool is_running = 8;
+    repeated NodeStatus node_stats = 9;
+}
+
+// 控制命令
+message ControlRequest {
+    enum Command {
+        START = 0;
+        STOP = 1;
+        PAUSE = 2;
+        RESUME = 3;
+        FLUSH = 4;
+    }
+    Command command = 1;
+    bool wait_for_completion = 2; // 用于 STOP 命令
+}
+
+// 控制响应
+message ControlResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// 配置更新请求
+message ConfigUpdateRequest {
+    // 符合协议参数
+    int32 time_window_ps = 1;
+    int32 delay_time_ps = 2;
+    float energy_lower_ev = 3;
+    float energy_upper_ev = 4;
+    
+    // 处理参数
+    uint64 alignment_window_pico = 5;
+    uint64 safety_margin_pico = 6;
+}
+
+// 配置更新响应
+message ConfigUpdateResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// 节点注册请求
+message RegisterNodeRequest {
+    uint32 node_id = 1;
+    string node_address = 2;
+    uint32 channel_count = 3;
+    string detector_type = 4; // "BDM2" or "BDMBiD"
+}
+
+// 节点注册响应
+message RegisterNodeResponse {
+    bool success = 1;
+    string message = 2;
+    uint32 assigned_node_id = 3;
+}
+
+// 心跳请求
+message HeartbeatRequest {
+    uint32 node_id = 1;
+    uint64 timestamp_ms = 2;
+    uint64 singles_sent = 3;
+}
+
+// 心跳响应
+message HeartbeatResponse {
+    bool acknowledged = 1;
+    uint64 server_timestamp_ms = 2;
+}
+
+// ==================== 服务定义 ====================
+
+// 符合计算主服务
+service CoincidenceService {
+    // 流式接收单事件数据（核心接口）
+    rpc StreamSingles(stream SingleChunkMessage) returns (StreamResponse);
+    
+    // 获取处理状态
+    rpc GetStatus(StatusRequest) returns (StatusResponse);
+    
+    // 控制命令
+    rpc Control(ControlRequest) returns (ControlResponse);
+    
+    // 更新配置
+    rpc UpdateConfig(ConfigUpdateRequest) returns (ConfigUpdateResponse);
+    
+    // 节点注册
+    rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
+    
+    // 心跳
+    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+// 分布式节点服务（可选，用于主节点向从节点发送命令）
+service NodeService {
+    // 开始采集
+    rpc StartAcquisition(StartAcquisitionRequest) returns (StartAcquisitionResponse);
+    
+    // 停止采集
+    rpc StopAcquisition(StopAcquisitionRequest) returns (StopAcquisitionResponse);
+    
+    // 获取节点状态
+    rpc GetNodeStatus(NodeStatusRequest) returns (NodeStatusResponse);
+}
+
+// 采集控制消息
+message StartAcquisitionRequest {
+    uint64 start_time_ms = 1;  // 约定的开始时间
+    uint32 duration_ms = 2;    // 采集持续时间（0 = 无限）
+}
+
+message StartAcquisitionResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message StopAcquisitionRequest {
+    bool flush_buffer = 1;     // 是否刷新缓冲区
+}
+
+message StopAcquisitionResponse {
+    bool success = 1;
+    uint64 total_singles_sent = 2;
+}
+
+message NodeStatusRequest {
+}
+
+message NodeStatusResponse {
+    bool is_acquiring = 1;
+    uint64 singles_generated = 2;
+    uint64 singles_sent = 3;
+    uint64 buffer_usage = 4;
+}

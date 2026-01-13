@@ -138,11 +138,11 @@ bool testNodeRingBuffer()
         return false;
     }
 
-    // 测试 peek
-    const auto *peeked = buffer.peek();
+    // 测试 front
+    const auto *peeked = buffer.front();
     if (!peeked || peeked->chunkId != 0)
     {
-        std::cerr << "FAIL: Peek should return the pushed chunk" << std::endl;
+        std::cerr << "FAIL: front() should return the pushed chunk" << std::endl;
         return false;
     }
 
@@ -237,10 +237,11 @@ bool testTimeRangeCalculation()
     std::cout << "\n=== Test 3: Time Range Calculation ===" << std::endl;
 
     TimestampedSingleChunk chunk;
-    chunk.singles.push_back({0, 500000, 1000});
-    chunk.singles.push_back({1, 500000, 5000});
-    chunk.singles.push_back({2, 500000, 3000});
-    chunk.singles.push_back({3, 500000, 2000});
+    // GlobalSingle_t: {globalCrystalIndex, timeValue_pico, energy}
+    chunk.singles.push_back({0, 1000, 500000.0f});
+    chunk.singles.push_back({1, 5000, 500000.0f});
+    chunk.singles.push_back({2, 3000, 500000.0f});
+    chunk.singles.push_back({3, 2000, 500000.0f});
 
     chunk.updateTimeRange();
 

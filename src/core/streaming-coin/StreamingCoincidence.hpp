@@ -25,6 +25,179 @@ namespace openpni::distributed::streaming
 
     namespace fs = std::filesystem;
 
+    // ==================== 共享内存池 ====================
+
+    /**
+     * @brief 共享内存池
+     *
+     * 用于限制所有节点缓冲区的总内存使用量。
+     * 当内存超限时，生产者会被阻塞直到有足够空间。
+     */
+    class SharedMemoryPool
+    {
+    public:
+        /**
+         * @brief 内存状态信息
+         */
+        struct MemoryStatus
+        {
+            size_t usedBytes;
+            size_t maxBytes;
+            double usageRatio;
+        };
+
+        /**
+         * @brief 构造函数
+         * @param maxMemoryBytes 最大内存限制（字节），默认 1GB
+         */
+        explicit SharedMemoryPool(size_t maxMemoryBytes = 1ULL * 1024 * 1024 * 1024)
+            : m_maxMemoryBytes(maxMemoryBytes), m_usedMemoryBytes(0) {}
+
+        /**
+         * @brief 尝试分配内存
+         * @param bytes 请求的字节数
+         * @param timeoutMs 超时时间（毫秒），0 表示无限等待
+         * @return 分配成功返回 true
+         */
+        bool tryAllocate(size_t bytes, uint32_t timeoutMs = 0)
+        {
+            std::unique_lock<std::mutex> lock(m_mutex);
+
+            auto canAllocate = [this, bytes]()
+            {
+                return m_usedMemoryBytes + bytes <= m_maxMemoryBytes || m_closed;
+            };
+
+            if (timeoutMs == 0)
+            {
+                m_cvAvailable.wait(lock, canAllocate);
+            }
+            else
+            {
+                if (!m_cvAvailable.wait_for(lock,
+                                            std::chrono::milliseconds(timeoutMs),
+                                            canAllocate))
+                {
+                    return false; // 超时
+                }
+            }
+
+            if (m_closed)
+                return false;
+
+            m_usedMemoryBytes += bytes;
+            m_peakMemoryBytes = std::max(m_peakMemoryBytes, m_usedMemoryBytes);
+            m_totalAllocations++;
+            return true;
+        }
+
+        /**
+         * @brief 释放内存
+         * @param bytes 释放的字节数
+         */
+        void release(size_t bytes)
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (bytes > m_usedMemoryBytes)
+            {
+                std::cerr << "[SharedMemoryPool] Warning: releasing more than allocated ("
+                          << bytes << " > " << m_usedMemoryBytes << ")" << std::endl;
+                m_usedMemoryBytes = 0;
+            }
+            else
+            {
+                m_usedMemoryBytes -= bytes;
+            }
+            m_cvAvailable.notify_all();
+        }
+
+        /**
+         * @brief 获取当前使用的内存
+         */
+        size_t getUsedMemory() const
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return m_usedMemoryBytes;
+        }
+
+        /**
+         * @brief 获取峰值内存使用量
+         */
+        size_t getPeakMemory() const
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return m_peakMemoryBytes;
+        }
+
+        /**
+         * @brief 获取最大内存限制
+         */
+        size_t getMaxMemory() const { return m_maxMemoryBytes; }
+
+        /**
+         * @brief 获取内存使用率 (0.0 - 1.0)
+         */
+        double getUsageRatio() const
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return static_cast<double>(m_usedMemoryBytes) / m_maxMemoryBytes;
+        }
+
+        /**
+         * @brief 获取总分配次数
+         */
+        size_t getTotalAllocations() const
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return m_totalAllocations;
+        }
+
+        /**
+         * @brief 关闭内存池，唤醒所有等待线程
+         */
+        void close()
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_closed = true;
+            m_cvAvailable.notify_all();
+        }
+
+        /**
+         * @brief 获取内存状态信息
+         */
+        MemoryStatus getStatus() const
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return MemoryStatus{
+                m_usedMemoryBytes,
+                m_maxMemoryBytes,
+                static_cast<double>(m_usedMemoryBytes) / m_maxMemoryBytes};
+        }
+
+        /**
+         * @brief 打印内存池状态
+         */
+        void printStatus() const
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            std::cout << "[SharedMemoryPool] Status:\n"
+                      << "  Max memory:   " << (m_maxMemoryBytes / 1024.0 / 1024.0) << " MB\n"
+                      << "  Used memory:  " << (m_usedMemoryBytes / 1024.0 / 1024.0) << " MB ("
+                      << (100.0 * m_usedMemoryBytes / m_maxMemoryBytes) << "%)\n"
+                      << "  Peak memory:  " << (m_peakMemoryBytes / 1024.0 / 1024.0) << " MB\n"
+                      << "  Allocations:  " << m_totalAllocations << "\n";
+        }
+
+    private:
+        size_t m_maxMemoryBytes;
+        size_t m_usedMemoryBytes;
+        size_t m_peakMemoryBytes = 0;
+        size_t m_totalAllocations = 0;
+        bool m_closed = false;
+        mutable std::mutex m_mutex;
+        std::condition_variable m_cvAvailable;
+    };
+
     // ==================== 数据结构 ====================
 
     /**
@@ -68,6 +241,24 @@ namespace openpni::distributed::streaming
             }
         }
 
+        /**
+         * @brief 计算此 chunk 占用的内存大小（字节）
+         */
+        size_t memorySize() const
+        {
+            // 固定字段 + vector 容量 * 元素大小
+            return sizeof(TimestampedSingleChunk) +
+                   singles.capacity() * sizeof(openpni::basic::GlobalSingle_t);
+        }
+
+        /**
+         * @brief 计算 singles 数据占用的内存大小（字节）
+         */
+        size_t singlesMemorySize() const
+        {
+            return singles.capacity() * sizeof(openpni::basic::GlobalSingle_t);
+        }
+
         // 用于按 PET 时间排序（处理网络乱序）
         bool operator<(const TimestampedSingleChunk &other) const
         {
@@ -84,12 +275,20 @@ namespace openpni::distributed::streaming
      * - 线程安全的生产者-消费者模式
      * - 按 minTime_pico 排序插入（处理网络乱序）
      * - 同一节点的数据段不重叠，按时间顺序排列
+     * - 支持共享内存池进行全局内存限制
      */
     class NodeRingBuffer
     {
     public:
-        explicit NodeRingBuffer(uint16_t nodeId, size_t maxChunks = 100)
-            : m_nodeId(nodeId), m_maxChunks(maxChunks) {}
+        /**
+         * @brief 构造函数
+         * @param nodeId 节点ID
+         * @param maxChunks 最大 chunk 数量限制
+         * @param memoryPool 共享内存池（可选，nullptr 表示不限制内存）
+         */
+        explicit NodeRingBuffer(uint16_t nodeId, size_t maxChunks = 100,
+                                SharedMemoryPool *memoryPool = nullptr)
+            : m_nodeId(nodeId), m_maxChunks(maxChunks), m_memoryPool(memoryPool) {}
 
         /**
          * @brief 生产者：接收来自节点的数据块
@@ -97,18 +296,60 @@ namespace openpni::distributed::streaming
          * 处理网络乱序：按 minTime_pico 插入到正确位置
          *
          * @param chunk 数据块（移动语义）
-         * @return 成功返回true，缓冲区关闭返回false
+         * @param timeoutMs 超时时间（毫秒），0 表示无限等待
+         * @return 成功返回true，缓冲区关闭或内存不足返回false
          */
-        bool push(TimestampedSingleChunk &&chunk)
+        bool push(TimestampedSingleChunk &&chunk, uint32_t timeoutMs = 0)
         {
+            // 计算此 chunk 占用的内存
+            size_t chunkMemory = chunk.memorySize();
+
+            // 如果有内存池，先申请内存配额
+            if (m_memoryPool)
+            {
+                if (!m_memoryPool->tryAllocate(chunkMemory, timeoutMs))
+                {
+                    std::cerr << "[NodeRingBuffer] Node " << m_nodeId
+                              << " failed to allocate memory for chunk "
+                              << chunk.chunkId << std::endl;
+                    return false; // 内存池关闭或分配失败
+                }
+            }
+
             std::unique_lock<std::mutex> lock(m_mutex);
 
-            // 等待空间可用
-            m_cvNotFull.wait(lock, [this]
-                             { return m_buffer.size() < m_maxChunks || m_closed; });
+            // 等待空间可用（chunk 数量限制）
+            auto canPush = [this]
+            { return m_buffer.size() < m_maxChunks || m_closed; };
+
+            if (timeoutMs == 0)
+            {
+                m_cvNotFull.wait(lock, canPush);
+            }
+            else
+            {
+                if (!m_cvNotFull.wait_for(lock, std::chrono::milliseconds(timeoutMs), canPush))
+                {
+                    // 超时，归还内存配额
+                    if (m_memoryPool)
+                    {
+                        m_memoryPool->release(chunkMemory);
+                    }
+                    std::cerr << "[NodeRingBuffer] Node " << m_nodeId
+                              << " push timeout for chunk " << chunk.chunkId << std::endl;
+                    return false;
+                }
+            }
 
             if (m_closed)
+            {
+                // 归还内存配额
+                if (m_memoryPool)
+                {
+                    m_memoryPool->release(chunkMemory);
+                }
                 return false;
+            }
 
             // 检查块序号连续性（警告但不阻止）
             if (m_expectedChunkId > 0 && chunk.chunkId != m_expectedChunkId)
@@ -125,6 +366,9 @@ namespace openpni::distributed::streaming
 
             // 更新水位线追踪：记录已收到数据的最大事件时间
             m_maxEventTimeReceived = std::max(m_maxEventTimeReceived, chunk.maxTime_pico);
+
+            // 记录此 chunk 的内存占用（用于释放时计算）
+            m_bufferMemoryBytes += chunkMemory;
 
             // 乱序处理：按 minTime_pico 插入到正确位置
             // 由于同节点数据段不重叠，通常只需要检查末尾几个元素
@@ -168,7 +412,17 @@ namespace openpni::distributed::streaming
                 return std::nullopt;
 
             auto chunk = std::move(m_buffer.front());
+            size_t chunkMemory = chunk.memorySize();
             m_buffer.pop_front();
+            m_bufferMemoryBytes -= chunkMemory;
+
+            // 释放内存池配额
+            if (m_memoryPool)
+            {
+                lock.unlock(); // 释放锁后再操作内存池，避免死锁
+                m_memoryPool->release(chunkMemory);
+            }
+
             m_cvNotFull.notify_one();
             return chunk;
         }
@@ -183,7 +437,16 @@ namespace openpni::distributed::streaming
                 return std::nullopt;
 
             auto chunk = std::move(m_buffer.front());
+            size_t chunkMemory = chunk.memorySize();
             m_buffer.pop_front();
+            m_bufferMemoryBytes -= chunkMemory;
+
+            // 释放内存池配额（注意：这里持有锁，但 release 不会死锁）
+            if (m_memoryPool)
+            {
+                m_memoryPool->release(chunkMemory);
+            }
+
             m_cvNotFull.notify_one();
             return chunk;
         }
@@ -201,8 +464,9 @@ namespace openpni::distributed::streaming
          */
         std::vector<openpni::basic::GlobalSingle_t> extractSinglesBefore(uint64_t boundary)
         {
-            std::lock_guard<std::mutex> lock(m_mutex);
+            std::unique_lock<std::mutex> lock(m_mutex);
             std::vector<openpni::basic::GlobalSingle_t> result;
+            size_t releasedMemory = 0;
 
             while (!m_buffer.empty())
             {
@@ -211,10 +475,13 @@ namespace openpni::distributed::streaming
                 if (frontChunk.maxTime_pico <= boundary)
                 {
                     // 情况1：整个段都在边界内，全部提取
+                    size_t chunkMemory = frontChunk.memorySize();
                     result.insert(result.end(),
                                   std::make_move_iterator(frontChunk.singles.begin()),
                                   std::make_move_iterator(frontChunk.singles.end()));
                     m_buffer.pop_front();
+                    m_bufferMemoryBytes -= chunkMemory;
+                    releasedMemory += chunkMemory;
                 }
                 else if (frontChunk.minTime_pico <= boundary)
                 {
@@ -233,6 +500,9 @@ namespace openpni::distributed::streaming
                     // 提取边界内的事件 [begin, splitPoint)
                     if (splitPoint != frontChunk.singles.begin())
                     {
+                        size_t extractedCount = std::distance(frontChunk.singles.begin(), splitPoint);
+                        size_t extractedMemory = extractedCount * sizeof(openpni::basic::GlobalSingle_t);
+
                         result.insert(result.end(),
                                       std::make_move_iterator(frontChunk.singles.begin()),
                                       std::make_move_iterator(splitPoint));
@@ -242,12 +512,20 @@ namespace openpni::distributed::streaming
 
                         // 更新时间范围
                         frontChunk.updateTimeRange();
+
+                        // 注意：部分提取时，内存并未真正释放（vector 不会自动缩容）
+                        // 这里我们近似地释放内存配额
+                        releasedMemory += extractedMemory;
+                        m_bufferMemoryBytes -= extractedMemory;
                     }
 
                     // 如果段为空，移除
                     if (frontChunk.singles.empty())
                     {
+                        size_t remainingMemory = frontChunk.memorySize();
                         m_buffer.pop_front();
+                        m_bufferMemoryBytes -= remainingMemory;
+                        releasedMemory += remainingMemory;
                     }
 
                     // 跨越边界的段处理完后停止（后续段必然在边界外）
@@ -260,9 +538,16 @@ namespace openpni::distributed::streaming
                 }
             }
 
+            // 释放内存池配额
+            if (m_memoryPool && releasedMemory > 0)
+            {
+                lock.unlock();
+                m_memoryPool->release(releasedMemory);
+            }
+
             if (!result.empty())
             {
-                m_cvNotFull.notify_one();
+                m_cvNotFull.notify_all();
             }
             return result;
         }
@@ -275,10 +560,22 @@ namespace openpni::distributed::streaming
             std::lock_guard<std::mutex> lock(m_mutex);
             std::vector<TimestampedSingleChunk> result;
 
+            size_t releasedBytes = 0;
             while (!m_buffer.empty() && m_buffer.front().maxTime_pico <= boundary)
             {
+                releasedBytes += m_buffer.front().memorySize();
                 result.push_back(std::move(m_buffer.front()));
                 m_buffer.pop_front();
+            }
+
+            // 释放内存池配额
+            if (releasedBytes > 0)
+            {
+                m_bufferMemoryBytes -= releasedBytes;
+                if (m_memoryPool)
+                {
+                    m_memoryPool->release(releasedBytes);
+                }
             }
 
             if (!result.empty())
@@ -351,9 +648,19 @@ namespace openpni::distributed::streaming
             return m_closed;
         }
 
+        /**
+         * @brief 获取此缓冲区当前占用的内存（字节）
+         */
+        size_t getBufferMemoryBytes() const
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return m_bufferMemoryBytes;
+        }
+
     private:
         uint16_t m_nodeId;
         size_t m_maxChunks;
+        SharedMemoryPool *m_memoryPool; // 共享内存池（可选）
         mutable std::mutex m_mutex;
         std::condition_variable m_cvNotEmpty;
         std::condition_variable m_cvNotFull;
@@ -366,6 +673,7 @@ namespace openpni::distributed::streaming
         size_t m_outOfOrderCount = 0;        // chunkId 乱序计数
         size_t m_reorderedCount = 0;         // 实际重排序次数
         uint64_t m_maxEventTimeReceived = 0; // 已收到数据的最大事件时间（水位线追踪）
+        size_t m_bufferMemoryBytes = 0;      // 此缓冲区当前占用的内存
     };
 
     /**
@@ -398,8 +706,12 @@ namespace openpni::distributed::streaming
         bool saveDelay = true;
 
         // 性能配置
-        size_t maxChunksPerNode = 100;     // 每节点最大缓冲块数
-        uint32_t processingIntervalMs = 5; // 处理循环间隔
+        size_t maxChunksPerNode = 100;       // 每节点最大缓冲块数
+        uint32_t processingIntervalMs = 200; // 处理循环间隔，pni采集设置中每次读出数据大约为100ms，这里设置为200ms以平衡延迟和效率
+
+        // 内存池配置
+        size_t maxTotalMemoryBytes = 2ULL * 1024 * 1024 * 1024; // 2GB 默认最大内存
+        bool useMemoryPool = true;                              // 是否启用内存池限制
 
         /**
          * @brief 计算总安全裕量
@@ -467,11 +779,21 @@ namespace openpni::distributed::streaming
         StreamingTimeAligner(const TimeAlignerConfig &config, size_t nodeCount)
             : m_config(config), m_nodeCount(nodeCount)
         {
+            // 创建共享内存池（如果启用）
+            if (config.useMemoryPool)
+            {
+                m_memoryPool = std::make_unique<SharedMemoryPool>(config.maxTotalMemoryBytes);
+                std::cout << "[StreamingTimeAligner] Memory pool enabled: "
+                          << (config.maxTotalMemoryBytes / (1024 * 1024)) << " MB limit"
+                          << std::endl;
+            }
+
             // 为每个节点创建缓冲区
+            SharedMemoryPool *poolPtr = m_memoryPool.get();
             for (size_t i = 0; i < nodeCount; ++i)
             {
                 m_nodeBuffers.push_back(
-                    std::make_unique<NodeRingBuffer>(i, config.maxChunksPerNode));
+                    std::make_unique<NodeRingBuffer>(i, config.maxChunksPerNode, poolPtr));
             }
 
             // 初始化符合处理器
@@ -524,6 +846,12 @@ namespace openpni::distributed::streaming
             if (!m_running.exchange(false))
                 return;
 
+            // 关闭内存池（唤醒所有等待的生产者）
+            if (m_memoryPool)
+            {
+                m_memoryPool->close();
+            }
+
             for (auto &buf : m_nodeBuffers)
             {
                 buf->close();
@@ -541,6 +869,18 @@ namespace openpni::distributed::streaming
         const ProcessingStatistics &getStatistics() const { return m_stats; }
         bool isRunning() const { return m_running.load(); }
         size_t getNodeCount() const { return m_nodeCount; }
+
+        /**
+         * @brief 获取内存池使用状态
+         */
+        SharedMemoryPool::MemoryStatus getMemoryStatus() const
+        {
+            if (m_memoryPool)
+            {
+                return m_memoryPool->getStatus();
+            }
+            return SharedMemoryPool::MemoryStatus{0, 0, 0.0};
+        }
 
     private:
         /**
@@ -854,6 +1194,9 @@ namespace openpni::distributed::streaming
         // 处理线程
         std::thread m_processorThread;
         std::atomic<bool> m_running{false};
+
+        // 内存池（所有节点共享）
+        std::unique_ptr<SharedMemoryPool> m_memoryPool;
 
         // 统计
         ProcessingStatistics m_stats;

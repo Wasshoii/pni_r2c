@@ -123,8 +123,9 @@ bool testNodeRingBuffer()
     chunk.chunkId = 0;
     chunk.computerClock_ms = 1000;
     chunk.duration_ms = 100;
-    chunk.singles.push_back({0, 500000, 1000000});
-    chunk.singles.push_back({1, 500000, 2000000});
+    // GlobalSingle_t: {globalCrystalIndex, timeValue_pico, energy}
+    chunk.singles.push_back({0, 1000000, 500000.0f});
+    chunk.singles.push_back({1, 2000000, 500000.0f});
 
     if (!buffer.push(std::move(chunk)))
     {
@@ -288,6 +289,164 @@ bool testConfigCreation()
     return true;
 }
 
+/**
+ * @brief 测试5：共享内存池功能
+ */
+bool testSharedMemoryPool()
+{
+    std::cout << "\n=== Test 5: SharedMemoryPool Functionality ===" << std::endl;
+
+    // 创建 100KB 限制的内存池
+    const size_t maxMemory = 100 * 1024; // 100 KB
+    SharedMemoryPool pool(maxMemory);
+
+    // 测试基本分配
+    if (!pool.tryAllocate(10 * 1024, 1000))
+    {
+        std::cerr << "FAIL: First allocation should succeed" << std::endl;
+        return false;
+    }
+
+    auto status = pool.getStatus();
+    if (status.usedBytes != 10 * 1024)
+    {
+        std::cerr << "FAIL: Used memory incorrect after allocation" << std::endl;
+        return false;
+    }
+
+    std::cout << "  After 10KB allocation: " << status.usedBytes / 1024 << " KB used, "
+              << (status.usageRatio * 100) << "% usage" << std::endl;
+
+    // 测试多次分配
+    for (int i = 0; i < 8; ++i)
+    {
+        if (!pool.tryAllocate(10 * 1024, 1000))
+        {
+            std::cerr << "FAIL: Allocation " << i << " should succeed" << std::endl;
+            return false;
+        }
+    }
+
+    status = pool.getStatus();
+    std::cout << "  After 90KB total allocation: " << status.usedBytes / 1024 << " KB used, "
+              << (status.usageRatio * 100) << "% usage" << std::endl;
+
+    // 测试超限分配（应该超时失败，因为只剩10KB）
+    auto start = std::chrono::steady_clock::now();
+    bool allocated = pool.tryAllocate(20 * 1024, 100); // 尝试分配20KB，只等100ms
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now() - start)
+                       .count();
+
+    if (allocated)
+    {
+        std::cerr << "FAIL: Over-limit allocation should timeout" << std::endl;
+        return false;
+    }
+    std::cout << "  Over-limit allocation timed out after " << elapsed << " ms (expected ~100ms)" << std::endl;
+
+    // 测试释放后分配
+    pool.release(50 * 1024); // 释放 50KB
+    status = pool.getStatus();
+    std::cout << "  After releasing 50KB: " << status.usedBytes / 1024 << " KB used" << std::endl;
+
+    if (!pool.tryAllocate(20 * 1024, 1000))
+    {
+        std::cerr << "FAIL: Allocation after release should succeed" << std::endl;
+        return false;
+    }
+
+    status = pool.getStatus();
+    std::cout << "  After allocating 20KB more: " << status.usedBytes / 1024 << " KB used" << std::endl;
+
+    pool.printStatus();
+
+    std::cout << "PASS: SharedMemoryPool functionality" << std::endl;
+    return true;
+}
+
+/**
+ * @brief 测试6：带内存池的 NodeRingBuffer
+ */
+bool testBufferWithMemoryPool()
+{
+    std::cout << "\n=== Test 6: NodeRingBuffer with Memory Pool ===" << std::endl;
+
+    // 创建 50KB 限制的内存池
+    const size_t maxMemory = 50 * 1024;
+    SharedMemoryPool pool(maxMemory);
+
+    // 创建带内存池的缓冲区
+    NodeRingBuffer buffer(0, 100, &pool);
+
+    // 每个 single 约 16 字节 (4 + 8 + 4)，100 个 = 1600 字节
+    const size_t singlesPerChunk = 100;
+    const size_t expectedChunkSize = singlesPerChunk * sizeof(openpni::basic::GlobalSingle_t);
+    std::cout << "  Expected chunk memory: ~" << expectedChunkSize << " bytes" << std::endl;
+
+    // 推送多个数据块，直到内存池接近满
+    int pushedCount = 0;
+    for (int i = 0; i < 50; ++i)
+    {
+        TimestampedSingleChunk chunk;
+        chunk.nodeId = 0;
+        chunk.chunkId = i;
+        chunk.computerClock_ms = i * 100;
+        chunk.duration_ms = 100;
+
+        // 生成单事件数据
+        for (size_t j = 0; j < singlesPerChunk; ++j)
+        {
+            // GlobalSingle_t: {globalCrystalIndex, timeValue_pico, energy}
+            chunk.singles.push_back({static_cast<unsigned>(j), static_cast<uint64_t>(i * 1000000 + j * 1000), 500000.0f});
+        }
+
+        if (!buffer.push(std::move(chunk), 100))
+        { // 100ms 超时，缓冲区或内存池满时返回 false
+            std::cout << "  Push blocked after " << pushedCount << " chunks (memory pool full)" << std::endl;
+            break;
+        }
+        pushedCount++;
+    }
+
+    auto status = pool.getStatus();
+    std::cout << "  Memory pool: " << status.usedBytes / 1024 << " KB / "
+              << status.maxBytes / 1024 << " KB (" << (status.usageRatio * 100) << "%)" << std::endl;
+    std::cout << "  Buffer memory: " << buffer.getBufferMemoryBytes() / 1024 << " KB" << std::endl;
+
+    if (pushedCount < 1)
+    {
+        std::cerr << "FAIL: Should have pushed at least 1 chunk" << std::endl;
+        return false;
+    }
+
+    // 弹出一些数据块
+    int poppedCount = 0;
+    while (auto chunk = buffer.tryPop())
+    {
+        poppedCount++;
+        if (poppedCount >= 5)
+            break;
+    }
+    std::cout << "  Popped " << poppedCount << " chunks" << std::endl;
+
+    status = pool.getStatus();
+    std::cout << "  Memory pool after pop: " << status.usedBytes / 1024 << " KB ("
+              << (status.usageRatio * 100) << "%)" << std::endl;
+
+    // 验证内存已释放
+    if (status.usedBytes >= maxMemory * 0.9)
+    {
+        std::cerr << "FAIL: Memory should have been released after pop" << std::endl;
+        return false;
+    }
+
+    pool.printStatus();
+
+    std::cout << "PASS: NodeRingBuffer with memory pool" << std::endl;
+    return true;
+}
+
 // ==================== 主函数 ====================
 
 int main()
@@ -313,6 +472,14 @@ int main()
     else
         failed++;
     if (testConfigCreation())
+        passed++;
+    else
+        failed++;
+    if (testSharedMemoryPool())
+        passed++;
+    else
+        failed++;
+    if (testBufferWithMemoryPool())
         passed++;
     else
         failed++;

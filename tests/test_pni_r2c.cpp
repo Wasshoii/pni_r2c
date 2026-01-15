@@ -15,6 +15,7 @@
 #include "../src/tools/testTool.hpp"
 #include "../src/core/merge-and-coin/MergeAndCoin.hpp"
 
+using namespace openpni::distributed;
 void test_bdmbid()
 {
     std::string rawdataPath = "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/bdmbid/raw_data/rawdata_100.data";
@@ -25,8 +26,8 @@ void test_bdmbid()
         "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/bdmbid/calibration/channel_02.data",
         "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/bdmbid/calibration/channel_03.data"};
 
-    auto config = createBDMBiDConfig(rawdataPath, resPath, calibrationFilePaths);
-    processR2S(config);
+    auto config = r2s::createBDMBiDConfig(rawdataPath, resPath, calibrationFilePaths);
+    r2s::processR2S(config);
 }
 void test_bdm2()
 {
@@ -82,8 +83,8 @@ void test_bdm2()
         "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/bdm2/calibration/channel_46.data",
         "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/bdm2/calibration/channel_47.data"};
 
-    auto config = createBDM2Config(rawdataPath, resPath, calibrationFilePaths);
-    processR2S(config);
+    auto config = r2s::createBDM2Config(rawdataPath, resPath, calibrationFilePaths);
+    r2s::processR2S(config);
 }
 int main()
 {
@@ -110,9 +111,9 @@ int main()
     {
         std::string singleRawdataPath = "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/bdmbid/raw_data/split_Data/rawdata_100_channel_" + std::to_string(i) + ".raw";
 
-        auto config = createBDMBiDConfig(singleRawdataPath, resPath, calibrationFilePaths, "singles_channel_" + std::to_string(i), {uint16_t(i)});
+        auto config = r2s::createBDMBiDConfig(singleRawdataPath, resPath, calibrationFilePaths, "singles_channel_" + std::to_string(i), {uint16_t(i)});
         config.sortDataByTime = true;
-        processR2S(config);
+        r2s::processR2S(config);
     }
 
     // 测试single合并

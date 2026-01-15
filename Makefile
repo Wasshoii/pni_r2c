@@ -41,7 +41,7 @@ CXXFLAGS_FULL = $(CXXFLAGS_BASE) $(PNI_INCLUDE) $(CUDA_INCLUDE)
 LDFLAGS_BASE = $(LDFLAGS) $(GRPC_LIBS) -ldl
 
 # 完整链接选项（含 PNI/CUDA）
-LDFLAGS_FULL = $(LDFLAGS_BASE) $(PNI_LIBS) $(CUDA_LIBS)
+LDFLAGS_FULL = $(LDFLAGS_BASE) $(PNI_LIBS) $(CUDA_LIBS) -levent
 
 # Tools - Force system versions
 PROTOC = /usr/bin/protoc

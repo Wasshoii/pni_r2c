@@ -9,12 +9,244 @@
  */
 
 #include "../src/core/streaming-coin/StreamingCoincidence.hpp"
+#include <pni/io/IO.hpp>
 #include <iostream>
 #include <random>
 #include <chrono>
 #include <iomanip>
+#include <functional>
+#include <filesystem>
 
 using namespace openpni::distributed::streaming;
+namespace fs = std::filesystem;
+
+// ==================== 文件读取工具函数 ====================
+
+/**
+ * @brief 从 SingleSegmentBytes 解析数据到 GlobalSingle_t 数组
+ *
+ * @param segBytes 段数据字节
+ * @param fileHeader 文件头信息
+ * @param count 事件数量
+ * @param destBuffer 目标缓冲区
+ */
+void parseSingleSegmentBytesToBuffer(
+    const openpni::io::single::SingleSegmentBytes &segBytes,
+    const openpni::io::single::SingleFileHeader &fileHeader,
+    uint64_t count,
+    openpni::basic::GlobalSingle_t *destBuffer)
+{
+    // Lambda Selection for Crystal Index
+    std::function<uint32_t(uint64_t)> getCrystalIndex;
+    if (fileHeader.bytes4CrystalIndex == 2)
+    {
+        auto ptr = reinterpret_cast<const uint16_t *>(segBytes.crystalIndexBytes.get());
+        getCrystalIndex = [ptr](uint64_t i)
+        { return ptr[i]; };
+    }
+    else if (fileHeader.bytes4CrystalIndex == 4)
+    {
+        auto ptr = reinterpret_cast<const uint32_t *>(segBytes.crystalIndexBytes.get());
+        getCrystalIndex = [ptr](uint64_t i)
+        { return ptr[i]; };
+    }
+    else // 3 bytes
+    {
+        auto ptr = reinterpret_cast<const uint8_t *>(segBytes.crystalIndexBytes.get());
+        getCrystalIndex = [ptr](uint64_t i)
+        {
+            const uint8_t *p = ptr + i * 3;
+            return p[0] | (p[1] << 8) | (p[2] << 16);
+        };
+    }
+
+    // Lambda Selection for Time Value
+    std::function<uint64_t(uint64_t)> getTimeValue;
+    if (fileHeader.bytes4TimeValue == 8)
+    {
+        auto ptr = reinterpret_cast<const uint64_t *>(segBytes.timeValueBytes.get());
+        getTimeValue = [ptr](uint64_t i)
+        { return ptr[i]; };
+    }
+    else if (fileHeader.bytes4TimeValue == 4)
+    {
+        auto ptr = reinterpret_cast<const uint32_t *>(segBytes.timeValueBytes.get());
+        getTimeValue = [ptr](uint64_t i)
+        { return ptr[i]; };
+    }
+    else
+    {
+        int bytes = fileHeader.bytes4TimeValue;
+        auto ptr = reinterpret_cast<const uint8_t *>(segBytes.timeValueBytes.get());
+        getTimeValue = [ptr, bytes](uint64_t i)
+        {
+            const uint8_t *p = ptr + i * bytes;
+            uint64_t val = 0;
+            for (int k = 0; k < bytes; k++)
+                val |= (static_cast<uint64_t>(p[k]) << (k * 8));
+            return val;
+        };
+    }
+
+    // Lambda Selection for Energy
+    std::function<float(uint64_t)> getEnergy;
+    if (fileHeader.bytes4Energy == 4)
+    {
+        auto ptr = reinterpret_cast<const float *>(segBytes.energyBytes.get());
+        getEnergy = [ptr](uint64_t i)
+        { return ptr[i]; };
+    }
+    else if (fileHeader.bytes4Energy == 1)
+    {
+        auto ptr = reinterpret_cast<const uint8_t *>(segBytes.energyBytes.get());
+        getEnergy = [ptr](uint64_t i)
+        { return static_cast<float>(ptr[i]) * 4.0f; };
+    }
+    else if (fileHeader.bytes4Energy == 2)
+    {
+        auto ptr = reinterpret_cast<const uint16_t *>(segBytes.energyBytes.get());
+        getEnergy = [ptr](uint64_t i)
+        { return static_cast<float>(ptr[i]) * 0.01f; };
+    }
+    else
+    {
+        getEnergy = [](uint64_t)
+        { return 511.0f; };
+    }
+
+    // 并行解析
+    for (uint64_t i = 0; i < count; i++)
+    {
+        destBuffer[i].globalCrystalIndex = getCrystalIndex(i);
+        destBuffer[i].timeValue_pico = getTimeValue(i);
+        destBuffer[i].energy = getEnergy(i);
+    }
+}
+
+/**
+ * @brief 从 Single 文件读取数据并写入 NodeRingBuffer
+ *
+ * 此函数模拟分布式节点的数据生产过程：
+ * 1. 打开 Single 文件
+ * 2. 逐段读取数据
+ * 3. 转换为 TimestampedSingleChunk 格式
+ * 4. 推送到节点缓冲区
+ *
+ * @param buffer 目标缓冲区
+ * @param nodeId 节点ID
+ * @param filePath Single 文件路径
+ * @param simulateDelay 是否模拟网络延迟（毫秒），0表示不模拟
+ * @return 成功返回 true
+ */
+bool loadSingleFileToBuffer(
+    NodeRingBuffer *buffer,
+    uint16_t nodeId,
+    const std::string &filePath,
+    uint32_t simulateDelay = 0)
+{
+    if (!buffer)
+    {
+        std::cerr << "[loadSingleFileToBuffer] Error: buffer is null" << std::endl;
+        return false;
+    }
+
+    if (!fs::exists(filePath))
+    {
+        std::cerr << "[loadSingleFileToBuffer] Error: file not found: " << filePath << std::endl;
+        return false;
+    }
+
+    try
+    {
+        // 打开 Single 文件
+        openpni::io::single::SingleFileInput inputFile;
+        inputFile.open(filePath);
+
+        auto fileHeader = inputFile.header();
+        uint32_t segmentNum = fileHeader.segmentNum;
+
+        std::cout << "[loadSingleFileToBuffer] Node " << nodeId
+                  << " loading file: " << filePath << std::endl;
+        std::cout << "  Segments: " << segmentNum << std::endl;
+        std::cout << "  Format: crystalIndex=" << (int)fileHeader.bytes4CrystalIndex
+                  << "B, timeValue=" << (int)fileHeader.bytes4TimeValue
+                  << "B, energy=" << (int)fileHeader.bytes4Energy << "B" << std::endl;
+
+        uint64_t totalSinglesLoaded = 0;
+
+        // 逐段读取并推送到缓冲区
+        for (uint32_t segIdx = 0; segIdx < segmentNum; ++segIdx)
+        {
+            // 读取段数据
+            auto segBytes = inputFile.readSegment(segIdx);
+            auto segHeader = inputFile.segmentHeader(segIdx);
+
+            if (segHeader.count == 0)
+            {
+                std::cout << "  Segment " << segIdx << ": empty, skipping" << std::endl;
+                continue;
+            }
+
+            // 创建 TimestampedSingleChunk
+            TimestampedSingleChunk chunk;
+            chunk.nodeId = nodeId;
+            chunk.chunkId = segIdx;
+            chunk.computerClock_ms = segHeader.clock; // 使用段的 clock 作为计算机时钟
+            chunk.duration_ms = segHeader.duration;
+
+            // 分配空间并解析数据
+            chunk.singles.resize(segHeader.count);
+            parseSingleSegmentBytesToBuffer(segBytes, fileHeader, segHeader.count, chunk.singles.data());
+
+            // 推送到缓冲区
+            if (!buffer->push(std::move(chunk), 5000)) // 5秒超时
+            {
+                std::cerr << "[loadSingleFileToBuffer] Node " << nodeId
+                          << " failed to push segment " << segIdx << std::endl;
+                return false;
+            }
+
+            totalSinglesLoaded += segHeader.count;
+
+            // 模拟网络延迟
+            if (simulateDelay > 0)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(simulateDelay));
+            }
+        }
+
+        std::cout << "[loadSingleFileToBuffer] Node " << nodeId
+                  << " loaded " << totalSinglesLoaded << " singles from "
+                  << segmentNum << " segments" << std::endl;
+
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "[loadSingleFileToBuffer] Error: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+/**
+ * @brief 文件加载线程函数
+ *
+ * 用于多线程并行加载多个节点的数据
+ */
+void fileLoaderThread(
+    NodeRingBuffer *buffer,
+    uint16_t nodeId,
+    const std::string &filePath,
+    uint32_t simulateDelay,
+    std::atomic<bool> *success)
+{
+    bool result = loadSingleFileToBuffer(buffer, nodeId, filePath, simulateDelay);
+    if (success)
+    {
+        success->store(result);
+    }
+}
+namespace fs = std::filesystem;
 
 // ==================== 测试工具函数 ====================
 
@@ -447,6 +679,234 @@ bool testBufferWithMemoryPool()
     return true;
 }
 
+/**
+ * @brief 测试7：使用处理好的数据测试coincidence计算
+ *
+ * 此测试从磁盘读取 Single 文件，写入 NodeRingBuffer，
+ * 然后通过 StreamingTimeAligner 进行符合计算
+ */
+bool testStreamingCoincidenceComputation()
+{
+    std::cout << "\n=== Test 7: Streaming Coincidence Computation ===" << std::endl;
+
+    // 配置文件路径
+    std::vector<std::string> files = {
+        "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/split/singles_dist0.single",
+        "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/split/singles_dist1.single",
+        "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/split/singles_dist2.single"};
+
+    // 检查文件是否存在
+    std::vector<std::string> validFiles;
+    for (const auto &f : files)
+    {
+        if (fs::exists(f))
+        {
+            validFiles.push_back(f);
+            std::cout << "  Found file: " << f << std::endl;
+        }
+        else
+        {
+            std::cout << "  File not found (skipped): " << f << std::endl;
+        }
+    }
+
+    if (validFiles.empty())
+    {
+        std::cout << "  No valid input files found. Test skipped." << std::endl;
+        return true; // 没有文件不算失败
+    }
+
+    size_t nodeCount = validFiles.size();
+    std::cout << "  Using " << nodeCount << " nodes/files" << std::endl;
+
+    // 创建输出目录
+    std::string outputDir = "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/coin/streaming_coin_test_output";
+    fs::create_directories(outputDir);
+
+    // 创建 TimeAligner 配置
+    TimeAlignerConfig alignerConfig = createBDM2AlignerConfig(outputDir);
+    alignerConfig.networkLatencyMargin_pico = 10'000'000'000;      // 10ms 网络延迟裕量
+    alignerConfig.processingIntervalMs = 100;                      // 100ms 处理间隔
+    alignerConfig.maxChunksPerNode = 200;                          // 每节点最大200个chunk
+    alignerConfig.maxTotalMemoryBytes = 1ULL * 1024 * 1024 * 1024; // 1GB 内存限制
+
+    std::cout << "  Config:" << std::endl;
+    std::cout << "    Channel num: " << alignerConfig.channelNum << std::endl;
+    std::cout << "    Crystals per channel: " << alignerConfig.crystalsPerChannel << std::endl;
+    // std::cout << "    Time window: " << coinProtocol.timeWindow_ps << " ps" << std::endl;
+    // std::cout << "    Delay time: " << coinProtocol.delayTime_ps << " ps" << std::endl;
+    std::cout << "    Output dir: " << outputDir << std::endl;
+
+    // 创建 StreamingTimeAligner
+    StreamingTimeAligner aligner(alignerConfig, nodeCount);
+
+    // 启动处理线程
+    aligner.start();
+    std::cout << "  StreamingTimeAligner started" << std::endl;
+
+    // 创建多个线程并行加载数据文件
+    std::vector<std::thread> loaderThreads;
+    std::vector<std::atomic<bool>> loadResults(nodeCount);
+
+    for (size_t i = 0; i < nodeCount; ++i)
+    {
+        loadResults[i].store(false);
+        loaderThreads.emplace_back(
+            fileLoaderThread,
+            aligner.getNodeBuffer(i),
+            static_cast<uint16_t>(i),
+            validFiles[i],
+            10, // 10ms 模拟延迟，测试乱序处理
+            &loadResults[i]);
+    }
+
+    // 等待所有加载线程完成
+    std::cout << "  Waiting for file loaders to complete..." << std::endl;
+    for (auto &t : loaderThreads)
+    {
+        t.join();
+    }
+
+    // 检查加载结果
+    bool allLoaded = true;
+    for (size_t i = 0; i < nodeCount; ++i)
+    {
+        if (!loadResults[i].load())
+        {
+            std::cerr << "  Node " << i << " failed to load data" << std::endl;
+            allLoaded = false;
+        }
+    }
+
+    if (!allLoaded)
+    {
+        aligner.stop(false);
+        std::cerr << "FAIL: Some files failed to load" << std::endl;
+        return false;
+    }
+
+    std::cout << "  All files loaded successfully" << std::endl;
+
+    // 等待处理完成（给一些时间让数据被处理）
+    std::cout << "  Waiting for processing to complete..." << std::endl;
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+
+    // 停止并等待所有数据处理完毕
+    aligner.stop(true);
+
+    // 获取统计信息
+    const auto &stats = aligner.getStatistics();
+    std::cout << "\n  Processing Statistics:" << std::endl;
+    std::cout << "    Singles processed: " << stats.totalSinglesProcessed.load() << std::endl;
+    std::cout << "    Prompt pairs: " << stats.totalPromptPairs.load() << std::endl;
+    std::cout << "    Delay pairs: " << stats.totalDelayPairs.load() << std::endl;
+    std::cout << "    Chunks processed: " << stats.chunksProcessed.load() << std::endl;
+    std::cout << "    Avg processing time: " << stats.avgProcessingTime_ms.load() << " ms" << std::endl;
+
+    // 检查输出文件
+    std::string promptFile = outputDir + "/prompt.lmf";
+    std::string delayFile = outputDir + "/delay.lmf";
+
+    bool promptExists = fs::exists(promptFile);
+    bool delayExists = fs::exists(delayFile);
+
+    std::cout << "\n  Output Files:" << std::endl;
+    if (promptExists)
+    {
+        std::cout << "    Prompt: " << promptFile << " ("
+                  << fs::file_size(promptFile) << " bytes)" << std::endl;
+    }
+    if (delayExists)
+    {
+        std::cout << "    Delay: " << delayFile << " ("
+                  << fs::file_size(delayFile) << " bytes)" << std::endl;
+    }
+
+    // 验证处理结果
+    if (stats.totalSinglesProcessed.load() > 0)
+    {
+        std::cout << "PASS: Streaming Coincidence Computation" << std::endl;
+        return true;
+    }
+    else
+    {
+        std::cerr << "FAIL: No singles were processed" << std::endl;
+        return false;
+    }
+}
+
+/**
+ * @brief 测试8：单独测试文件加载到缓冲区功能
+ */
+bool testFileToBufferLoading()
+{
+    std::cout << "\n=== Test 8: File to Buffer Loading ===" << std::endl;
+
+    // 使用一个测试文件
+    std::string testFile = "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/split/singles_dist0.single";
+
+    if (!fs::exists(testFile))
+    {
+        std::cout << "  Test file not found: " << testFile << std::endl;
+        std::cout << "  Test skipped." << std::endl;
+        return true;
+    }
+
+    // 创建共享内存池和缓冲区
+    const size_t maxMemory = 500 * 1024 * 1024; // 500MB
+    SharedMemoryPool memPool(maxMemory);
+    NodeRingBuffer buffer(0, 500, &memPool);
+
+    std::cout << "  Loading file: " << testFile << std::endl;
+
+    // 加载文件
+    bool loadResult = loadSingleFileToBuffer(&buffer, 0, testFile, 0);
+
+    if (!loadResult)
+    {
+        std::cerr << "FAIL: Failed to load file to buffer" << std::endl;
+        return false;
+    }
+
+    // 统计缓冲区内容
+    size_t totalChunks = buffer.size();
+    size_t totalSingles = 0;
+    uint64_t minTime = UINT64_MAX;
+    uint64_t maxTime = 0;
+
+    std::cout << "  Buffer status:" << std::endl;
+    std::cout << "    Chunks in buffer: " << totalChunks << std::endl;
+    std::cout << "    Buffer memory: " << buffer.getBufferMemoryBytes() / (1024.0 * 1024.0) << " MB" << std::endl;
+
+    memPool.printStatus();
+
+    // 读取并验证数据
+    while (auto chunk = buffer.tryPop())
+    {
+        totalSingles += chunk->singles.size();
+        if (!chunk->singles.empty())
+        {
+            minTime = std::min(minTime, chunk->minTime_pico);
+            maxTime = std::max(maxTime, chunk->maxTime_pico);
+        }
+    }
+
+    std::cout << "  Data summary:" << std::endl;
+    std::cout << "    Total singles: " << totalSingles << std::endl;
+    std::cout << "    Time range: [" << minTime << ", " << maxTime << "] pico" << std::endl;
+    std::cout << "    Time span: " << (maxTime - minTime) / 1e12 << " seconds" << std::endl;
+
+    if (totalSingles > 0)
+    {
+        std::cout << "PASS: File to Buffer Loading" << std::endl;
+        return true;
+    }
+    else
+    {
+        std::cerr << "FAIL: No singles loaded" << std::endl;
+        return false;
+    }
+}
 // ==================== 主函数 ====================
 
 int main()
@@ -458,7 +918,7 @@ int main()
     int passed = 0;
     int failed = 0;
 
-    // 运行测试
+    // 运行基础测试
     if (testNodeRingBuffer())
         passed++;
     else
@@ -480,6 +940,17 @@ int main()
     else
         failed++;
     if (testBufferWithMemoryPool())
+        passed++;
+    else
+        failed++;
+    // 运行文件加载测试
+    if (testFileToBufferLoading())
+        passed++;
+    else
+        failed++;
+
+    // 运行完整的流式符合计算测试
+    if (testStreamingCoincidenceComputation())
         passed++;
     else
         failed++;

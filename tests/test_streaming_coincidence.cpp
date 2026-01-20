@@ -853,9 +853,11 @@ bool testFileToBufferLoading()
     }
 
     // 创建共享内存池和缓冲区
-    const size_t maxMemory = 500 * 1024 * 1024; // 500MB
+    // 测试文件有 456 段，每段约 135K singles，每个 single 16 字节
+    // 总数据量约 456 * 135000 * 16 = ~1GB，需要足够大的内存池
+    const size_t maxMemory = 2ULL * 1024 * 1024 * 1024; // 2GB
     SharedMemoryPool memPool(maxMemory);
-    NodeRingBuffer buffer(0, 500, &memPool);
+    NodeRingBuffer buffer(0, 500, &memPool); // 允许 500 个 chunks
 
     std::cout << "  Loading file: " << testFile << std::endl;
 

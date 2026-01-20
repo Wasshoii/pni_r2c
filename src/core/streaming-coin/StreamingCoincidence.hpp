@@ -480,7 +480,16 @@ namespace openpni::distributed::streaming
                                   std::make_move_iterator(frontChunk.singles.begin()),
                                   std::make_move_iterator(frontChunk.singles.end()));
                     m_buffer.pop_front();
-                    m_bufferMemoryBytes -= chunkMemory;
+
+                    // 安全地减少内存计数
+                    if (chunkMemory <= m_bufferMemoryBytes)
+                    {
+                        m_bufferMemoryBytes -= chunkMemory;
+                    }
+                    else
+                    {
+                        m_bufferMemoryBytes = 0;
+                    }
                     releasedMemory += chunkMemory;
                 }
                 else if (frontChunk.minTime_pico <= boundary)
@@ -500,9 +509,6 @@ namespace openpni::distributed::streaming
                     // 提取边界内的事件 [begin, splitPoint)
                     if (splitPoint != frontChunk.singles.begin())
                     {
-                        size_t extractedCount = std::distance(frontChunk.singles.begin(), splitPoint);
-                        size_t extractedMemory = extractedCount * sizeof(openpni::basic::GlobalSingle_t);
-
                         result.insert(result.end(),
                                       std::make_move_iterator(frontChunk.singles.begin()),
                                       std::make_move_iterator(splitPoint));
@@ -513,10 +519,8 @@ namespace openpni::distributed::streaming
                         // 更新时间范围
                         frontChunk.updateTimeRange();
 
-                        // 注意：部分提取时，内存并未真正释放（vector 不会自动缩容）
-                        // 这里我们近似地释放内存配额
-                        releasedMemory += extractedMemory;
-                        m_bufferMemoryBytes -= extractedMemory;
+                        // 注意：部分提取时，vector 内存并未真正释放
+                        // 不在这里调整 m_bufferMemoryBytes，等段完全移除时再处理
                     }
 
                     // 如果段为空，移除
@@ -524,7 +528,16 @@ namespace openpni::distributed::streaming
                     {
                         size_t remainingMemory = frontChunk.memorySize();
                         m_buffer.pop_front();
-                        m_bufferMemoryBytes -= remainingMemory;
+
+                        // 安全地减少内存计数
+                        if (remainingMemory <= m_bufferMemoryBytes)
+                        {
+                            m_bufferMemoryBytes -= remainingMemory;
+                        }
+                        else
+                        {
+                            m_bufferMemoryBytes = 0;
+                        }
                         releasedMemory += remainingMemory;
                     }
 

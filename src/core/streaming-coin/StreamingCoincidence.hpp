@@ -364,7 +364,7 @@ namespace openpni::distributed::streaming
 
             chunk.updateTimeRange();
 
-            // 更新水位线追踪：记录已收到数据的最大事件时间
+            // 水位线追踪：记录已收到数据的最大事件时间
             m_maxEventTimeReceived = std::max(m_maxEventTimeReceived, chunk.maxTime_pico);
 
             // 记录此 chunk 的内存占用（用于释放时计算）
@@ -997,10 +997,6 @@ namespace openpni::distributed::streaming
          * 2. 提取所有 maxTime_pico <= 水位线 的完整段
          * 3. 直接拼接（不预排序），符合计算内部处理排序
          *
-         * 为什么用水位线而不是队首 minTime？
-         * - 水位线基于各节点"已报告到的时间点"
-         * - 确保在水位线之前的所有事件都已到达
-         * - 避免因某个节点数据延迟导致的符合对丢失
          */
         void processingLoop()
         {

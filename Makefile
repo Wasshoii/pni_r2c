@@ -1,11 +1,12 @@
 # Makefile for Distributed PET Data Processing System
 
 # ==================== 编译器配置 ====================
-CXX = g++
+# 使用 g++-13 以支持 C++20 <format> 头文件
+CXX = g++-13
 NVCC = nvcc
 
-# C++ 标准：PNI 库需要 C++20
-CXXFLAGS = -std=c++20 -Wall -Wextra -O2 -pthread
+# C++ 标准：PNI 库需要 C++23 (使用 std::expected 等特性)
+CXXFLAGS = -std=c++23 -Wall -Wextra -O2 -pthread
 NVCCFLAGS = -std=c++20 -O2 --expt-relaxed-constexpr
 
 # 链接标志

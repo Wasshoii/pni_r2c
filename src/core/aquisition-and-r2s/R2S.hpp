@@ -1,15 +1,18 @@
 #pragma once
 #include <pni/io/IO.hpp>
-#include <pni/experimental/node/BDMBiDR2S.hpp>
-#include <pni/experimental/node/BDM2R2S.hpp>
-#include <pni/experimental/node/ConvergedR2S.hpp>
-#include <pni/experimental/node/Coincidence.hpp>
+// #include <pni/node/BDMBiDR2S.hpp>
+
+#include <pni/node/BDM2R2S.hpp>
+#include <pni/node/ConvergedR2S.hpp>
+#include <pni/node/Coincidence.hpp>
 #include "../tools/SinglesProcess.hpp"
 #include <iostream>
 #include <fstream>
 
 namespace openpni::distributed::r2s
 {
+    using GlobalSingle = openpni::v1::basic::GlobalSingle_t;
+    using Single = openpni::Single;
     // 判断 ptr 是否为 GPU Device 内存
     inline bool isDevicePointer(const void *ptr)
     {
@@ -69,16 +72,16 @@ namespace openpni::distributed::r2s
     /**
      * @brief 将 LocalSingle 转换为 GlobalSingle_t
      */
-    std::vector<openpni::basic::GlobalSingle_t> convertLocalToGlobalSingles(
-        std::span<openpni::experimental::interface::LocalSingle const> singles,
+    std::vector<GlobalSingle> convertLocalToGlobalSingles(
+        std::span<Single const> singles,
         uint32_t crystalsPerChannel)
     {
-        std::vector<openpni::basic::GlobalSingle_t> globalSingles;
+        std::vector<GlobalSingle> globalSingles;
         globalSingles.reserve(singles.size());
 
         // 从 GPU 内存拷贝到 Host（如果需要）
-        std::vector<openpni::experimental::interface::LocalSingle> hostBuf;
-        const openpni::experimental::interface::LocalSingle *dataPtr = singles.data();
+        std::vector<Single> hostBuf;
+        const Single *dataPtr = singles.data();
 
         if (isDevicePointer(dataPtr))
         {
@@ -97,7 +100,7 @@ namespace openpni::distributed::r2s
         // 转换为 GlobalSingle_t
         for (size_t i = 0; i < singles.size(); i++)
         {
-            openpni::basic::GlobalSingle_t gs;
+            GlobalSingle gs;
             gs.globalCrystalIndex = dataPtr[i].channelIndex * crystalsPerChannel + dataPtr[i].crystalIndex;
             gs.energy = dataPtr[i].energy;
             gs.timeValue_pico = dataPtr[i].timevalue_pico;
@@ -111,8 +114,8 @@ namespace openpni::distributed::r2s
      * @brief 追加单事件数据到 Single 文件（标准格式）
      */
     bool appendSinglesToSingleFile(
-        openpni::io::single::SingleFileOutput &outputFile,
-        std::span<openpni::experimental::interface::LocalSingle const> singles,
+        openpni::io::v1::single::SingleFileOutput &outputFile,
+        std::span<Single const> singles,
         uint32_t crystalsPerChannel,
         uint64_t clock_ms,
         uint32_t duration_ms)
@@ -141,21 +144,22 @@ namespace openpni::distributed::r2s
     /**
      * @brief 创建指定类型的 SingleGenerator
      */
-    openpni::experimental::interface::SingleGenerator *createSingleGenerator(
+    openpni::interface::SingleGenerator *createSingleGenerator(
         DetectorType type,
         uint16_t channelIndex,
         const std::string &calibrationFile)
     {
-        openpni::experimental::interface::SingleGenerator *generator = nullptr;
+        openpni::interface::SingleGenerator *generator = nullptr;
 
         switch (type)
         {
         case DetectorType::BDM2:
-            generator = new openpni::experimental::node::BDM2R2S();
+            generator = new openpni::BDM2R2S();
             break;
-        case DetectorType::BDMBiD:
-            generator = new openpni::experimental::node::BDMBiDR2S();
-            break;
+        // remove BID
+        // case DetectorType::BDMBiD:
+        //     generator = new openpni::experimental::node::BDMBiDR2S();
+        //     break;
         default:
             throw std::runtime_error("Unknown detector type");
         }
@@ -179,7 +183,7 @@ namespace openpni::distributed::r2s
             std::cout << "Starting R2S processing..." << std::endl;
 
             // 1. 打开原始数据文件
-            auto mRawFileInput = std::make_unique<openpni::io::RawFileInput>();
+            auto mRawFileInput = std::make_unique<openpni::io::v1::RawFileInput>();
             mRawFileInput->open(config.rawdataPath);
 
             auto header = mRawFileInput->header();
@@ -232,7 +236,7 @@ namespace openpni::distributed::r2s
             }
 
             // 4. 创建 SingleGenerator（只为要处理的通道创建）
-            std::vector<openpni::experimental::interface::SingleGenerator *> generatorsVector;
+            std::vector<openpni::interface::SingleGenerator *> generatorsVector;
             std::cout << "Loading " << channelsToProcess.size() << " channels' calibration data..." << std::endl;
 
             for (size_t i = 0; i < config.channelNums; i++)
@@ -255,22 +259,22 @@ namespace openpni::distributed::r2s
             }
 
             // 4. 设置 R2S
-            auto R2S = openpni::experimental::node::ConvergedR2S();
+            auto R2S = openpni::ConvergedR2S();
 
             // std::vector<uint32_t> crystalNumOfEachChannel(channelNum, config.crystalsPerChannel);
             // Coin.setTotalCrystalNumOfEachChannel(crystalNumOfEachChannel);
 
             std::cout << "Setting up ConvergedR2S with generators..." << std::endl;
-            R2S.setChannels(generatorsVector);
+            R2S.SetChannels(generatorsVector);
             std::cout << "Setup complete." << std::endl;
 
             // 5. 创建 SingleFileOutput 用于保存结果
-            openpni::io::single::SingleFileOutput singleOutput;
+            openpni::io::v1::single::SingleFileOutput singleOutput;
 
             // 配置 Single 文件参数
-            singleOutput.setBytes4CrystalIndex(openpni::io::single::CrystalIndexType::UINT32);
-            singleOutput.setBytes4TimeValue(openpni::io::single::TimeValueType::UINT64);
-            singleOutput.setBytes4Energy(openpni::io::single::EnergyType::FLT32);
+            singleOutput.setBytes4CrystalIndex(openpni::io::v1::single::CrystalIndexType::UINT32);
+            singleOutput.setBytes4TimeValue(openpni::io::v1::single::TimeValueType::UINT64);
+            singleOutput.setBytes4Energy(openpni::io::v1::single::EnergyType::FLT32);
 
             // 计算总晶体数
             uint32_t totalCrystals = config.channelNums * config.crystalsPerChannel;
@@ -301,14 +305,14 @@ namespace openpni::distributed::r2s
                     std::cout << "Segment " << i << ": No data, skipping" << std::endl;
                     continue;
                 }
-                auto d_data = openpni::experimental::node::DPackets::fromHost(view.data, view.offset, view.length, view.channel, view.count);
+                auto d_data = openpni::DPackets::FromHost(view.data, view.offset, view.length, view.channel, view.count);
                 try
                 {
                     auto time_ms = timer(
                         [&]
                         {
                             // R2S 处理
-                            auto r2sResults = R2S.r2s_cuda(d_data.raw, d_data.offset, d_data.length, d_data.channel, d_data.count);
+                            auto r2sResults = R2S.R2S_CUDA(d_data.raw, d_data.offset, d_data.length, d_data.channel, d_data.count);
                             // auto r2sResults = R2S.r2s_cpu(
                             //     view.data,
                             //     view.offset,
@@ -325,7 +329,7 @@ namespace openpni::distributed::r2s
                                 if (isDevicePointer(singlesSpan.data()))
                                 {
                                     openpni::distributed::r2s::d_sortSinglesByTime_R2S(
-                                        const_cast<openpni::experimental::interface::LocalSingle *>(singlesSpan.data()),
+                                        const_cast<Single *>(singlesSpan.data()),
                                         singlesSpan.size());
                                 }
                             }
@@ -410,26 +414,26 @@ namespace openpni::distributed::r2s
         return config;
     }
 
-    /**
-     * @brief 创建 BDMBiD 处理配置
-     */
-    R2SProcessConfig createBDMBiDConfig(
-        const std::string &rawdataPath,
-        const std::string &resultPath,
-        const std::vector<std::string> &calibrationFiles,
-        std::string outputFileName = "singles",
-        const std::vector<uint16_t> &channelIndices = {})
-    {
-        R2SProcessConfig config;
-        config.rawdataPath = rawdataPath;
-        config.resultPath = resultPath;
-        config.calibrationFiles = calibrationFiles;
-        config.detectorType = DetectorType::BDMBiD;
-        config.crystalsPerChannel = 400 * 8; // BDMBiD: 20x20 晶体阵列, 8个阵列
-        config.r2sResultIndex = 1;           // BDMBiD 数据在位置 1
-        config.outputFileName = outputFileName;
-        config.channelNums = 4;                 // BDMBiD 通道总数4
-        config.channelIndices = channelIndices; // 要处理的通道列表（空则处理所有）
-        return config;
-    }
+    // /**
+    //  * @brief 创建 BDMBiD 处理配置
+    //  */
+    // R2SProcessConfig createBDMBiDConfig(
+    //     const std::string &rawdataPath,
+    //     const std::string &resultPath,
+    //     const std::vector<std::string> &calibrationFiles,
+    //     std::string outputFileName = "singles",
+    //     const std::vector<uint16_t> &channelIndices = {})
+    // {
+    //     R2SProcessConfig config;
+    //     config.rawdataPath = rawdataPath;
+    //     config.resultPath = resultPath;
+    //     config.calibrationFiles = calibrationFiles;
+    //     config.detectorType = DetectorType::BDMBiD;
+    //     config.crystalsPerChannel = 400 * 8; // BDMBiD: 20x20 晶体阵列, 8个阵列
+    //     config.r2sResultIndex = 1;           // BDMBiD 数据在位置 1
+    //     config.outputFileName = outputFileName;
+    //     config.channelNums = 4;                 // BDMBiD 通道总数4
+    //     config.channelIndices = channelIndices; // 要处理的通道列表（空则处理所有）
+    //     return config;
+    // }
 } // namespace openpni::distributed::r2s

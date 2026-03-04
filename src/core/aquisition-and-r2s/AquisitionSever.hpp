@@ -12,8 +12,8 @@
 #include <thread>
 #include <chrono>
 
-#include "pni/process/Acquisition.hpp"
-#include "pni/io/IO.hpp"
+#include <pni/node/Acquisition.hpp>
+#include <pni/io/IO.hpp>
 #include "protos/acquisition.pb.h" // 引用 proto 生成的头文件
 
 namespace openpni::distributed::acquisition
@@ -51,9 +51,9 @@ namespace openpni::distributed::acquisition
     };
 
     // 辅助函数：创建 AcquisitionInfo
-    inline process::AcquisitionInfo MakeAcquisitionInfo(const NodeAcquisitionConfig &config)
+    inline openpni::AcquisitionInfo MakeAcquisitionInfo(const NodeAcquisitionConfig &config)
     {
-        process::AcquisitionInfo info;
+        openpni::AcquisitionInfo info;
         info.storageUnitSize = config.max_packet_size;
         info.maxBufferSize = config.max_buffer_size;
         info.timeSwitchBuffer_ms = config.time_switch_buffer_ms;
@@ -61,7 +61,7 @@ namespace openpni::distributed::acquisition
 
         for (const auto &chan : config.channels)
         {
-            process::AcquisitionInfo::ChannelSetting setting;
+            openpni::AcquisitionInfo::ChannelSetting setting;
             setting.ipSource = chan.ip_source;
             setting.portSource = chan.port_source;
             setting.ipDestination = chan.ip_dest;
@@ -117,7 +117,7 @@ namespace openpni::distributed::acquisition
             callback_ = cb;
         }
 
-        bool Write(const process::RawDataView &data)
+        bool Write(const openpni::RawDataView &data)
         {
             // 估算本次写入数据的大小 (byte)
             size_t chunk_size = 0;
@@ -189,7 +189,7 @@ namespace openpni::distributed::acquisition
             std::string filename = std::format("raw_{}_{:04d}.raw", timestamp, file_seq_++);
             current_path_ = (session_dir_ / filename).string();
 
-            writer_ = std::make_unique<openpni::io::RawFileOutput>();
+            writer_ = std::make_unique<openpni::io::v1::RawFileOutput>();
             // 设置保留空间，避免撑爆磁盘
             writer_->setReservedBytes(config_.total_reserved_gib * 1024ull * 1024ull * 1024ull);
             writer_->setChannelNum(config_.channel_num);
@@ -223,7 +223,7 @@ namespace openpni::distributed::acquisition
 
         StorageConfig config_;
         fs::path session_dir_;
-        std::unique_ptr<openpni::io::RawFileOutput> writer_;
+        std::unique_ptr<openpni::io::v1::RawFileOutput> writer_;
         size_t current_size_;
         int file_seq_;
         std::string current_path_;
@@ -231,8 +231,8 @@ namespace openpni::distributed::acquisition
     };
 
     // 分布式采集节点工作类
-    // 模板参数 AlgoType 可以是 socket::Socket 或 dpdk::DPDK
-    template <typename AlgoType = process::socket::Socket>
+    // 模板参数 AlgoType 可以是 SocketAcquisition 或 DPDKAcquisition
+    template <typename AlgoType = openpni::SocketAcquisition>
     class DistributedAcquisitionNode
     {
     public:

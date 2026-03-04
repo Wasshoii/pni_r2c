@@ -1,5 +1,5 @@
 #pragma once
-
+#include <pni/io/v1/PetDataType_v1.h>
 #include <grpcpp/grpcpp.h>
 #include "protos/coincidence.grpc.pb.h"
 
@@ -128,7 +128,7 @@ namespace openpni::distributed::streaming
          * @return 成功返回true
          */
         bool sendSingles(
-            const std::vector<openpni::basic::GlobalSingle_t> &singles,
+            const std::vector<openpni::v1::basic::GlobalSingle_t> &singles,
             uint64_t computerClock_ms,
             uint32_t duration_ms)
         {

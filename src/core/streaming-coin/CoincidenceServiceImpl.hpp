@@ -1,13 +1,13 @@
 #pragma once
 
 #include "StreamingCoincidence.hpp"
-
 #include <grpcpp/grpcpp.h>
 #include "protos/coincidence.grpc.pb.h"
 
 #include <unordered_map>
 #include <shared_mutex>
 #include <chrono>
+#include <string>
 
 namespace openpni::distributed::streaming
 {
@@ -79,7 +79,7 @@ namespace openpni::distributed::streaming
                 chunk.singles.reserve(msg.singles_size());
                 for (const auto &s : msg.singles())
                 {
-                    openpni::basic::GlobalSingle_t single;
+                    GlobalSingle single;
                     single.globalCrystalIndex = s.crystal_index();
                     single.energy = s.energy();
                     single.timeValue_pico = s.time_pico();

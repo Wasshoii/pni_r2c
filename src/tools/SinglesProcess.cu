@@ -9,16 +9,15 @@ namespace openpni::distributed::r2s
 
     struct OpSortSingles
     {
-        using LocalSingle = openpni::experimental::interface::LocalSingle;
         __host__ __device__ bool operator()(
-            LocalSingle const &a, LocalSingle const &b)
+            Single const &a, Single const &b)
         {
             return a.timevalue_pico < b.timevalue_pico;
         }
     };
 
     void d_sortSinglesByTime_R2S(
-        openpni::experimental::interface::LocalSingle *d_singles, uint64_t singleCount)
+        Single *d_singles, uint64_t singleCount)
     {
         if (singleCount == 0)
             return;

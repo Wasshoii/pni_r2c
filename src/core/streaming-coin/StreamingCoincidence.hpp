@@ -1,10 +1,10 @@
 #pragma once
 
 #include <pni/io/IO.hpp>
-#include <pni/io/ListmodeIO.hpp>
-#include <pni/experimental/node/Coincidence.hpp>
-#include <pni/experimental/tools/Parallel.hpp>
+#include <pni/node/Coincidence.hpp>
+#include <pni/tools/Parallel.hpp>
 #include <pni/CudaPtr.hpp>
+#include <pni/io/v1/PetDataType_v1.h>
 
 #include <vector>
 #include <deque>
@@ -22,7 +22,8 @@
 
 namespace openpni::distributed::streaming
 {
-
+    using GlobalSingle = openpni::v1::basic::GlobalSingle_t;
+    using Single = openpni::Single;
     namespace fs = std::filesystem;
 
     // ==================== 共享内存池 ====================
@@ -210,11 +211,11 @@ namespace openpni::distributed::streaming
      */
     struct TimestampedSingleChunk
     {
-        uint16_t nodeId = 0;                                 // 来源节点ID
-        uint64_t chunkId = 0;                                // 块序号（用于检测丢失/乱序）
-        uint64_t computerClock_ms = 0;                       // 计算机时钟（毫秒）
-        uint32_t duration_ms = 0;                            // 数据块持续时间（毫秒）
-        std::vector<openpni::basic::GlobalSingle_t> singles; // 单事件数据
+        uint16_t nodeId = 0;               // 来源节点ID
+        uint64_t chunkId = 0;              // 块序号（用于检测丢失/乱序）
+        uint64_t computerClock_ms = 0;     // 计算机时钟（毫秒）
+        uint32_t duration_ms = 0;          // 数据块持续时间（毫秒）
+        std::vector<GlobalSingle> singles; // 单事件数据
 
         // 缓存的 PET 时间范围（从 singles 中提取）
         uint64_t minTime_pico = UINT64_MAX; // 块内最小 PET 时间（pico）
@@ -248,7 +249,7 @@ namespace openpni::distributed::streaming
         {
             // 固定字段 + vector 容量 * 元素大小
             return sizeof(TimestampedSingleChunk) +
-                   singles.capacity() * sizeof(openpni::basic::GlobalSingle_t);
+                   singles.capacity() * sizeof(GlobalSingle);
         }
 
         /**
@@ -256,7 +257,7 @@ namespace openpni::distributed::streaming
          */
         size_t singlesMemorySize() const
         {
-            return singles.capacity() * sizeof(openpni::basic::GlobalSingle_t);
+            return singles.capacity() * sizeof(GlobalSingle);
         }
 
         // 用于按 PET 时间排序（处理网络乱序）
@@ -462,10 +463,10 @@ namespace openpni::distributed::streaming
          * @param boundary 时间边界（pico）
          * @return 提取的单事件数据
          */
-        std::vector<openpni::basic::GlobalSingle_t> extractSinglesBefore(uint64_t boundary)
+        std::vector<GlobalSingle> extractSinglesBefore(uint64_t boundary)
         {
             std::unique_lock<std::mutex> lock(m_mutex);
-            std::vector<openpni::basic::GlobalSingle_t> result;
+            std::vector<GlobalSingle> result;
             size_t releasedMemory = 0;
 
             while (!m_buffer.empty())
@@ -501,7 +502,7 @@ namespace openpni::distributed::streaming
                         frontChunk.singles.begin(),
                         frontChunk.singles.end(),
                         boundary,
-                        [](uint64_t bound, const openpni::basic::GlobalSingle_t &s)
+                        [](uint64_t bound, const GlobalSingle &s)
                         {
                             return bound < s.timeValue_pico;
                         });
@@ -709,7 +710,7 @@ namespace openpni::distributed::streaming
         uint64_t networkLatencyMargin_pico = 5'000'000'000; // 5ms 网络延迟裕量
 
         // 符合处理配置
-        openpni::experimental::node::CoincidenceProtocol coinProtocol;
+        openpni::CoincidenceProtocol coinProtocol;
         uint16_t channelNum = 0;
         uint32_t crystalsPerChannel = 0;
 
@@ -906,18 +907,18 @@ namespace openpni::distributed::streaming
 
             if (m_config.savePrompt)
             {
-                m_promptWriter = std::make_unique<openpni::io::listmode::ListmodeFileOutput>();
-                m_promptWriter->setBytes4CrystalIndex(openpni::io::single::CrystalIndexType::UINT32);
-                m_promptWriter->setBytes4TimeValue1_2(openpni::io::listmode::TimeValue1_2Type::INT16);
+                m_promptWriter = std::make_unique<openpni::io::v1::listmode::ListmodeFileOutput>();
+                m_promptWriter->setBytes4CrystalIndex(openpni::io::v1::single::CrystalIndexType::UINT32);
+                m_promptWriter->setBytes4TimeValue1_2(openpni::io::v1::listmode::TimeValue1_2Type::INT16);
                 m_promptWriter->setTotalCrystalNum(totalCrystals);
                 m_promptWriter->open(m_config.outputDir + "/prompt.lmf");
             }
 
             if (m_config.saveDelay)
             {
-                m_delayWriter = std::make_unique<openpni::io::listmode::ListmodeFileOutput>();
-                m_delayWriter->setBytes4CrystalIndex(openpni::io::single::CrystalIndexType::UINT32);
-                m_delayWriter->setBytes4TimeValue1_2(openpni::io::listmode::TimeValue1_2Type::INT16);
+                m_delayWriter = std::make_unique<openpni::io::v1::listmode::ListmodeFileOutput>();
+                m_delayWriter->setBytes4CrystalIndex(openpni::io::v1::single::CrystalIndexType::UINT32);
+                m_delayWriter->setBytes4TimeValue1_2(openpni::io::v1::listmode::TimeValue1_2Type::INT16);
                 m_delayWriter->setTotalCrystalNum(totalCrystals);
                 m_delayWriter->open(m_config.outputDir + "/delay.lmf");
             }
@@ -1027,7 +1028,7 @@ namespace openpni::distributed::streaming
                 consecutiveEmptyRounds = 0;
 
                 // 2. 从各节点精确提取水位线之前的事件
-                std::vector<openpni::basic::GlobalSingle_t> allSingles;
+                std::vector<GlobalSingle> allSingles;
 
                 for (auto &buf : m_nodeBuffers)
                 {
@@ -1070,16 +1071,16 @@ namespace openpni::distributed::streaming
         /**
          * @brief 执行符合计算
          */
-        void processCoincidence(const std::vector<openpni::basic::GlobalSingle_t> &singles)
+        void processCoincidence(const std::vector<GlobalSingle> &singles)
         {
             if (singles.empty())
                 return;
 
             // 转换为 LocalSingle 格式
-            std::vector<openpni::experimental::interface::LocalSingle> localSingles(singles.size());
+            std::vector<Single> localSingles(singles.size());
             const uint32_t cpc = m_config.crystalsPerChannel;
 
-            openpni::experimental::tools::parallel_for_each(
+            openpni::tools::parallel_for_each_CPU(
                 singles.size(),
                 [&](size_t i)
                 {
@@ -1095,11 +1096,11 @@ namespace openpni::distributed::streaming
             {
                 // 使用 cuda_sync_ptr 管理设备内存
                 auto d_singles = openpni::make_cuda_sync_ptr_from_hcopy(
-                    std::span<const openpni::experimental::interface::LocalSingle>(localSingles),
+                    std::span<const Single>(localSingles),
                     "StreamingTimeAligner_singles");
 
-                std::vector<std::span<openpni::experimental::interface::LocalSingle const>> inputList;
-                inputList.push_back(d_singles.cspan());
+                std::vector<std::span<Single const>> inputList;
+                inputList.push_back(d_singles.CSpan());
 
                 auto [prompt, delay] = m_coinNode.getDListmode(inputList, m_config.coinProtocol);
 
@@ -1127,19 +1128,19 @@ namespace openpni::distributed::streaming
          * @brief 保存符合结果
          */
         void saveCoincidenceResult(
-            openpni::io::listmode::ListmodeFileOutput &output,
-            std::span<openpni::experimental::node::LocalListmode const> coins)
+            openpni::io::v1::listmode::ListmodeFileOutput &output,
+            std::span<Listmode const> coins)
         {
             if (coins.empty())
                 return;
 
             // GPU -> Host 拷贝
-            std::vector<openpni::experimental::node::LocalListmode> hostBuf(coins.size());
-            openpni::basic::cuda_ptr::cuda_ptr_allocator<openpni::basic::cuda_ptr::CudaPtrType::sync> allocator;
+            std::vector<Listmode> hostBuf(coins.size());
+            openpni::cuda_ptr::cuda_ptr_allocator<openpni::cuda_ptr::CudaPtrType::sync> allocator;
             allocator.copy_from_device_to_host(hostBuf.data(), coins);
 
             // 转换格式
-            std::vector<openpni::basic::Listmode_t> listmodeData(coins.size());
+            std::vector<openpni::v1::basic::Listmode_t> listmodeData(coins.size());
             const uint32_t cpc = m_config.crystalsPerChannel;
 
             for (size_t i = 0; i < hostBuf.size(); ++i)
@@ -1162,7 +1163,7 @@ namespace openpni::distributed::streaming
         {
             std::cout << "[StreamingTimeAligner] Flushing remaining data..." << std::endl;
 
-            std::vector<openpni::basic::GlobalSingle_t> remaining;
+            std::vector<GlobalSingle> remaining;
 
             for (auto &buf : m_nodeBuffers)
             {
@@ -1193,11 +1194,11 @@ namespace openpni::distributed::streaming
         std::vector<std::unique_ptr<NodeRingBuffer>> m_nodeBuffers;
 
         // 符合处理
-        openpni::experimental::node::Coincidence m_coinNode;
+        openpni::Coincidence m_coinNode;
 
         // 输出
-        std::unique_ptr<openpni::io::listmode::ListmodeFileOutput> m_promptWriter;
-        std::unique_ptr<openpni::io::listmode::ListmodeFileOutput> m_delayWriter;
+        std::unique_ptr<openpni::io::v1::listmode::ListmodeFileOutput> m_promptWriter;
+        std::unique_ptr<openpni::io::v1::listmode::ListmodeFileOutput> m_delayWriter;
         std::mutex m_outputMutex;
 
         // 处理线程
@@ -1218,7 +1219,7 @@ namespace openpni::distributed::streaming
      */
     inline TimeAlignerConfig createBDM2AlignerConfig(
         const std::string &outputDir,
-        const openpni::experimental::node::CoincidenceProtocol &coinProtocol = {})
+        const openpni::CoincidenceProtocol &coinProtocol = {})
     {
         TimeAlignerConfig config;
         config.outputDir = outputDir;
@@ -1228,19 +1229,19 @@ namespace openpni::distributed::streaming
         return config;
     }
 
-    /**
-     * @brief 创建 BDMBiD 探测器的时间对齐器配置
-     */
-    inline TimeAlignerConfig createBDMBiDAlignerConfig(
-        const std::string &outputDir,
-        const openpni::experimental::node::CoincidenceProtocol &coinProtocol = {})
-    {
-        TimeAlignerConfig config;
-        config.outputDir = outputDir;
-        config.channelNum = 4;
-        config.crystalsPerChannel = 400 * 8;
-        config.coinProtocol = coinProtocol;
-        return config;
-    }
+    // /**
+    //  * @brief 创建 BDMBiD 探测器的时间对齐器配置
+    //  */
+    // inline TimeAlignerConfig createBDMBiDAlignerConfig(
+    //     const std::string &outputDir,
+    //     const openpni::CoincidenceProtocol &coinProtocol = {})
+    // {
+    //     TimeAlignerConfig config;
+    //     config.outputDir = outputDir;
+    //     config.channelNum = 4;
+    //     config.crystalsPerChannel = 400 * 8;
+    //     config.coinProtocol = coinProtocol;
+    //     return config;
+    // }
 
 } // namespace openpni::distributed::streaming

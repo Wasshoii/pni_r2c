@@ -5,8 +5,8 @@
 #include <iostream>
 #include <vector>
 #include <string>
-#include <pni/experimental/tools/Parallel.hpp>
-#include <pni/experimental/node/Coincidence.hpp>
+#include <pni/tools/Parallel.hpp>
+#include <pni/node/Coincidence.hpp>
 #include "../aquisition-and-r2s/R2S.hpp"
 #include <execution>
 #include <chrono>

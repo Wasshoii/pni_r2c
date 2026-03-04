@@ -4,7 +4,8 @@
 #include <iostream>
 #include <vector>
 #include <string>
-#include <pni/experimental/tools/Parallel.hpp>
+#include <pni/tools/Parallel.hpp>
+#include <pni/core/CommonDataType.hpp>
 
 namespace fs = std::filesystem;
 
@@ -24,7 +25,7 @@ bool extract_channel_from_rawdata(
     try
     {
         // 1. 打开输入文件
-        openpni::io::RawFileInput inputFile;
+        openpni::io::v1::RawFileInput inputFile;
         inputFile.open(inputRawDataPath);
 
         auto header = inputFile.header();
@@ -68,7 +69,7 @@ bool extract_channel_from_rawdata(
         std::string outputFileName = inputPath.stem().string() + "_channel_" + std::to_string(channelIndexToExtract) + ".raw";
         fs::path outputPath = outputDir / outputFileName;
 
-        openpni::io::RawFileOutput outputFile;
+        openpni::io::v1::RawFileOutput outputFile;
         // 关键修正：为了保留原始Channel ID，文件头中的通道数量必须足够涵盖该ID
         // 因此这里使用原始文件的通道数量，而不是 1
         outputFile.setChannelNum(channelNum);
@@ -153,7 +154,7 @@ bool extract_channel_from_rawdata(
             }
 
             // 创建新的 RawDataView 并写入
-            openpni::process::RawDataView filteredView;
+            openpni::RawDataView filteredView;
             filteredView.data = filteredData.data();
             filteredView.length = filteredLength.data();
             filteredView.offset = filteredOffset.data();
@@ -216,7 +217,7 @@ bool extract_multiple_channels_from_rawdata(
     try
     {
         // 1. 打开输入文件
-        openpni::io::RawFileInput inputFile;
+        openpni::io::v1::RawFileInput inputFile;
         inputFile.open(inputRawDataPath);
 
         auto header = inputFile.header();
@@ -269,7 +270,7 @@ bool extract_multiple_channels_from_rawdata(
         outputFileName += +".raw";
         fs::path outputPath = outputDir / outputFileName;
 
-        openpni::io::RawFileOutput outputFile;
+        openpni::io::v1::RawFileOutput outputFile;
         // 关键修正：为了保留原始Channel ID，文件头必须保持原始通道维度
         outputFile.setChannelNum(channelNum);
 
@@ -353,7 +354,7 @@ bool extract_multiple_channels_from_rawdata(
             }
 
             // 创建新的 RawDataView 并写入
-            openpni::process::RawDataView filteredView;
+            openpni::RawDataView filteredView;
             filteredView.data = filteredData.data();
             filteredView.length = filteredLength.data();
             filteredView.offset = filteredOffset.data();
@@ -430,7 +431,7 @@ RawDataFileInfo getRawDataFileInfo(const std::string &rawDataPath)
 
     try
     {
-        openpni::io::RawFileInput inputFile;
+        openpni::io::v1::RawFileInput inputFile;
         inputFile.open(rawDataPath);
 
         auto header = inputFile.header();
@@ -533,7 +534,7 @@ SingleFileInfo getSingleFileInfo(const std::string &singlePath)
 
     try
     {
-        openpni::io::single::SingleFileInput inputFile;
+        openpni::io::v1::single::SingleFileInput inputFile;
         inputFile.open(singlePath);
 
         auto header = inputFile.header();

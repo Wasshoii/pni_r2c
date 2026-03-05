@@ -8,10 +8,24 @@
 #include "../../tools/SinglesProcess.hpp"
 #include <iostream>
 #include <fstream>
+#include <functional>
 
 namespace openpni::distributed::r2s
 {
     using GlobalSingle = openpni::v1::basic::GlobalSingle_t;
+
+    /**
+     * @brief 单事件数据就绪回调函数类型
+     *
+     * @param singles 转换后的全局单事件数据（移动语义）
+     * @param clock_ms 计算机时钟时间戳（毫秒）
+     * @param duration_ms 数据段持续时间（毫秒）
+     * @return bool 返回true表示处理成功，false表示需要停止处理
+     */
+    using SinglesReadyCallback = std::function<bool(
+        std::vector<GlobalSingle> &&singles,
+        uint64_t clock_ms,
+        uint32_t duration_ms)>;
     using Single = openpni::Single;
     // 判断 ptr 是否为 GPU Device 内存
     inline bool isDevicePointer(const void *ptr)
@@ -61,7 +75,11 @@ namespace openpni::distributed::r2s
         std::string outputFileName;                // 输出文件名
         u_int16_t channelNums;                     // 通道总数
         std::vector<uint16_t> channelIndices;      // 要处理的通道索引列表（空则处理所有通道）
-        bool sortDataByTime = false;               // 是否按时间排序输出数据
+        bool sortDataByTime = true;                // 是否按时间排序输出数据
+        bool saveData2SingleFile = true;           // 是否保存为 Single 文件格式
+
+        // 分布式处理回调（当 saveData2SingleFile = false 时使用）
+        SinglesReadyCallback onSinglesReady = nullptr;
 
         R2SProcessConfig()
             : detectorType(DetectorType::Unknown), crystalsPerChannel(0), r2sResultIndex(0), outputFileName("singles")
@@ -268,23 +286,38 @@ namespace openpni::distributed::r2s
             R2S.SetChannels(generatorsVector);
             std::cout << "Setup complete." << std::endl;
 
-            // 5. 创建 SingleFileOutput 用于保存结果
-            openpni::io::v1::single::SingleFileOutput singleOutput;
+            // 5. 创建 SingleFileOutput 用于保存结果（仅在需要保存文件时）
+            std::unique_ptr<openpni::io::v1::single::SingleFileOutput> singleOutput;
+            std::string outputFilePath;
 
-            // 配置 Single 文件参数
-            singleOutput.setBytes4CrystalIndex(openpni::io::v1::single::CrystalIndexType::UINT32);
-            singleOutput.setBytes4TimeValue(openpni::io::v1::single::TimeValueType::UINT64);
-            singleOutput.setBytes4Energy(openpni::io::v1::single::EnergyType::FLT32);
+            if (config.saveData2SingleFile)
+            {
+                singleOutput = std::make_unique<openpni::io::v1::single::SingleFileOutput>();
 
-            // 计算总晶体数
-            uint32_t totalCrystals = config.channelNums * config.crystalsPerChannel;
-            singleOutput.setTotalCrystalNum(totalCrystals);
+                // 配置 Single 文件参数
+                singleOutput->setBytes4CrystalIndex(openpni::io::v1::single::CrystalIndexType::UINT32);
+                singleOutput->setBytes4TimeValue(openpni::io::v1::single::TimeValueType::UINT64);
+                singleOutput->setBytes4Energy(openpni::io::v1::single::EnergyType::FLT32);
 
-            // 打开输出文件
-            std::string outputFilePath = config.resultPath + "/" + config.outputFileName + ".single";
-            singleOutput.open(outputFilePath);
-            std::cout << "Output file: " << outputFilePath << std::endl;
-            std::cout << "Total crystals: " << totalCrystals << std::endl;
+                // 计算总晶体数
+                uint32_t totalCrystals = config.channelNums * config.crystalsPerChannel;
+                singleOutput->setTotalCrystalNum(totalCrystals);
+
+                // 打开输出文件
+                outputFilePath = config.resultPath + "/" + config.outputFileName + ".single";
+                singleOutput->open(outputFilePath);
+                std::cout << "Output file: " << outputFilePath << std::endl;
+                std::cout << "Total crystals: " << totalCrystals << std::endl;
+            }
+            else if (!config.onSinglesReady)
+            {
+                std::cerr << "Error: saveData2SingleFile is false but no callback is set" << std::endl;
+                return false;
+            }
+            else
+            {
+                std::cout << "Streaming mode: data will be sent via callback" << std::endl;
+            }
 
             // 6. 处理每个段
             uint64_t totalCount_raw = 0;
@@ -334,16 +367,38 @@ namespace openpni::distributed::r2s
                                 }
                             }
 
-                            bool success = appendSinglesToSingleFile(
-                                singleOutput,
-                                singlesSpan,
-                                config.crystalsPerChannel,
-                                segHeader.clock,
-                                segHeader.duration);
-
-                            if (!success)
+                            bool success = true;
+                            if (config.saveData2SingleFile)
                             {
-                                std::cerr << "Failed to append segment " << i << " to single file" << std::endl;
+                                // 保存到文件
+                                success = appendSinglesToSingleFile(
+                                    *singleOutput,
+                                    singlesSpan,
+                                    config.crystalsPerChannel,
+                                    segHeader.clock,
+                                    segHeader.duration);
+
+                                if (!success)
+                                {
+                                    std::cerr << "Failed to append segment " << i << " to single file" << std::endl;
+                                }
+                            }
+                            else if (config.onSinglesReady)
+                            {
+                                // 转换并通过回调发送数据
+                                auto globalSingles = convertLocalToGlobalSingles(
+                                    singlesSpan,
+                                    config.crystalsPerChannel);
+
+                                success = config.onSinglesReady(
+                                    std::move(globalSingles),
+                                    segHeader.clock,
+                                    segHeader.duration);
+
+                                if (!success)
+                                {
+                                    std::cerr << "Callback returned false at segment " << i << ", stopping" << std::endl;
+                                }
                             }
 
                             totalCount_single += singlesSpan.size();
@@ -372,7 +427,14 @@ namespace openpni::distributed::r2s
             std::cout << "Singles/Packet ratio: "
                       << (totalCount_raw > 0 ? (double)totalCount_single / totalCount_raw : 0.0)
                       << std::endl;
-            std::cout << "Output file: " << outputFilePath << std::endl;
+            if (config.saveData2SingleFile)
+            {
+                std::cout << "Output file: " << outputFilePath << std::endl;
+            }
+            else
+            {
+                std::cout << "Data streamed via callback" << std::endl;
+            }
             std::cout << "===========================\n"
                       << std::endl;
 

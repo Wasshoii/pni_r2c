@@ -1,6 +1,5 @@
 #pragma once
 #include <pni/io/IO.hpp>
-#include <pni/io/ListmodeIO.hpp>
 #include <filesystem>
 #include <iostream>
 #include <vector>
@@ -20,6 +19,8 @@
 namespace openpni::distributed::coin
 {
     namespace fs = std::filesystem;
+    using ListmodeFileOutput = openpni::io::v1::listmode::ListmodeFileOutput;
+    using GlobalSingle = openpni::v1::basic::GlobalSingle;
 
     /**
      * @brief 符合 处理配置结构体
@@ -27,7 +28,7 @@ namespace openpni::distributed::coin
     struct CoincidenceProcessConfig
     {
         bool enable = false;
-        openpni::experimental::node::CoincidenceProtocol protocol;
+        openpni::CoincidenceProtocol protocol;
         uint16_t channelNum = 0;
         uint32_t crystalsPerChannel = 0;
         std::string outputDir;
@@ -38,8 +39,8 @@ namespace openpni::distributed::coin
      */
     struct CoincidenceIOContext
     {
-        std::unique_ptr<openpni::io::listmode::ListmodeFileOutput> promptWriter;
-        std::unique_ptr<openpni::io::listmode::ListmodeFileOutput> delayWriter;
+        std::unique_ptr<ListmodeFileOutput> promptWriter;
+        std::unique_ptr<ListmodeFileOutput> delayWriter;
         std::string outputDir;
 
         CoincidenceIOContext(const std::string &dir) : outputDir(dir)
@@ -47,16 +48,16 @@ namespace openpni::distributed::coin
             fs::create_directories(dir);
         }
 
-        openpni::io::listmode::ListmodeFileOutput &getStream(const std::string &type, uint32_t totalCrystals)
+        ListmodeFileOutput &getStream(const std::string &type, uint32_t totalCrystals)
         {
             if (type == "prompt")
             {
                 if (!promptWriter)
                 {
                     std::string path = outputDir + "/prompt.lmf";
-                    promptWriter = std::make_unique<openpni::io::listmode::ListmodeFileOutput>();
-                    promptWriter->setBytes4CrystalIndex(openpni::io::single::CrystalIndexType::UINT32);
-                    promptWriter->setBytes4TimeValue1_2(openpni::io::listmode::TimeValue1_2Type::INT16);
+                    promptWriter = std::make_unique<ListmodeFileOutput>();
+                    promptWriter->setBytes4CrystalIndex(openpni::io::v1::single::CrystalIndexType::UINT32);
+                    promptWriter->setBytes4TimeValue1_2(openpni::io::v1::listmode::TimeValue1_2Type::INT16);
                     promptWriter->setTotalCrystalNum(totalCrystals);
                     promptWriter->open(path);
                 }
@@ -67,9 +68,9 @@ namespace openpni::distributed::coin
                 if (!delayWriter)
                 {
                     std::string path = outputDir + "/delay.lmf";
-                    delayWriter = std::make_unique<openpni::io::listmode::ListmodeFileOutput>();
-                    delayWriter->setBytes4CrystalIndex(openpni::io::single::CrystalIndexType::UINT32);
-                    delayWriter->setBytes4TimeValue1_2(openpni::io::listmode::TimeValue1_2Type::INT16);
+                    delayWriter = std::make_unique<ListmodeFileOutput>();
+                    delayWriter->setBytes4CrystalIndex(openpni::io::v1::single::CrystalIndexType::UINT32);
+                    delayWriter->setBytes4TimeValue1_2(openpni::io::v1::listmode::TimeValue1_2Type::INT16);
                     delayWriter->setTotalCrystalNum(totalCrystals);
                     delayWriter->open(path);
                 }
@@ -82,21 +83,21 @@ namespace openpni::distributed::coin
      * @brief 保存符合结果到 Listmode 文件
      */
     void saveCoincidenceEvents(
-        openpni::io::listmode::ListmodeFileOutput &output,
-        std::span<openpni::experimental::node::LocalListmode const> coins,
+        ListmodeFileOutput &output,
+        std::span<Listmode const> coins,
         uint32_t crystalsPerChannel)
     {
         if (coins.empty())
             return;
 
-        std::vector<openpni::experimental::node::LocalListmode> hostBuf;
-        const openpni::experimental::node::LocalListmode *srcPtr = coins.data();
+        std::vector<Listmode> hostBuf;
+        const Listmode *srcPtr = coins.data();
 
         // GPU -> Host copy if needed
         if (r2s::isDevicePointer(srcPtr))
         {
             hostBuf.resize(coins.size());
-            cudaError_t err = cudaMemcpy(hostBuf.data(), srcPtr, coins.size() * sizeof(openpni::experimental::node::LocalListmode), cudaMemcpyDeviceToHost);
+            cudaError_t err = cudaMemcpy(hostBuf.data(), srcPtr, coins.size() * sizeof(Listmode), cudaMemcpyDeviceToHost);
             if (err != cudaSuccess)
             {
                 throw std::runtime_error("cudaMemcpyDeviceToHost failed: " +
@@ -106,10 +107,10 @@ namespace openpni::distributed::coin
         }
 
         // Convert LocalListmode (Host) to Standard Listmode_t
-        std::vector<openpni::basic::Listmode_t> listmodeData(coins.size());
+        std::vector<openpni::v1::basic::Listmode_t> listmodeData(coins.size());
 
         // Parallel conversion
-        openpni::experimental::tools::parallel_for_each(
+        openpni::tools::parallel_for_each_CPU(
             coins.size(),
             [&](size_t i)
             {
@@ -132,20 +133,20 @@ namespace openpni::distributed::coin
      * @brief 处理符合计算
      */
     void processCoincidenceForChunk(
-        const std::span<const openpni::basic::GlobalSingle_t> &singles,
+        const std::span<const GlobalSingle> &singles,
         const CoincidenceProcessConfig &config,
-        const openpni::experimental::node::Coincidence &coinNode,
+        const openpni::Coincidence &coinNode,
         CoincidenceIOContext *ioCtx)
     {
         if (singles.empty() || config.crystalsPerChannel == 0 || !ioCtx)
             return;
 
-        // 1. Convert GlobalSingle_t to LocalSingle (Host)
-        std::vector<openpni::experimental::interface::LocalSingle> localSingles(singles.size());
+        // 1. Convert GlobalSingle to LocalSingle (Host)
+        std::vector<Single> localSingles(singles.size());
         const uint32_t cpc = config.crystalsPerChannel;
 
         // 并行转换
-        openpni::experimental::tools::parallel_for_each(
+        openpni::tools::parallel_for_each_CPU(
             singles.size(),
             [&](size_t i)
             {
@@ -158,8 +159,8 @@ namespace openpni::distributed::coin
             });
 
         // 2. Upload to GPU
-        openpni::experimental::interface::LocalSingle *d_singles_ptr = nullptr;
-        size_t bytes = localSingles.size() * sizeof(openpni::experimental::interface::LocalSingle);
+        Single *d_singles_ptr = nullptr;
+        size_t bytes = localSingles.size() * sizeof(Single);
         cudaError_t err = cudaMalloc(&d_singles_ptr, bytes);
         if (err != cudaSuccess)
         {
@@ -178,9 +179,9 @@ namespace openpni::distributed::coin
         // 3. Perform Coincidence & Save
         try
         {
-            std::span<openpni::experimental::interface::LocalSingle const> d_span(d_singles_ptr, localSingles.size());
+            std::span<Single const> d_span(d_singles_ptr, localSingles.size());
 
-            std::vector<std::span<openpni::experimental::interface::LocalSingle const>> inputList;
+            std::vector<std::span<Single const>> inputList;
             inputList.push_back(d_span);
 
             auto [prompt, delay] = coinNode.getDListmode(inputList, config.protocol);
@@ -216,10 +217,10 @@ namespace openpni::distributed::coin
      * @brief 直接解析到缓冲区，避免返回 vector 导致的分配和拷贝
      */
     void parseSingleSegmentBytesToBuffer(
-        const openpni::io::single::SingleSegmentBytes &segBytes,
-        const openpni::io::single::SingleFileHeader &fileHeader,
+        const openpni::io::v1::single::SingleSegmentBytes &segBytes,
+        const openpni::io::v1::single::SingleFileHeader &fileHeader,
         uint64_t count,
-        openpni::basic::GlobalSingle_t *destBuffer)
+        GlobalSingle *destBuffer)
     {
         // Lambda Selection for Crystal Index
         std::function<uint32_t(uint64_t)> getCrystalIndex;
@@ -309,14 +310,14 @@ namespace openpni::distributed::coin
     }
 
     /**
-     * @brief 从字节数据解析 GlobalSingle_t 数组 (Optimized)
+     * @brief 从字节数据解析 GlobalSingle 数组 (Optimized)
      */
-    std::vector<openpni::basic::GlobalSingle_t> parseSingleSegmentBytes(
-        const openpni::io::single::SingleSegmentBytes &segBytes,
-        const openpni::io::single::SingleFileHeader &fileHeader,
+    std::vector<GlobalSingle> parseSingleSegmentBytes(
+        const openpni::io::v1::single::SingleSegmentBytes &segBytes,
+        const openpni::io::v1::single::SingleFileHeader &fileHeader,
         uint64_t count)
     {
-        std::vector<openpni::basic::GlobalSingle_t> singles(count);
+        std::vector<GlobalSingle> singles(count);
         parseSingleSegmentBytesToBuffer(segBytes, fileHeader, count, singles.data());
         return singles;
     }
@@ -329,7 +330,7 @@ namespace openpni::distributed::coin
     {
     public:
         AsyncSingleWriter(const std::string &path,
-                          openpni::io::single::SingleFileOutput &outputHelper,
+                          openpni::io::v1::single::SingleFileOutput &outputHelper,
                           size_t maxMemoryBytes = 16ULL * 1024 * 1024 * 1024)
             : m_outputHelper(outputHelper), m_maxMemoryBytes(maxMemoryBytes), m_currentMemoryBytes(0), m_running(true)
         {
@@ -351,9 +352,9 @@ namespace openpni::distributed::coin
                 m_worker.join();
         }
 
-        void submit(std::vector<openpni::basic::GlobalSingle_t> &&data, uint64_t clock, uint32_t duration)
+        void submit(std::vector<GlobalSingle> &&data, uint64_t clock, uint32_t duration)
         {
-            size_t dataSize = data.capacity() * sizeof(openpni::basic::GlobalSingle_t);
+            size_t dataSize = data.capacity() * sizeof(GlobalSingle);
 
             std::unique_lock<std::mutex> lock(m_mutex);
             m_cv_capacity.wait(lock, [this, dataSize]
@@ -391,7 +392,7 @@ namespace openpni::distributed::coin
                 // 执行实际写入
                 if (!task.data.empty())
                 {
-                    size_t taskSize = task.data.capacity() * sizeof(openpni::basic::GlobalSingle_t);
+                    size_t taskSize = task.data.capacity() * sizeof(GlobalSingle);
                     m_outputHelper.appendSegment(task.data.data(), task.data.size(), task.clock, task.duration);
 
                     // 显式释放内存
@@ -409,12 +410,12 @@ namespace openpni::distributed::coin
 
         struct WriteTask
         {
-            std::vector<openpni::basic::GlobalSingle_t> data;
+            std::vector<GlobalSingle> data;
             uint64_t clock;
             uint32_t duration;
         };
 
-        openpni::io::single::SingleFileOutput &m_outputHelper;
+        openpni::io::v1::single::SingleFileOutput &m_outputHelper;
         size_t m_maxMemoryBytes;
         size_t m_currentMemoryBytes;
         std::thread m_worker;
@@ -448,7 +449,7 @@ namespace openpni::distributed::coin
         }
 
         // 设置符合参数
-        openpni::experimental::node::Coincidence coinNode;
+        openpni::Coincidence coinNode;
         std::vector<uint32_t> crystalNumOfEachChannel(coinConfig.channelNum, coinConfig.crystalsPerChannel);
         coinNode.setTotalCrystalNumOfEachChannel(crystalNumOfEachChannel);
 
@@ -464,17 +465,17 @@ namespace openpni::distributed::coin
             }
 
             // 1. 打开所有输入文件并验证兼容性
-            std::vector<std::unique_ptr<openpni::io::single::SingleFileInput>> inputs;
+            std::vector<std::unique_ptr<openpni::io::v1::single::SingleFileInput>> inputs;
             inputs.reserve(inputFiles.size());
 
-            openpni::io::single::SingleFileHeader firstHeader;
+            openpni::io::v1::single::SingleFileHeader firstHeader;
             uint32_t maxCrystalNum = 0;
             uint64_t totalSegments = 0;
             uint64_t totalSingles = 0;
 
             for (size_t i = 0; i < inputFiles.size(); i++)
             {
-                auto input = std::make_unique<openpni::io::single::SingleFileInput>();
+                auto input = std::make_unique<openpni::io::v1::single::SingleFileInput>();
                 input->open(inputFiles[i]);
 
                 auto header = input->header();
@@ -515,12 +516,12 @@ namespace openpni::distributed::coin
             std::cout << "Total singles to merge: " << totalSingles << std::endl;
 
             // 2. 创建输出文件
-            openpni::io::single::SingleFileOutput output;
+            openpni::io::v1::single::SingleFileOutput output;
 
             // 设置输出文件参数
-            output.setBytes4CrystalIndex(static_cast<openpni::io::single::CrystalIndexType>(firstHeader.bytes4CrystalIndex));
-            output.setBytes4TimeValue(static_cast<openpni::io::single::TimeValueType>(firstHeader.bytes4TimeValue));
-            output.setBytes4Energy(static_cast<openpni::io::single::EnergyType>(firstHeader.bytes4Energy));
+            output.setBytes4CrystalIndex(static_cast<openpni::io::v1::single::CrystalIndexType>(firstHeader.bytes4CrystalIndex));
+            output.setBytes4TimeValue(static_cast<openpni::io::v1::single::TimeValueType>(firstHeader.bytes4TimeValue));
+            output.setBytes4Energy(static_cast<openpni::io::v1::single::EnergyType>(firstHeader.bytes4Energy));
             output.setTotalCrystalNum(maxCrystalNum);
 
             std::unique_ptr<AsyncSingleWriter> asyncWriter;
@@ -652,7 +653,7 @@ namespace openpni::distributed::coin
                         auto fileHeader = input.header();
 
                         // 直接分配一次 vector
-                        std::vector<openpni::basic::GlobalSingle_t> singles(segHeader.count);
+                        std::vector<GlobalSingle> singles(segHeader.count);
                         parseSingleSegmentBytesToBuffer(segBytes, fileHeader, segHeader.count, singles.data());
                         auto t2 = std::chrono::high_resolution_clock::now();
                         t_read_parse += std::chrono::duration<double, std::milli>(t2 - t1).count();
@@ -689,7 +690,7 @@ namespace openpni::distributed::coin
 
                         auto t1 = std::chrono::high_resolution_clock::now();
                         // 一次性分配大内存
-                        std::vector<openpni::basic::GlobalSingle_t> mergedSingles(totalCount);
+                        std::vector<GlobalSingle> mergedSingles(totalCount);
                         std::vector<uint64_t> segmentOffsets; // 每个段的起始位置
                         segmentOffsets.reserve(groupEnd - groupStart);
 
@@ -701,7 +702,7 @@ namespace openpni::distributed::coin
                         }
 
                         // 并行加载并直接写入 mergedSingles 的对应位置
-                        openpni::experimental::tools::parallel_for_each(
+                        openpni::tools::parallel_for_each_CPU(
                             groupEnd - groupStart,
                             [&](std::size_t idx)
                             {
@@ -717,7 +718,7 @@ namespace openpni::distributed::coin
                                 auto fileHeader = input.header();
 
                                 // 直接写入大数组的特定偏移位置
-                                openpni::basic::GlobalSingle_t *destPtr = mergedSingles.data() + segmentOffsets[idx];
+                                GlobalSingle *destPtr = mergedSingles.data() + segmentOffsets[idx];
                                 parseSingleSegmentBytesToBuffer(segBytes, fileHeader, segInfo.count, destPtr);
                             });
                         auto t2 = std::chrono::high_resolution_clock::now();
@@ -728,7 +729,7 @@ namespace openpni::distributed::coin
                         auto ts1 = std::chrono::high_resolution_clock::now();
                         std::sort(std::execution::par_unseq,
                                   mergedSingles.begin(), mergedSingles.end(),
-                                  [](const openpni::basic::GlobalSingle_t &a, const openpni::basic::GlobalSingle_t &b)
+                                  [](const GlobalSingle &a, const GlobalSingle &b)
                                   {
                                       return a.timeValue_pico < b.timeValue_pico;
                                   });

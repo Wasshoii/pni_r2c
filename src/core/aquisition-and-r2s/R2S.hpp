@@ -5,7 +5,7 @@
 #include <pni/node/BDM2R2S.hpp>
 #include <pni/node/ConvergedR2S.hpp>
 #include <pni/node/Coincidence.hpp>
-#include "../tools/SinglesProcess.hpp"
+#include "../../tools/SinglesProcess.hpp"
 #include <iostream>
 #include <fstream>
 
@@ -87,7 +87,7 @@ namespace openpni::distributed::r2s
         {
             hostBuf.resize(singles.size());
             cudaError_t err = cudaMemcpy(hostBuf.data(), dataPtr,
-                                         singles.size() * sizeof(openpni::experimental::interface::LocalSingle),
+                                         singles.size() * sizeof(Single),
                                          cudaMemcpyDeviceToHost);
             if (err != cudaSuccess)
             {
@@ -347,7 +347,7 @@ namespace openpni::distributed::r2s
                             }
 
                             totalCount_single += singlesSpan.size();
-                            if (i % 10 == 0 || i == segmentNum - 1)
+                            if (i % 50 == 0 || i == segmentNum - 1)
                             {
                                 std::cout << "Segment " << i << "/" << segmentNum
                                           << ": Processed " << count << " packets, generated "
@@ -355,7 +355,7 @@ namespace openpni::distributed::r2s
                             }
                         },
                         1);
-                    if (i % 10 == 0 || i == segmentNum - 1)
+                    if (i % 50 == 0 || i == segmentNum - 1)
                         std::cout << "Data = " << view.count * 1024 << " bytes, time = " << time_ms << "ms, Speed = " << double(view.count * 1024) / 1024 / 1024 / (time_ms / 1) << " MB/ms\n";
                 }
                 catch (const std::exception &e)

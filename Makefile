@@ -63,6 +63,14 @@ TEST_GRPC_TARGET = $(BIN_DIR)/test_distributed_clock_sync_grpc
 TEST_STREAMING_SRC = tests/test_streaming_coincidence.cpp
 TEST_STREAMING_TARGET = $(BIN_DIR)/test_streaming_coincidence
 
+# PNI R2C test
+TEST_PNI_R2C_SRC = tests/test_pni_r2c.cpp
+TEST_PNI_R2C_TARGET = $(BIN_DIR)/test_pni_r2c
+
+# CUDA source files for PNI R2C
+CUDA_SINGLES_PROCESS_SRC = src/tools/SinglesProcess.cu
+CUDA_SINGLES_PROCESS_OBJ = $(BUILD_DIR)/SinglesProcess.o
+
 # Proto files
 PROTO_DIR = protos
 PROTO_SRCS = $(wildcard $(PROTO_DIR)/*.proto)
@@ -79,7 +87,7 @@ PROTO_OBJS = $(patsubst $(PROTO_DIR)/%.proto,$(BUILD_DIR)/%.pb.o,$(PROTO_SRCS)) 
 all: directories $(TEST_TARGET) $(TEST_GRPC_TARGET)
 
 # 完整构建（包含 PNI 依赖的测试）
-all-full: directories $(TEST_TARGET) $(TEST_GRPC_TARGET) $(TEST_STREAMING_TARGET)
+all-full: directories $(TEST_TARGET) $(TEST_GRPC_TARGET) $(TEST_STREAMING_TARGET) $(TEST_PNI_R2C_TARGET)
 
 # Create build directories
 directories:
@@ -120,6 +128,18 @@ $(TEST_STREAMING_TARGET): $(TEST_STREAMING_SRC) $(PROTO_OBJS) | directories
 	@echo "✓ Streaming coincidence test program compiled successfully"
 	@echo "Run: $(TEST_STREAMING_TARGET)"
 
+# 编译 CUDA 源文件（使用 g++-13 作为 host 编译器以支持 <format>）
+$(CUDA_SINGLES_PROCESS_OBJ): $(CUDA_SINGLES_PROCESS_SRC) | directories
+	$(NVCC) $(NVCCFLAGS) -ccbin g++-13 $(PNI_INCLUDE) $(CUDA_INCLUDE) -Isrc -c $(CUDA_SINGLES_PROCESS_SRC) -o $(CUDA_SINGLES_PROCESS_OBJ)
+	@echo "✓ CUDA SinglesProcess compiled"
+
+# 编译 PNI R2C 测试程序（需要 PNI 库、CUDA 和 TBB）
+$(TEST_PNI_R2C_TARGET): $(TEST_PNI_R2C_SRC) $(CUDA_SINGLES_PROCESS_OBJ) | directories
+	$(CXX) $(CXXFLAGS_FULL) -O3 -march=native -fopenmp -c $(TEST_PNI_R2C_SRC) -o build/test_pni_r2c.o
+	$(CXX) $(CXXFLAGS_FULL) -O3 -march=native -fopenmp -o $(TEST_PNI_R2C_TARGET) build/test_pni_r2c.o $(CUDA_SINGLES_PROCESS_OBJ) $(LDFLAGS_FULL) -ltbb
+	@echo "✓ PNI R2C test program compiled successfully"
+	@echo "Run: $(TEST_PNI_R2C_TARGET)"
+
 # 清理
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)
@@ -159,6 +179,7 @@ help:
 	@echo "完整构建（需要 PNI 库和 CUDA）:"
 	@echo "  make all-full         - 编译所有程序（含 PNI 依赖）"
 	@echo "  make test-streaming   - 编译并运行流式符合测试"
+	@echo "  make test-pni-r2c     - 编译并运行 PNI R2C 测试"
 	@echo ""
 	@echo "清理:"
 	@echo "  make clean        - 删除构建文件"
@@ -169,7 +190,7 @@ help:
 	@echo ""
 	@echo "依赖:"
 	@echo "  基础: libgrpc++-dev, protobuf-compiler-grpc"
-	@echo "  完整: + libopenpni, CUDA Toolkit"
+	@echo "  完整: + libopenpni, CUDA Toolkit, TBB"
 
 # 运行流式符合测试
 test-streaming: $(TEST_STREAMING_TARGET)
@@ -179,4 +200,12 @@ test-streaming: $(TEST_STREAMING_TARGET)
 	@echo "======================================"
 	@echo "✓ Tests completed"
 
-.PHONY: all all-full test test-grpc test-streaming clean clean-proto help directories
+# 运行 PNI R2C 测试
+test-pni-r2c: $(TEST_PNI_R2C_TARGET)
+	@echo "Running PNI R2C tests..."
+	@echo "========================"
+	@$(TEST_PNI_R2C_TARGET)
+	@echo "========================"
+	@echo "✓ Tests completed"
+
+.PHONY: all all-full test test-grpc test-streaming test-pni-r2c clean clean-proto help directories

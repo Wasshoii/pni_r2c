@@ -1,3 +1,5 @@
+// PnI-Config.hpp 必须在其他 PNI 头文件之前，定义 __PNI_CUDA_MACRO__ 等宏
+#include <pni/PnI-Config.hpp>
 #include "SinglesProcess.hpp"
 #include <thrust/sort.h>
 #include <thrust/execution_policy.h>

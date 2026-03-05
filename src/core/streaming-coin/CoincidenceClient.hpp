@@ -16,6 +16,7 @@
 
 namespace openpni::distributed::streaming
 {
+    using GlobalSingle = openpni::v1::basic::GlobalSingle;
 
     /**
      * @brief 符合计算客户端配置
@@ -128,7 +129,7 @@ namespace openpni::distributed::streaming
          * @return 成功返回true
          */
         bool sendSingles(
-            const std::vector<openpni::v1::basic::GlobalSingle_t> &singles,
+            const std::vector<GlobalSingle> &singles,
             uint64_t computerClock_ms,
             uint32_t duration_ms)
         {

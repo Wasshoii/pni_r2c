@@ -67,6 +67,10 @@ TEST_STREAMING_TARGET = $(BIN_DIR)/test_streaming_coincidence
 TEST_PNI_R2C_SRC = tests/test_pni_r2c.cpp
 TEST_PNI_R2C_TARGET = $(BIN_DIR)/test_pni_r2c
 
+# Local gRPC R2S BDM2 test (receiver only)
+TEST_LOCAL_GRPC_R2S_SRC = tests/test_local_grpc_r2s_bdm2.cpp
+TEST_LOCAL_GRPC_R2S_TARGET = $(BIN_DIR)/test_local_grpc_r2s_bdm2
+
 # CUDA source files for PNI R2C
 CUDA_SINGLES_PROCESS_SRC = src/tools/SinglesProcess.cu
 CUDA_SINGLES_PROCESS_OBJ = $(BUILD_DIR)/SinglesProcess.o
@@ -87,7 +91,7 @@ PROTO_OBJS = $(patsubst $(PROTO_DIR)/%.proto,$(BUILD_DIR)/%.pb.o,$(PROTO_SRCS)) 
 all: directories $(TEST_TARGET) $(TEST_GRPC_TARGET)
 
 # 完整构建（包含 PNI 依赖的测试）
-all-full: directories $(TEST_TARGET) $(TEST_GRPC_TARGET) $(TEST_STREAMING_TARGET) $(TEST_PNI_R2C_TARGET)
+all-full: directories $(TEST_TARGET) $(TEST_GRPC_TARGET) $(TEST_STREAMING_TARGET) $(TEST_PNI_R2C_TARGET) $(TEST_LOCAL_GRPC_R2S_TARGET)
 
 # Create build directories
 directories:
@@ -140,6 +144,13 @@ $(TEST_PNI_R2C_TARGET): $(TEST_PNI_R2C_SRC) $(CUDA_SINGLES_PROCESS_OBJ) | direct
 	@echo "✓ PNI R2C test program compiled successfully"
 	@echo "Run: $(TEST_PNI_R2C_TARGET)"
 
+# 编译本地 gRPC + R2S(BDM2) 测试程序（符合端仅接收）
+$(TEST_LOCAL_GRPC_R2S_TARGET): $(TEST_LOCAL_GRPC_R2S_SRC) $(PROTO_OBJS) $(CUDA_SINGLES_PROCESS_OBJ) | directories
+	$(CXX) $(CXXFLAGS_FULL) -O3 -march=native -fopenmp -c $(TEST_LOCAL_GRPC_R2S_SRC) -o build/test_local_grpc_r2s_bdm2.o
+	$(CXX) $(CXXFLAGS_FULL) -O3 -march=native -fopenmp -o $(TEST_LOCAL_GRPC_R2S_TARGET) build/test_local_grpc_r2s_bdm2.o $(CUDA_SINGLES_PROCESS_OBJ) $(PROTO_OBJS) $(LDFLAGS_FULL) -ltbb
+	@echo "✓ Local gRPC R2S BDM2 test program compiled successfully"
+	@echo "Run: $(TEST_LOCAL_GRPC_R2S_TARGET)"
+
 # 清理
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)
@@ -180,6 +191,7 @@ help:
 	@echo "  make all-full         - 编译所有程序（含 PNI 依赖）"
 	@echo "  make test-streaming   - 编译并运行流式符合测试"
 	@echo "  make test-pni-r2c     - 编译并运行 PNI R2C 测试"
+	@echo "  make test-local-grpc-r2s - 编译并运行本地 gRPC 单事件转换测试(BDM2)"
 	@echo ""
 	@echo "清理:"
 	@echo "  make clean        - 删除构建文件"
@@ -208,4 +220,12 @@ test-pni-r2c: $(TEST_PNI_R2C_TARGET)
 	@echo "========================"
 	@echo "✓ Tests completed"
 
-.PHONY: all all-full test test-grpc test-streaming test-pni-r2c clean clean-proto help directories
+# 运行本地 gRPC + R2S(BDM2) 测试
+test-local-grpc-r2s: $(TEST_LOCAL_GRPC_R2S_TARGET)
+	@echo "Running local gRPC R2S BDM2 test..."
+	@echo "===================================="
+	@$(TEST_LOCAL_GRPC_R2S_TARGET)
+	@echo "===================================="
+	@echo "✓ Tests completed"
+
+.PHONY: all all-full test test-grpc test-streaming test-pni-r2c test-local-grpc-r2s clean clean-proto help directories

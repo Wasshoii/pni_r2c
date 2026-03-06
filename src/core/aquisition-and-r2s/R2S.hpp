@@ -62,7 +62,7 @@ namespace openpni::distributed::r2s
     enum class DetectorType
     {
         BDM2,
-        BDMBiD,
+        BDMBiD, // 已在pni-core中移除
         Unknown
     };
 
@@ -85,7 +85,7 @@ namespace openpni::distributed::r2s
         bool asyncFileWrite = false;               // 是否异步写入文件（提高处理吞吐量）
         size_t asyncWriteQueueSize = 200;          // 异步写入队列大小
 
-        // 分布式处理回调（可与 saveData2SingleFile 同时使用，支持同时保存文件和流式传输）
+        // 分布式处理回调，使用时需设置（可与 saveData2SingleFile 同时使用，支持同时保存文件和流式传输）
         SinglesReadyCallback onSinglesReady = nullptr;
 
         R2SProcessConfig()

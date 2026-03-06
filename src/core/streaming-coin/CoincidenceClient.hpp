@@ -16,7 +16,7 @@
 
 namespace openpni::distributed::streaming
 {
-    using GlobalSingle = openpni::v1::basic::GlobalSingle;
+    using GlobalSingle = openpni::v1::basic::GlobalSingle_t;
 
     /**
      * @brief 符合计算客户端配置

@@ -9,6 +9,11 @@
 #include <iostream>
 #include <fstream>
 #include <functional>
+#include <thread>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
 
 namespace openpni::distributed::r2s
 {
@@ -77,14 +82,199 @@ namespace openpni::distributed::r2s
         std::vector<uint16_t> channelIndices;      // 要处理的通道索引列表（空则处理所有通道）
         bool sortDataByTime = true;                // 是否按时间排序输出数据
         bool saveData2SingleFile = true;           // 是否保存为 Single 文件格式
+        bool asyncFileWrite = false;               // 是否异步写入文件（提高处理吞吐量）
+        size_t asyncWriteQueueSize = 200;          // 异步写入队列大小
 
-        // 分布式处理回调（当 saveData2SingleFile = false 时使用）
+        // 分布式处理回调（可与 saveData2SingleFile 同时使用，支持同时保存文件和流式传输）
         SinglesReadyCallback onSinglesReady = nullptr;
 
         R2SProcessConfig()
             : detectorType(DetectorType::Unknown), crystalsPerChannel(0), r2sResultIndex(0), outputFileName("singles")
         {
         }
+    };
+
+    /**
+     * @brief 异步文件写入任务数据
+     */
+    struct AsyncWriteTask
+    {
+        std::vector<GlobalSingle> singles;
+        uint64_t clock_ms;
+        uint32_t duration_ms;
+    };
+
+    /**
+     * @brief 异步 Single 文件写入器
+     *
+     * 使用独立线程异步写入文件，避免阻塞主处理线程
+     */
+    class AsyncSingleFileWriter
+    {
+    public:
+        explicit AsyncSingleFileWriter(size_t maxQueueSize = 100)
+            : m_maxQueueSize(maxQueueSize)
+        {
+        }
+
+        ~AsyncSingleFileWriter()
+        {
+            stop();
+        }
+
+        /**
+         * @brief 打开文件并启动写入线程
+         */
+        bool open(const std::string &filePath, uint32_t totalCrystals)
+        {
+            m_output = std::make_unique<openpni::io::v1::single::SingleFileOutput>();
+            m_output->setBytes4CrystalIndex(openpni::io::v1::single::CrystalIndexType::UINT32);
+            m_output->setBytes4TimeValue(openpni::io::v1::single::TimeValueType::UINT64);
+            m_output->setBytes4Energy(openpni::io::v1::single::EnergyType::FLT32);
+            m_output->setTotalCrystalNum(totalCrystals);
+            m_output->open(filePath);
+
+            m_running = true;
+            m_writerThread = std::thread([this]
+                                         { writerLoop(); });
+
+            std::cout << "[AsyncWriter] Started, queue size: " << m_maxQueueSize << std::endl;
+            return true;
+        }
+
+        /**
+         * @brief 异步提交写入任务
+         *
+         * @return true 成功提交，false 队列已满或已停止
+         */
+        bool submit(std::vector<GlobalSingle> &&singles, uint64_t clock_ms, uint32_t duration_ms)
+        {
+            if (!m_running.load())
+            {
+                return false;
+            }
+
+            std::unique_lock<std::mutex> lock(m_mutex);
+
+            // 等待队列有空间
+            m_cvNotFull.wait(lock, [this]
+                             { return m_queue.size() < m_maxQueueSize || !m_running.load(); });
+
+            if (!m_running.load())
+            {
+                return false;
+            }
+
+            m_queue.push({std::move(singles), clock_ms, duration_ms});
+            m_pendingCount++;
+            lock.unlock();
+            m_cvNotEmpty.notify_one();
+
+            return true;
+        }
+
+        /**
+         * @brief 停止写入器，等待所有任务完成
+         */
+        void stop()
+        {
+            if (!m_running.exchange(false))
+            {
+                return;
+            }
+
+            m_cvNotEmpty.notify_all();
+            m_cvNotFull.notify_all();
+
+            if (m_writerThread.joinable())
+            {
+                m_writerThread.join();
+            }
+
+            std::cout << "[AsyncWriter] Stopped, total written: " << m_totalWritten.load()
+                      << " singles" << std::endl;
+        }
+
+        /**
+         * @brief 等待所有待处理任务完成
+         */
+        void flush()
+        {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            m_cvFlushed.wait(lock, [this]
+                             { return m_queue.empty() || !m_running.load(); });
+        }
+
+        uint64_t getTotalWritten() const { return m_totalWritten.load(); }
+        size_t getPendingCount() const { return m_pendingCount.load(); }
+        bool isRunning() const { return m_running.load(); }
+
+        /**
+         * @brief 获取底层输出文件对象（用于同步写入模式）
+         */
+        openpni::io::v1::single::SingleFileOutput *getOutput() { return m_output.get(); }
+
+    private:
+        void writerLoop()
+        {
+            while (m_running.load() || !m_queue.empty())
+            {
+                AsyncWriteTask task;
+                {
+                    std::unique_lock<std::mutex> lock(m_mutex);
+                    m_cvNotEmpty.wait(lock, [this]
+                                      { return !m_queue.empty() || !m_running.load(); });
+
+                    if (m_queue.empty())
+                    {
+                        continue;
+                    }
+
+                    task = std::move(m_queue.front());
+                    m_queue.pop();
+                    m_pendingCount--;
+                }
+
+                m_cvNotFull.notify_one();
+
+                // 写入文件
+                if (!task.singles.empty())
+                {
+                    bool success = m_output->appendSegment(
+                        task.singles.data(),
+                        task.singles.size(),
+                        task.clock_ms,
+                        task.duration_ms);
+
+                    if (success)
+                    {
+                        m_totalWritten += task.singles.size();
+                    }
+                    else
+                    {
+                        std::cerr << "[AsyncWriter] Failed to write segment" << std::endl;
+                    }
+                }
+
+                // 通知 flush 等待者
+                if (m_queue.empty())
+                {
+                    m_cvFlushed.notify_all();
+                }
+            }
+        }
+
+        std::unique_ptr<openpni::io::v1::single::SingleFileOutput> m_output;
+        std::thread m_writerThread;
+        std::queue<AsyncWriteTask> m_queue;
+        std::mutex m_mutex;
+        std::condition_variable m_cvNotEmpty;
+        std::condition_variable m_cvNotFull;
+        std::condition_variable m_cvFlushed;
+        std::atomic<bool> m_running{false};
+        std::atomic<uint64_t> m_totalWritten{0};
+        std::atomic<size_t> m_pendingCount{0};
+        size_t m_maxQueueSize;
     };
 
     /**
@@ -286,37 +476,55 @@ namespace openpni::distributed::r2s
             R2S.SetChannels(generatorsVector);
             std::cout << "Setup complete." << std::endl;
 
-            // 5. 创建 SingleFileOutput 用于保存结果（仅在需要保存文件时）
-            std::unique_ptr<openpni::io::v1::single::SingleFileOutput> singleOutput;
+            // 5. 创建文件输出（仅在需要保存文件时）
+            std::unique_ptr<openpni::io::v1::single::SingleFileOutput> singleOutput; // 同步写入
+            std::unique_ptr<AsyncSingleFileWriter> asyncWriter;                      // 异步写入
             std::string outputFilePath;
 
-            if (config.saveData2SingleFile)
+            // 检查是否至少有一种输出方式
+            if (!config.saveData2SingleFile && !config.onSinglesReady)
             {
-                singleOutput = std::make_unique<openpni::io::v1::single::SingleFileOutput>();
-
-                // 配置 Single 文件参数
-                singleOutput->setBytes4CrystalIndex(openpni::io::v1::single::CrystalIndexType::UINT32);
-                singleOutput->setBytes4TimeValue(openpni::io::v1::single::TimeValueType::UINT64);
-                singleOutput->setBytes4Energy(openpni::io::v1::single::EnergyType::FLT32);
-
-                // 计算总晶体数
-                uint32_t totalCrystals = config.channelNums * config.crystalsPerChannel;
-                singleOutput->setTotalCrystalNum(totalCrystals);
-
-                // 打开输出文件
-                outputFilePath = config.resultPath + "/" + config.outputFileName + ".single";
-                singleOutput->open(outputFilePath);
-                std::cout << "Output file: " << outputFilePath << std::endl;
-                std::cout << "Total crystals: " << totalCrystals << std::endl;
-            }
-            else if (!config.onSinglesReady)
-            {
-                std::cerr << "Error: saveData2SingleFile is false but no callback is set" << std::endl;
+                std::cerr << "Error: saveData2SingleFile is false and no callback is set" << std::endl;
                 return false;
             }
-            else
+
+            // 计算总晶体数
+            uint32_t totalCrystals = config.channelNums * config.crystalsPerChannel;
+
+            // 设置文件输出（如果需要）
+            if (config.saveData2SingleFile)
             {
-                std::cout << "Streaming mode: data will be sent via callback" << std::endl;
+                outputFilePath = config.resultPath + "/" + config.outputFileName + ".single";
+
+                if (config.asyncFileWrite)
+                {
+                    // 异步写入模式
+                    asyncWriter = std::make_unique<AsyncSingleFileWriter>(config.asyncWriteQueueSize);
+                    asyncWriter->open(outputFilePath, totalCrystals);
+                    std::cout << "Output file (async): " << outputFilePath << std::endl;
+                }
+                else
+                {
+                    // 同步写入模式
+                    singleOutput = std::make_unique<openpni::io::v1::single::SingleFileOutput>();
+                    singleOutput->setBytes4CrystalIndex(openpni::io::v1::single::CrystalIndexType::UINT32);
+                    singleOutput->setBytes4TimeValue(openpni::io::v1::single::TimeValueType::UINT64);
+                    singleOutput->setBytes4Energy(openpni::io::v1::single::EnergyType::FLT32);
+                    singleOutput->setTotalCrystalNum(totalCrystals);
+                    singleOutput->open(outputFilePath);
+                    std::cout << "Output file (sync): " << outputFilePath << std::endl;
+                }
+                std::cout << "Total crystals: " << totalCrystals << std::endl;
+            }
+
+            // 输出模式信息
+            if (config.saveData2SingleFile && config.onSinglesReady)
+            {
+                std::cout << "Dual mode: data will be saved to file AND sent via callback" << std::endl;
+            }
+            else if (config.onSinglesReady)
+            {
+                std::cout << "Streaming mode: data will be sent via callback only" << std::endl;
             }
 
             // 6. 处理每个段
@@ -367,37 +575,58 @@ namespace openpni::distributed::r2s
                                 }
                             }
 
-                            bool success = true;
-                            if (config.saveData2SingleFile)
-                            {
-                                // 保存到文件
-                                success = appendSinglesToSingleFile(
-                                    *singleOutput,
-                                    singlesSpan,
-                                    config.crystalsPerChannel,
-                                    segHeader.clock,
-                                    segHeader.duration);
+                            bool fileSuccess = true;
+                            bool callbackSuccess = true;
 
-                                if (!success)
-                                {
-                                    std::cerr << "Failed to append segment " << i << " to single file" << std::endl;
-                                }
-                            }
-                            else if (config.onSinglesReady)
+                            // 通过回调发送数据
+                            std::vector<GlobalSingle> globalSingles;
+                            if (config.onSinglesReady)
                             {
-                                // 转换并通过回调发送数据
-                                auto globalSingles = convertLocalToGlobalSingles(
+                                globalSingles = convertLocalToGlobalSingles(
                                     singlesSpan,
                                     config.crystalsPerChannel);
-
-                                success = config.onSinglesReady(
+                                callbackSuccess = config.onSinglesReady(
                                     std::move(globalSingles),
                                     segHeader.clock,
                                     segHeader.duration);
 
-                                if (!success)
+                                if (!callbackSuccess)
                                 {
                                     std::cerr << "Callback returned false at segment " << i << ", stopping" << std::endl;
+                                }
+                            }
+
+                            // 保存到文件
+                            if (config.saveData2SingleFile)
+                            {
+                                if (config.asyncFileWrite)
+                                {
+                                    // 异步写入：转换数据并提交到写入队列
+                                    auto globalSinglesForFile = convertLocalToGlobalSingles(
+                                        singlesSpan,
+                                        config.crystalsPerChannel);
+                                    fileSuccess = asyncWriter->submit(
+                                        std::move(globalSinglesForFile),
+                                        segHeader.clock,
+                                        segHeader.duration);
+                                    if (!fileSuccess)
+                                    {
+                                        std::cerr << "Failed to submit segment " << i << " to async writer" << std::endl;
+                                    }
+                                }
+                                else
+                                {
+                                    // 同步写入
+                                    fileSuccess = appendSinglesToSingleFile(
+                                        *singleOutput,
+                                        singlesSpan,
+                                        config.crystalsPerChannel,
+                                        segHeader.clock,
+                                        segHeader.duration);
+                                    if (!fileSuccess)
+                                    {
+                                        std::cerr << "Failed to append segment " << i << " to single file" << std::endl;
+                                    }
                                 }
                             }
 
@@ -420,16 +649,33 @@ namespace openpni::distributed::r2s
                 }
             }
 
-            // 7. 输出统计信息
+            // 7. 等待异步写入完成（如果使用异步模式）
+            if (asyncWriter)
+            {
+                std::cout << "Waiting for async writer to complete..." << std::endl;
+                asyncWriter->flush();
+                asyncWriter->stop();
+                std::cout << "Async writer completed, written: " << asyncWriter->getTotalWritten()
+                          << " singles" << std::endl;
+            }
+
+            // 8. 输出统计信息
             std::cout << "\n=== Processing Complete ===" << std::endl;
             std::cout << "Total raw packets: " << totalCount_raw << std::endl;
             std::cout << "Total singles: " << totalCount_single << std::endl;
             std::cout << "Singles/Packet ratio: "
                       << (totalCount_raw > 0 ? (double)totalCount_single / totalCount_raw : 0.0)
                       << std::endl;
-            if (config.saveData2SingleFile)
+            if (config.saveData2SingleFile && config.onSinglesReady)
             {
-                std::cout << "Output file: " << outputFilePath << std::endl;
+                std::cout << "Output file: " << outputFilePath
+                          << (config.asyncFileWrite ? " (async)" : " (sync)") << std::endl;
+                std::cout << "Data also streamed via callback" << std::endl;
+            }
+            else if (config.saveData2SingleFile)
+            {
+                std::cout << "Output file: " << outputFilePath
+                          << (config.asyncFileWrite ? " (async)" : " (sync)") << std::endl;
             }
             else
             {
@@ -438,7 +684,7 @@ namespace openpni::distributed::r2s
             std::cout << "===========================\n"
                       << std::endl;
 
-            // 8. 清理
+            // 9. 清理
             for (auto gen : generatorsVector)
             {
                 delete gen;

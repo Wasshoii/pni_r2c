@@ -103,6 +103,7 @@ void test_bdm2_saveflie()
         std::string singleRawdataPath = "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/bdm2/split_Data/2_PET_2Bed pet 600s-bed0_ch" + std::to_string(i * 4) + "_ch" + std::to_string(i * 4 + 1) + "_ch" + std::to_string(i * 4 + 2) + "_ch" + std::to_string(i * 4 + 3) + ".raw";
 
         auto config = r2s::createBDM2Config(singleRawdataPath, resPath, calibrationFilePaths, "singles_dist" + std::to_string(i), {uint16_t(i * 4), uint16_t(i * 4 + 1), uint16_t(i * 4 + 2), uint16_t(i * 4 + 3)});
+        config.asyncFileWrite = true; // 启用异步写入
         r2s::processR2S(config);
     }
 
@@ -193,8 +194,8 @@ void test_bdm2_callback()
 
     auto config = r2s::createBDM2Config(singleRawdataPath, resPath, calibrationFilePaths, "singles_callback_test", {uint16_t(i * 4), uint16_t(i * 4 + 1), uint16_t(i * 4 + 2), uint16_t(i * 4 + 3)});
 
-    // 设置为回调模式
-    config.saveData2SingleFile = false;
+    config.saveData2SingleFile = true;
+    config.asyncFileWrite = true;
 
     // 设置回调函数 - 模拟接收数据（实际使用时会通过 gRPC 发送）
     config.onSinglesReady = [&totalSinglesReceived, &totalCallbacks](
@@ -251,9 +252,9 @@ int main()
     std::cout << "======================================\n"
               << std::endl;
 
-    // 测试1: 保存文件模式
-    std::cout << "[Test 1] Testing file save mode..." << std::endl;
-    test_bdm2_saveflie();
+    // // 测试1: 保存文件模式
+    // std::cout << "[Test 1] Testing file save mode..." << std::endl;
+    // test_bdm2_saveflie();
 
     // 测试2: 回调模式
     std::cout << "[Test 2] Testing callback mode..." << std::endl;

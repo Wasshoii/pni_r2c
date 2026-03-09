@@ -446,23 +446,46 @@ namespace openpni::distributed::r2s
             // 4. 创建 SingleGenerator（只为要处理的通道创建）
             std::vector<openpni::interface::SingleGenerator *> generatorsVector;
             std::cout << "Loading " << channelsToProcess.size() << " channels' calibration data..." << std::endl;
-
-            for (size_t i = 0; i < config.channelNums; i++)
+            if (config.channelIndices.size() == 0) // 处理所有通道
             {
-                try
+                for (size_t i = 0; i < config.channelNums; i++)
                 {
-                    std::cout << "  Creating generator for channel " << i << "..." << std::endl;
-                    auto generator = createSingleGenerator(
-                        config.detectorType,
-                        i,
-                        config.calibrationFiles[i]);
-                    std::cout << "  Generator created successfully." << std::endl;
-                    generatorsVector.push_back(generator);
+                    try
+                    {
+                        std::cout << "  Creating generator for channel " << i << "..." << std::endl;
+                        auto generator = createSingleGenerator(
+                            config.detectorType,
+                            i,
+                            config.calibrationFiles[i]);
+                        std::cout << "  Generator created successfully." << std::endl;
+                        generatorsVector.push_back(generator);
+                    }
+                    catch (const std::exception &e)
+                    {
+                        std::cerr << "Error creating generator for channel " << i << ": " << e.what() << std::endl;
+                        throw;
+                    }
                 }
-                catch (const std::exception &e)
+            }
+            else
+            {
+                for (size_t i = 0; i < config.channelIndices.size(); i++)
                 {
-                    std::cerr << "Error creating generator for channel " << i << ": " << e.what() << std::endl;
-                    throw;
+                    try
+                    {
+                        std::cout << "  Creating generator for channel " << config.channelIndices[i] << "..." << std::endl;
+                        auto generator = createSingleGenerator(
+                            config.detectorType,
+                            config.channelIndices[i],
+                            config.calibrationFiles[config.channelIndices[i]]);
+                        std::cout << "  Generator created successfully." << std::endl;
+                        generatorsVector.push_back(generator);
+                    }
+                    catch (const std::exception &e)
+                    {
+                        std::cerr << "Error creating generator for channel " << config.channelIndices[i] << ": " << e.what() << std::endl;
+                        throw;
+                    }
                 }
             }
 

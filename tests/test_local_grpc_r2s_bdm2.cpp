@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <cstdint>
+#include <algorithm>
 #include <vector>
 #include <iostream>
 #include <thread>
@@ -27,10 +28,12 @@
 
 #include "protos/coincidence.grpc.pb.h"
 #include "../src/core/aquisition-and-r2s/R2S.hpp"
+#include "grpcNode/r2sNode.hpp"
 
 namespace fs = std::filesystem;
 namespace coincidence = openpni::distributed::coincidence;
 namespace r2s = openpni::distributed::r2s;
+namespace grpcnode = openpni::distributed::grpcnode;
 
 namespace
 {
@@ -54,20 +57,7 @@ namespace
         std::vector<uint16_t> channels;
     };
 
-    struct NodeRunStats
-    {
-        bool success = false;
-        uint64_t callbackCount = 0;
-        uint64_t singlesSent = 0;
-        uint64_t grpcMessagesSent = 0;
-    };
-
-    struct SegmentPayload
-    {
-        std::vector<r2s::GlobalSingle> singles;
-        uint64_t clockMs = 0;
-        uint32_t durationMs = 0;
-    };
+    using NodeRunStats = grpcnode::NodeRunStats;
 
     struct ReceiverNodeStats
     {
@@ -226,255 +216,6 @@ namespace
         std::unordered_map<uint32_t, ReceiverNodeStats> m_nodes;
         std::atomic<uint64_t> m_totalSinglesReceived{0};
         std::atomic<uint64_t> m_totalChunksReceived{0};
-    };
-
-    class PersistentNodeStreamSender
-    {
-    public:
-        struct Config
-        {
-            std::string serverAddress;
-            uint32_t nodeId = 0;
-            std::string nodeAddress;
-            uint32_t channelCount = 0;
-            std::string detectorType = "BDM2";
-            size_t maxPendingSegments = 64;
-        };
-
-        explicit PersistentNodeStreamSender(Config cfg)
-            : m_cfg(std::move(cfg))
-        {
-        }
-
-        ~PersistentNodeStreamSender()
-        {
-            stop();
-        }
-
-        bool start()
-        {
-            if (m_started.exchange(true))
-            {
-                std::cerr << "[Node " << m_cfg.nodeId << "] sender already started" << std::endl;
-                return false;
-            }
-
-            m_channel = grpc::CreateChannel(m_cfg.serverAddress, grpc::InsecureChannelCredentials());
-            m_stub = coincidence::CoincidenceService::NewStub(m_channel);
-            if (!m_stub)
-            {
-                std::cerr << "[Node " << m_cfg.nodeId << "] failed to create coincidence stub" << std::endl;
-                m_started = false;
-                return false;
-            }
-
-            if (!registerNode())
-            {
-                m_started = false;
-                return false;
-            }
-
-            m_streamContext = std::make_unique<grpc::ClientContext>();
-            m_writer = m_stub->StreamSingles(m_streamContext.get(), &m_streamResponse);
-            if (!m_writer)
-            {
-                std::cerr << "[Node " << m_cfg.nodeId << "] failed to open StreamSingles writer" << std::endl;
-                m_started = false;
-                return false;
-            }
-
-            m_running = true;
-            m_senderThread = std::thread([this]
-                                         { senderLoop(); });
-            return true;
-        }
-
-        bool enqueue(
-            std::vector<r2s::GlobalSingle> &&singles,
-            uint64_t clockMs,
-            uint32_t durationMs)
-        {
-            if (!m_running.load(std::memory_order_relaxed) || m_sendFailed.load(std::memory_order_relaxed))
-            {
-                return false;
-            }
-
-            std::unique_lock<std::mutex> lock(m_mutex);
-            m_cvNotFull.wait(lock, [this]
-                             { return m_queue.size() < m_cfg.maxPendingSegments || !m_running.load(std::memory_order_relaxed) || m_sendFailed.load(std::memory_order_relaxed); });
-
-            if (!m_running.load(std::memory_order_relaxed) || m_sendFailed.load(std::memory_order_relaxed))
-            {
-                return false;
-            }
-
-            m_queue.push_back(SegmentPayload{std::move(singles), clockMs, durationMs});
-            lock.unlock();
-            m_cvNotEmpty.notify_one();
-            return true;
-        }
-
-        bool stop()
-        {
-            if (!m_started.exchange(false))
-            {
-                return !m_sendFailed.load(std::memory_order_relaxed);
-            }
-
-            {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                m_running = false;
-            }
-            m_cvNotEmpty.notify_all();
-            m_cvNotFull.notify_all();
-
-            if (m_senderThread.joinable())
-            {
-                m_senderThread.join();
-            }
-
-            bool ok = !m_sendFailed.load(std::memory_order_relaxed);
-
-            if (m_writer)
-            {
-                const bool writesDone = m_writer->WritesDone();
-                grpc::Status status = m_writer->Finish();
-                if (!writesDone || !status.ok() || !m_streamResponse.success())
-                {
-                    ok = false;
-                    std::cerr << "[Node " << m_cfg.nodeId << "] stream finish failed: "
-                              << (status.ok() ? m_streamResponse.message() : status.error_message())
-                              << std::endl;
-                }
-            }
-
-            m_writer.reset();
-            m_streamContext.reset();
-            m_stub.reset();
-            return ok;
-        }
-
-        uint64_t singlesSent() const { return m_singlesSent.load(std::memory_order_relaxed); }
-        uint64_t messagesSent() const { return m_messagesSent.load(std::memory_order_relaxed); }
-        bool hasSendFailure() const { return m_sendFailed.load(std::memory_order_relaxed); }
-
-    private:
-        bool registerNode()
-        {
-            grpc::ClientContext context;
-            coincidence::RegisterNodeRequest request;
-            request.set_node_id(m_cfg.nodeId);
-            request.set_node_address(m_cfg.nodeAddress);
-            request.set_channel_count(m_cfg.channelCount);
-            request.set_detector_type(m_cfg.detectorType);
-
-            coincidence::RegisterNodeResponse response;
-            grpc::Status status = m_stub->RegisterNode(&context, request, &response);
-
-            if (!status.ok() || !response.success())
-            {
-                std::cerr << "[Node " << m_cfg.nodeId << "] register failed: "
-                          << (status.ok() ? response.message() : status.error_message())
-                          << std::endl;
-                return false;
-            }
-
-            return true;
-        }
-
-        void senderLoop()
-        {
-            while (true)
-            {
-                SegmentPayload payload;
-
-                {
-                    std::unique_lock<std::mutex> lock(m_mutex);
-                    m_cvNotEmpty.wait(lock, [this]
-                                      { return !m_queue.empty() || !m_running.load(std::memory_order_relaxed); });
-
-                    if (m_queue.empty())
-                    {
-                        break;
-                    }
-
-                    payload = std::move(m_queue.front());
-                    m_queue.pop_front();
-                }
-
-                m_cvNotFull.notify_one();
-
-                if (!sendPayload(payload))
-                {
-                    m_sendFailed = true;
-
-                    {
-                        std::lock_guard<std::mutex> lock(m_mutex);
-                        m_running = false;
-                    }
-
-                    m_cvNotEmpty.notify_all();
-                    m_cvNotFull.notify_all();
-                    return;
-                }
-            }
-        }
-
-        bool sendPayload(const SegmentPayload &payload)
-        {
-            if (payload.singles.empty())
-            {
-                return true;
-            }
-
-            coincidence::SingleChunkMessage msg;
-            msg.set_node_id(m_cfg.nodeId);
-            msg.set_chunk_id(m_chunkIdCounter.fetch_add(1, std::memory_order_relaxed));
-            msg.set_computer_clock_ms(payload.clockMs);
-            msg.set_duration_ms(payload.durationMs);
-            msg.mutable_singles()->Reserve(static_cast<int>(payload.singles.size()));
-
-            for (const auto &s : payload.singles)
-            {
-                auto *event = msg.add_singles();
-                event->set_crystal_index(s.globalCrystalIndex);
-                event->set_energy(s.energy);
-                event->set_time_pico(s.timeValue_pico);
-            }
-
-            if (!m_writer->Write(msg))
-            {
-                std::cerr << "[Node " << m_cfg.nodeId << "] stream write failed at chunk "
-                          << msg.chunk_id() << std::endl;
-                return false;
-            }
-
-            m_messagesSent.fetch_add(1, std::memory_order_relaxed);
-            m_singlesSent.fetch_add(payload.singles.size(), std::memory_order_relaxed);
-
-            return true;
-        }
-
-        Config m_cfg;
-
-        std::shared_ptr<grpc::Channel> m_channel;
-        std::unique_ptr<coincidence::CoincidenceService::Stub> m_stub;
-        std::unique_ptr<grpc::ClientContext> m_streamContext;
-        coincidence::StreamResponse m_streamResponse;
-        std::unique_ptr<grpc::ClientWriter<coincidence::SingleChunkMessage>> m_writer;
-
-        std::thread m_senderThread;
-        std::deque<SegmentPayload> m_queue;
-        std::mutex m_mutex;
-        std::condition_variable m_cvNotEmpty;
-        std::condition_variable m_cvNotFull;
-
-        std::atomic<bool> m_started{false};
-        std::atomic<bool> m_running{false};
-        std::atomic<bool> m_sendFailed{false};
-        std::atomic<uint64_t> m_chunkIdCounter{0};
-        std::atomic<uint64_t> m_singlesSent{0};
-        std::atomic<uint64_t> m_messagesSent{0};
     };
 
     class LocalReceiverServer
@@ -765,23 +506,6 @@ namespace
         const NodeInput &node,
         const std::vector<std::string> &calibrationFiles)
     {
-        NodeRunStats stats;
-
-        PersistentNodeStreamSender::Config senderConfig;
-        senderConfig.serverAddress = opts.address;
-        senderConfig.nodeId = node.nodeId;
-        senderConfig.nodeAddress = "127.0.0.1";
-        senderConfig.channelCount = static_cast<uint32_t>(node.channels.size());
-        senderConfig.detectorType = "BDM2";
-        senderConfig.maxPendingSegments = opts.maxPendingSegments;
-
-        PersistentNodeStreamSender sender(senderConfig);
-        if (!sender.start())
-        {
-            std::cerr << "[Node " << node.nodeId << "] failed to start persistent sender" << std::endl;
-            return stats;
-        }
-
         auto config = r2s::createBDM2Config(
             node.rawdataPath,
             opts.resultDir,
@@ -794,42 +518,42 @@ namespace
         config.saveData2SingleFile = false;
         config.asyncFileWrite = false;
 
-        config.onSinglesReady = [&stats, &sender, nodeId = node.nodeId](
-                                    std::vector<r2s::GlobalSingle> &&singles,
-                                    uint64_t clock_ms,
-                                    uint32_t duration_ms) -> bool
-        {
-            stats.callbackCount += 1;
-
-            const bool sent = sender.enqueue(std::move(singles), clock_ms, duration_ms);
-            if (!sent)
-            {
-                std::cerr << "[Node " << nodeId << "] enqueue failed at callback "
-                          << stats.callbackCount << std::endl;
-                return false;
-            }
-
-            if (stats.callbackCount == 1 || stats.callbackCount % 50 == 0)
-            {
-                std::cout << "[Node " << nodeId << "] callbacks=" << stats.callbackCount
-                          << " (streaming queue active)" << std::endl;
-            }
-
-            return true;
-        };
+        grpcnode::R2SGrpcNode nodeRunner(
+            config,
+            opts.address,
+            node.nodeId,
+            static_cast<uint32_t>(node.channels.size()),
+            opts.maxPendingSegments,
+            "127.0.0.1",
+            "BDM2",
+            50);
 
         std::cout << "[Node " << node.nodeId << "] R2S start, file=" << node.rawdataPath << std::endl;
-        const bool r2sSuccess = r2s::processR2S(config);
-        const bool streamSuccess = sender.stop();
-        stats.singlesSent = sender.singlesSent();
-        stats.grpcMessagesSent = sender.messagesSent();
-        stats.success = r2sSuccess && streamSuccess;
+        nodeRunner.run();
+        NodeRunStats stats = nodeRunner.stats();
 
         std::cout << "[Node " << node.nodeId << "] R2S done, success="
                   << (stats.success ? "true" : "false")
                   << " callbacks=" << stats.callbackCount
                   << " grpcMessages=" << stats.grpcMessagesSent
                   << " singlesSent=" << stats.singlesSent << std::endl;
+
+#ifdef DEBUG
+        const double enqueueAvgUs = stats.enqueueCalls > 0 ? (double)stats.enqueueTotalNs / stats.enqueueCalls / 1e3 : 0.0;
+        const double enqueueWaitAvgUs = stats.enqueueCalls > 0 ? (double)stats.enqueueWaitNs / stats.enqueueCalls / 1e3 : 0.0;
+        const double serializeAvgUs = stats.grpcMessagesSent > 0 ? (double)stats.serializeBuildNs / stats.grpcMessagesSent / 1e3 : 0.0;
+        const double writeAvgUs = stats.grpcMessagesSent > 0 ? (double)stats.writeNs / stats.grpcMessagesSent / 1e3 : 0.0;
+
+        std::cout << "[Node " << node.nodeId << "] Perf enqueue(avg/wait avg/max wait)="
+                  << enqueueAvgUs << "/" << enqueueWaitAvgUs << "/" << (double)stats.maxEnqueueWaitNs / 1e3
+                  << " us, serialize avg=" << serializeAvgUs
+                  << " us, write(avg/max)=" << writeAvgUs << "/" << (double)stats.maxWriteNs / 1e3
+                  << " us" << std::endl;
+        std::cout << "[Node " << node.nodeId << "] Memory queuePeak=" << stats.peakQueueSegments
+                  << " segments, " << stats.peakQueueSingles << " singles, "
+                  << (double)stats.peakQueueBytes / (1024.0 * 1024.0) << " MiB, processRSS="
+                  << (double)stats.processRssBytes / (1024.0 * 1024.0) << " MiB" << std::endl;
+#endif
 
         return stats;
     }
@@ -953,6 +677,20 @@ int main(int argc, char **argv)
     uint64_t totalCallbacks = 0;
     uint64_t totalSinglesSent = 0;
     uint64_t totalGrpcMessages = 0;
+#ifdef DEBUG
+    uint64_t totalEnqueueCalls = 0;
+    uint64_t totalEnqueueTotalNs = 0;
+    uint64_t totalEnqueueWaitNs = 0;
+    uint64_t totalSerializeBuildNs = 0;
+    uint64_t totalWriteNs = 0;
+    uint64_t totalEstimatedWireBytes = 0;
+    uint64_t maxEnqueueWaitNsAll = 0;
+    uint64_t maxWriteNsAll = 0;
+    uint64_t maxPeakQueueBytes = 0;
+    uint64_t maxPeakQueueSegments = 0;
+    uint64_t maxPeakQueueSingles = 0;
+    uint64_t maxProcessRssBytes = 0;
+#endif
     bool allSuccess = true;
 
     for (const auto &s : stats)
@@ -960,6 +698,20 @@ int main(int argc, char **argv)
         totalCallbacks += s.callbackCount;
         totalSinglesSent += s.singlesSent;
         totalGrpcMessages += s.grpcMessagesSent;
+#ifdef DEBUG
+        totalEnqueueCalls += s.enqueueCalls;
+        totalEnqueueTotalNs += s.enqueueTotalNs;
+        totalEnqueueWaitNs += s.enqueueWaitNs;
+        totalSerializeBuildNs += s.serializeBuildNs;
+        totalWriteNs += s.writeNs;
+        totalEstimatedWireBytes += s.estimatedWireBytes;
+        maxEnqueueWaitNsAll = std::max(maxEnqueueWaitNsAll, s.maxEnqueueWaitNs);
+        maxWriteNsAll = std::max(maxWriteNsAll, s.maxWriteNs);
+        maxPeakQueueBytes = std::max(maxPeakQueueBytes, s.peakQueueBytes);
+        maxPeakQueueSegments = std::max(maxPeakQueueSegments, s.peakQueueSegments);
+        maxPeakQueueSingles = std::max(maxPeakQueueSingles, s.peakQueueSingles);
+        maxProcessRssBytes = std::max(maxProcessRssBytes, s.processRssBytes);
+#endif
         allSuccess = allSuccess && s.success;
     }
 
@@ -972,6 +724,29 @@ int main(int argc, char **argv)
     std::cout << "Total callbacks: " << totalCallbacks << std::endl;
     std::cout << "Total gRPC messages: " << totalGrpcMessages << std::endl;
     std::cout << "Total singles sent: " << totalSinglesSent << std::endl;
+#ifdef DEBUG
+    const double enqueueAvgUs = totalEnqueueCalls > 0 ? (double)totalEnqueueTotalNs / totalEnqueueCalls / 1e3 : 0.0;
+    const double enqueueWaitAvgUs = totalEnqueueCalls > 0 ? (double)totalEnqueueWaitNs / totalEnqueueCalls / 1e3 : 0.0;
+    const double serializeAvgUs = totalGrpcMessages > 0 ? (double)totalSerializeBuildNs / totalGrpcMessages / 1e3 : 0.0;
+    const double writeAvgUs = totalGrpcMessages > 0 ? (double)totalWriteNs / totalGrpcMessages / 1e3 : 0.0;
+    const double wireMiB = (double)totalEstimatedWireBytes / (1024.0 * 1024.0);
+    const double wireThroughputMiBs = elapsedMs > 0 ? wireMiB / ((double)elapsedMs / 1000.0) : 0.0;
+
+    std::cout << "Perf enqueue(avg/wait avg/max wait): "
+              << enqueueAvgUs << "/" << enqueueWaitAvgUs << "/" << (double)maxEnqueueWaitNsAll / 1e3
+              << " us" << std::endl;
+    std::cout << "Perf serialize avg per message: " << serializeAvgUs
+              << " us, write(avg/max): " << writeAvgUs << "/" << (double)maxWriteNsAll / 1e3
+              << " us" << std::endl;
+    std::cout << "Wire bytes (estimated proto): " << totalEstimatedWireBytes
+              << " bytes (" << wireMiB << " MiB), throughput=" << wireThroughputMiBs
+              << " MiB/s" << std::endl;
+    std::cout << "Memory peak queue: " << maxPeakQueueSegments << " segments, "
+              << maxPeakQueueSingles << " singles, " << (double)maxPeakQueueBytes / (1024.0 * 1024.0)
+              << " MiB" << std::endl;
+    std::cout << "Memory max process RSS: "
+              << (double)maxProcessRssBytes / (1024.0 * 1024.0) << " MiB" << std::endl;
+#endif
     std::cout << "Elapsed time: " << elapsedMs << " ms" << std::endl;
     std::cout << "==================================" << std::endl;
 

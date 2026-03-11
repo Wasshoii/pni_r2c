@@ -58,6 +58,11 @@ message StatusResponse {
     uint64 current_time_boundary_pico = 7;
     bool is_running = 8;
     repeated NodeStatus node_stats = 9;
+
+    // 编排状态
+    uint32 expected_node_count = 10;
+    uint32 connected_node_count = 11;
+    bool start_signal_issued = 12;
 }
 
 // 控制命令
@@ -111,6 +116,27 @@ message RegisterNodeResponse {
     bool success = 1;
     string message = 2;
     uint32 assigned_node_id = 3;
+
+    // 编排信息（用于节点侧日志与状态确认）
+    uint32 expected_node_count = 4;
+    uint32 connected_node_count = 5;
+    bool start_signal_issued = 6;
+    uint64 planned_start_time_ms = 7;
+}
+
+// 节点等待主机发出开始信号
+message WaitForStartRequest {
+    uint32 node_id = 1;
+    uint32 timeout_ms = 2; // 0 = 使用服务端默认等待时长
+}
+
+message WaitForStartResponse {
+    bool success = 1;
+    bool start_signal_issued = 2;
+    uint64 start_time_ms = 3;
+    string message = 4;
+    uint32 expected_node_count = 5;
+    uint32 connected_node_count = 6;
 }
 
 // 心跳请求
@@ -132,6 +158,9 @@ message HeartbeatResponse {
 service CoincidenceService {
     // 流式接收单事件数据（核心接口）
     rpc StreamSingles(stream SingleChunkMessage) returns (StreamResponse);
+
+    // 等待主机发出开始信号（标准编排流程）
+    rpc WaitForStart(WaitForStartRequest) returns (WaitForStartResponse);
     
     // 获取处理状态
     rpc GetStatus(StatusRequest) returns (StatusResponse);

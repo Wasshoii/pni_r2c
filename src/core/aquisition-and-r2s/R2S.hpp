@@ -443,10 +443,12 @@ namespace openpni::distributed::r2s
                 return false;
             }
 
-            // 4. 创建 SingleGenerator（只为要处理的通道创建）
+            // 4. 创建 SingleGenerator（只为要处理的通道创建，若通道数量与文件头不一致，代码会出错）
+            // 由于pni-core通道映射的实现问题，暂时都读取全部通道的校正文件
             std::vector<openpni::interface::SingleGenerator *> generatorsVector;
             std::cout << "Loading " << channelsToProcess.size() << " channels' calibration data..." << std::endl;
             if (config.channelIndices.size() == 0) // 处理所有通道
+            // if (1)
             {
                 for (size_t i = 0; i < config.channelNums; i++)
                 {

@@ -68,8 +68,12 @@ TEST_PNI_R2C_SRC = tests/test_pni_r2c.cpp
 TEST_PNI_R2C_TARGET = $(BIN_DIR)/test_pni_r2c
 
 # Local gRPC R2S BDM2 test (receiver only)
-TEST_LOCAL_GRPC_R2S_SRC = tests/test_local_grpc_r2s_bdm2.cpp
-TEST_LOCAL_GRPC_R2S_TARGET = $(BIN_DIR)/test_local_grpc_r2s_bdm2
+TEST_LOCAL_GRPC_R2S_SRC = tests/test_local_grpc_r2s.cpp
+TEST_LOCAL_GRPC_R2S_TARGET = $(BIN_DIR)/test_local_grpc_r2s
+
+# Local gRPC coin receiver-only host test
+TEST_LOCAL_GRPC_COIN_SRC = tests/test_local_grpc_coin.cpp
+TEST_LOCAL_GRPC_COIN_TARGET = $(BIN_DIR)/test_local_grpc_coin
 
 # CUDA source files for PNI R2C
 CUDA_SINGLES_PROCESS_SRC = src/tools/SinglesProcess.cu
@@ -151,6 +155,13 @@ $(TEST_LOCAL_GRPC_R2S_TARGET): $(TEST_LOCAL_GRPC_R2S_SRC) $(PROTO_OBJS) $(CUDA_S
 	@echo "✓ Local gRPC R2S BDM2 test program compiled successfully"
 	@echo "Run: $(TEST_LOCAL_GRPC_R2S_TARGET)"
 
+# 编译本地 gRPC Coin 接收测试程序（仅接收 + 发开始信号）
+$(TEST_LOCAL_GRPC_COIN_TARGET): $(TEST_LOCAL_GRPC_COIN_SRC) $(PROTO_OBJS) | directories
+	$(CXX) $(CXXFLAGS_BASE) -c $(TEST_LOCAL_GRPC_COIN_SRC) -o build/test_local_grpc_coin.o
+	$(CXX) $(CXXFLAGS_BASE) -o $(TEST_LOCAL_GRPC_COIN_TARGET) build/test_local_grpc_coin.o $(PROTO_OBJS) $(LDFLAGS_BASE)
+	@echo "✓ Local gRPC coin receiver test program compiled successfully"
+	@echo "Run: $(TEST_LOCAL_GRPC_COIN_TARGET)"
+
 # 清理
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)
@@ -191,6 +202,7 @@ help:
 	@echo "  make all-full         - 编译所有程序（含 PNI 依赖）"
 	@echo "  make test-streaming   - 编译并运行流式符合测试"
 	@echo "  make test-pni-r2c     - 编译并运行 PNI R2C 测试"
+	@echo "  make test-local-grpc-coin - 编译并运行本地 gRPC 符合主机接收测试"
 	@echo "  make test-local-grpc-r2s - 编译并运行本地 gRPC 单事件转换测试(BDM2)"
 	@echo ""
 	@echo "清理:"
@@ -228,4 +240,12 @@ test-local-grpc-r2s: $(TEST_LOCAL_GRPC_R2S_TARGET)
 	@echo "===================================="
 	@echo "✓ Tests completed"
 
-.PHONY: all all-full test test-grpc test-streaming test-pni-r2c test-local-grpc-r2s clean clean-proto help directories
+# 运行本地 gRPC Coin 接收测试
+test-local-grpc-coin: $(TEST_LOCAL_GRPC_COIN_TARGET)
+	@echo "Running local gRPC coin receiver test..."
+	@echo "========================================="
+	@$(TEST_LOCAL_GRPC_COIN_TARGET)
+	@echo "========================================="
+	@echo "✓ Tests completed"
+
+.PHONY: all all-full test test-grpc test-streaming test-pni-r2c test-local-grpc-coin test-local-grpc-r2s clean clean-proto help directories

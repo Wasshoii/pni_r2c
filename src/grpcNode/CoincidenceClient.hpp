@@ -4,6 +4,7 @@
 #include "protos/coincidence.grpc.pb.h"
 
 #include <pni/io/IO.hpp>
+#include <algorithm>
 #include <vector>
 #include <memory>
 #include <atomic>
@@ -39,6 +40,12 @@ namespace openpni::distributed::streaming
 
         // 心跳配置
         uint32_t heartbeatIntervalMs = 5000;
+
+        // 编排配置：注册后是否等待主机开始信号
+        bool waitForStartSignal = true;
+        uint32_t waitForStartTimeoutMs = 0;          // 0 = 无限等待
+        uint32_t waitForStartRpcTimeoutMs = 15000;   // 单次 WaitForStart RPC 最长等待
+        uint32_t waitForStartRetryIntervalMs = 1000; // 失败重试间隔
     };
 
     /**
@@ -80,6 +87,15 @@ namespace openpni::distributed::streaming
             {
                 m_running = false;
                 return false;
+            }
+
+            if (m_config.waitForStartSignal)
+            {
+                if (!waitForServerStartSignal(m_config.waitForStartTimeoutMs))
+                {
+                    m_running = false;
+                    return false;
+                }
             }
 
             // 启动发送线程
@@ -212,7 +228,91 @@ namespace openpni::distributed::streaming
         bool isRunning() const { return m_running.load(); }
         bool isConnected() const { return m_connected.load(); }
 
+        /**
+         * @brief 主动等待主机发出开始信号
+         */
+        bool waitForServerStartSignal(uint32_t timeoutMs = 0)
+        {
+            const uint64_t startTs = nowMs();
+
+            while (m_running.load())
+            {
+                grpc::ClientContext context;
+                coincidence::WaitForStartRequest request;
+                request.set_node_id(m_config.nodeId);
+                request.set_timeout_ms(m_config.waitForStartRpcTimeoutMs);
+
+                coincidence::WaitForStartResponse response;
+                grpc::Status status = m_stub->WaitForStart(&context, request, &response);
+
+                if (status.ok() && response.success() && response.start_signal_issued())
+                {
+                    const uint64_t plannedStartMs = response.start_time_ms();
+                    waitUntil(plannedStartMs);
+                    std::cout << "[CoincidenceClient] Start signal received, planned_start_ms="
+                              << plannedStartMs << std::endl;
+                    return true;
+                }
+
+                if (!status.ok())
+                {
+                    std::cerr << "[CoincidenceClient] WaitForStart RPC failed: "
+                              << status.error_message() << std::endl;
+                }
+                else
+                {
+                    std::cerr << "[CoincidenceClient] WaitForStart not ready: "
+                              << response.message() << std::endl;
+                }
+
+                if (timeoutMs > 0)
+                {
+                    const uint64_t elapsed = nowMs() - startTs;
+                    if (elapsed >= timeoutMs)
+                    {
+                        std::cerr << "[CoincidenceClient] WaitForStart timed out after "
+                                  << elapsed << " ms" << std::endl;
+                        return false;
+                    }
+                }
+
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(m_config.waitForStartRetryIntervalMs));
+            }
+
+            return false;
+        }
+
     private:
+        static uint64_t nowMs()
+        {
+            return static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count());
+        }
+
+        void waitUntil(uint64_t plannedStartMs)
+        {
+            if (plannedStartMs == 0)
+            {
+                return;
+            }
+
+            while (m_running.load())
+            {
+                const uint64_t now = nowMs();
+                if (now >= plannedStartMs)
+                {
+                    return;
+                }
+
+                const uint64_t remaining = plannedStartMs - now;
+                const uint64_t sleepMs = std::min<uint64_t>(remaining, 100);
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+            }
+        }
+
         /**
          * @brief 注册节点到服务器
          */

@@ -47,6 +47,7 @@ namespace
         uint32_t nodeCount = 3;
         size_t maxPendingSegments = 64;
         bool parallelNodes = false;
+        bool noLocalReceiver = false;
         bool helpOnly = false;
     };
 
@@ -127,6 +128,9 @@ namespace
             response->set_avg_processing_time_ms(0.0);
             response->set_current_time_boundary_pico(0);
             response->set_is_running(true);
+            response->set_expected_node_count(static_cast<uint32_t>(m_nodes.size()));
+            response->set_connected_node_count(static_cast<uint32_t>(m_nodes.size()));
+            response->set_start_signal_issued(true);
 
             if (request->include_node_stats())
             {
@@ -142,6 +146,24 @@ namespace
                 }
             }
 
+            return grpc::Status::OK;
+        }
+
+        grpc::Status WaitForStart(
+            grpc::ServerContext * /*context*/,
+            const coincidence::WaitForStartRequest *request,
+            coincidence::WaitForStartResponse *response) override
+        {
+            response->set_success(true);
+            response->set_start_signal_issued(true);
+            response->set_start_time_ms(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count());
+            response->set_expected_node_count(static_cast<uint32_t>(m_nodes.size()));
+            response->set_connected_node_count(static_cast<uint32_t>(m_nodes.size()));
+            response->set_message("Receiver-only mode: start signal is always ready");
+            (void)request;
             return grpc::Status::OK;
         }
 
@@ -180,6 +202,13 @@ namespace
 
             response->set_success(true);
             response->set_assigned_node_id(request->node_id());
+            response->set_expected_node_count(static_cast<uint32_t>(m_nodes.size()));
+            response->set_connected_node_count(static_cast<uint32_t>(m_nodes.size()));
+            response->set_start_signal_issued(true);
+            response->set_planned_start_time_ms(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count());
             response->set_message("Node registered (receiver-only mode)");
 
             std::cout << "[Receiver] Register node=" << request->node_id()
@@ -272,6 +301,7 @@ namespace
                   << "  --raw-prefix <name>           Split rawdata file prefix\n"
                   << "  --node-count <N>              Number of nodes/files to process (default: 3)\n"
                   << "  --max-pending-segments <N>    Async sender queue length in segments (default: 64)\n"
+                  << "  --no-local-receiver           Do not start built-in receiver; use external coin host\n"
                   << "  --parallel                    Run node conversion in parallel\n"
                   << "  --help                        Print this message\n"
                   << std::endl;
@@ -352,6 +382,11 @@ namespace
             if (arg == "--parallel")
             {
                 opts.parallelNodes = true;
+                continue;
+            }
+            if (arg == "--no-local-receiver")
+            {
+                opts.noLocalReceiver = true;
                 continue;
             }
             if (arg == "--node-count")
@@ -619,6 +654,7 @@ int main(int argc, char **argv)
     std::cout << "nodeCount    : " << opts.nodeCount << std::endl;
     std::cout << "maxPendingSegments: " << opts.maxPendingSegments << std::endl;
     std::cout << "parallelNodes: " << (opts.parallelNodes ? "true" : "false") << std::endl;
+    std::cout << "noLocalReceiver: " << (opts.noLocalReceiver ? "true" : "false") << std::endl;
 
     if (opts.nodeCount > 12)
     {
@@ -635,10 +671,18 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    LocalReceiverServer server(opts.address);
-    if (!server.start())
+    std::unique_ptr<LocalReceiverServer> server;
+    if (!opts.noLocalReceiver)
     {
-        return 3;
+        server = std::make_unique<LocalReceiverServer>(opts.address);
+        if (!server->start())
+        {
+            return 3;
+        }
+    }
+    else
+    {
+        std::cout << "[Test] Using external receiver at " << opts.address << std::endl;
     }
 
     const auto t0 = std::chrono::steady_clock::now();
@@ -672,7 +716,10 @@ int main(int argc, char **argv)
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     printServerStatus(opts.address);
 
-    server.stop();
+    if (server)
+    {
+        server->stop();
+    }
 
     uint64_t totalCallbacks = 0;
     uint64_t totalSinglesSent = 0;
@@ -757,13 +804,15 @@ int main(int argc, char **argv)
 Build example:
   make test-local-grpc-r2s
 
-Run example:
-  ./bin/test_local_grpc_r2s_bdm2 \
-      --address 127.0.0.1:50061 \
-      --split-dir Data/bdm2/split_Data \
-      --calibration-dir Data/bdm2/calibration \
-      --result-dir Data/result/Bdm2/split \
-      --node-count 3 \
-            --max-pending-segments 64 \
-      --raw-prefix "2_PET_2Bed pet 600s-bed0"
+# 2) 运行（连接外部 coin，3 节点并行注册并等待开始信号）
+./bin/test_local_grpc_r2s \
+  --address 127.0.0.1:50061 \
+  --split-dir Data/bdm2/split_Data \
+  --calibration-dir Data/bdm2/calibration \
+  --result-dir Data/result/Bdm2/split \
+  --raw-prefix "2_PET_2Bed pet 600s-bed0" \
+  --node-count 3 \
+  --max-pending-segments 64 \
+  --parallel \
+  --no-local-receiver
 */

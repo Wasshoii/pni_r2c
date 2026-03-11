@@ -2,6 +2,7 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -12,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -103,6 +105,12 @@ namespace openpni::distributed::grpcnode
             std::string detectorType = "BDM2";     // 探测器类型字符串（仅用于统计和日志）
             size_t maxPendingSegments = 128;       // 流式发送队列最大待处理段数量，超过则回调返回false停止处理
             uint32_t progressLogInterval = 50;     // 每处理多少次回调输出一次进度日志，0则不输出
+
+            // 标准编排流程：注册后等待符合主机发出开始信号
+            bool waitForStartSignal = true;
+            uint32_t waitForStartTimeoutMs = 0;          // 0 = 无限等待
+            uint32_t waitForStartRpcTimeoutMs = 15000;   // 单次 WaitForStart RPC 超时
+            uint32_t waitForStartRetryIntervalMs = 1000; // 未就绪时重试间隔
         };
 
         explicit R2SGrpcNode(InitOptions init)
@@ -120,7 +128,11 @@ namespace openpni::distributed::grpcnode
             size_t maxPendingSegments = 128,
             std::string nodeAddress = "127.0.0.1",
             std::string detectorType = "BDM2",
-            uint32_t progressLogInterval = 50)
+            uint32_t progressLogInterval = 50,
+            bool waitForStartSignal = true,
+            uint32_t waitForStartTimeoutMs = 0,
+            uint32_t waitForStartRpcTimeoutMs = 15000,
+            uint32_t waitForStartRetryIntervalMs = 1000)
         {
             m_init.r2sConfig = r2sConfig;
             m_init.serverAddress = std::move(serverAddress);
@@ -130,6 +142,10 @@ namespace openpni::distributed::grpcnode
             m_init.detectorType = std::move(detectorType);
             m_init.maxPendingSegments = maxPendingSegments;
             m_init.progressLogInterval = progressLogInterval;
+            m_init.waitForStartSignal = waitForStartSignal;
+            m_init.waitForStartTimeoutMs = waitForStartTimeoutMs;
+            m_init.waitForStartRpcTimeoutMs = waitForStartRpcTimeoutMs;
+            m_init.waitForStartRetryIntervalMs = waitForStartRetryIntervalMs;
         }
 
         bool run()
@@ -143,6 +159,10 @@ namespace openpni::distributed::grpcnode
             senderConfig.channelCount = m_init.channelCount;
             senderConfig.detectorType = m_init.detectorType;
             senderConfig.maxPendingSegments = m_init.maxPendingSegments;
+            senderConfig.waitForStartSignal = m_init.waitForStartSignal;
+            senderConfig.waitForStartTimeoutMs = m_init.waitForStartTimeoutMs;
+            senderConfig.waitForStartRpcTimeoutMs = m_init.waitForStartRpcTimeoutMs;
+            senderConfig.waitForStartRetryIntervalMs = m_init.waitForStartRetryIntervalMs;
 
             PersistentNodeStreamSender sender(std::move(senderConfig));
             if (!sender.start())
@@ -235,6 +255,11 @@ namespace openpni::distributed::grpcnode
                 uint32_t channelCount = 0;
                 std::string detectorType = "BDM2";
                 size_t maxPendingSegments = 128;
+
+                bool waitForStartSignal = true;
+                uint32_t waitForStartTimeoutMs = 0;
+                uint32_t waitForStartRpcTimeoutMs = 15000;
+                uint32_t waitForStartRetryIntervalMs = 1000;
             };
 
             explicit PersistentNodeStreamSender(Config cfg)
@@ -268,6 +293,19 @@ namespace openpni::distributed::grpcnode
                 {
                     m_started = false;
                     return false;
+                }
+
+                if (m_cfg.waitForStartSignal)
+                {
+                    uint64_t plannedStartMs = 0;
+                    if (!waitForStartSignal(&plannedStartMs))
+                    {
+                        std::cerr << "[Node " << m_cfg.nodeId << "] wait-for-start failed" << std::endl;
+                        m_started = false;
+                        return false;
+                    }
+
+                    waitUntil(plannedStartMs);
                 }
 
                 m_streamContext = std::make_unique<grpc::ClientContext>();
@@ -426,6 +464,91 @@ namespace openpni::distributed::grpcnode
                 }
 
                 return true;
+            }
+
+            static uint64_t nowMs()
+            {
+                return static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count());
+            }
+
+            void waitUntil(uint64_t plannedStartMs)
+            {
+                if (plannedStartMs == 0)
+                {
+                    return;
+                }
+
+                while (m_started.load(std::memory_order_relaxed))
+                {
+                    const uint64_t now = nowMs();
+                    if (now >= plannedStartMs)
+                    {
+                        return;
+                    }
+
+                    const uint64_t remaining = plannedStartMs - now;
+                    const uint64_t sleepMs = std::min<uint64_t>(remaining, 100);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+                }
+            }
+
+            bool waitForStartSignal(uint64_t *plannedStartMs)
+            {
+                const uint64_t beginMs = nowMs();
+
+                while (m_started.load(std::memory_order_relaxed))
+                {
+                    grpc::ClientContext context;
+                    coincidence::WaitForStartRequest request;
+                    request.set_node_id(m_cfg.nodeId);
+                    request.set_timeout_ms(m_cfg.waitForStartRpcTimeoutMs);
+
+                    coincidence::WaitForStartResponse response;
+                    grpc::Status status = m_stub->WaitForStart(&context, request, &response);
+                    if (status.ok() && response.success() && response.start_signal_issued())
+                    {
+                        if (plannedStartMs)
+                        {
+                            *plannedStartMs = response.start_time_ms();
+                        }
+
+                        std::cout << "[Node " << m_cfg.nodeId
+                                  << "] start signal received, planned_start_ms="
+                                  << response.start_time_ms() << std::endl;
+                        return true;
+                    }
+
+                    if (!status.ok())
+                    {
+                        std::cerr << "[Node " << m_cfg.nodeId << "] WaitForStart RPC failed: "
+                                  << status.error_message() << std::endl;
+                    }
+                    else
+                    {
+                        std::cerr << "[Node " << m_cfg.nodeId << "] WaitForStart not ready: "
+                                  << response.message() << std::endl;
+                    }
+
+                    if (m_cfg.waitForStartTimeoutMs > 0)
+                    {
+                        const uint64_t elapsed = nowMs() - beginMs;
+                        if (elapsed >= m_cfg.waitForStartTimeoutMs)
+                        {
+                            std::cerr << "[Node " << m_cfg.nodeId
+                                      << "] wait-for-start timeout after "
+                                      << elapsed << " ms" << std::endl;
+                            return false;
+                        }
+                    }
+
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(m_cfg.waitForStartRetryIntervalMs));
+                }
+
+                return false;
             }
 
             void senderLoop()

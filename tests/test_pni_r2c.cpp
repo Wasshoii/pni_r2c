@@ -194,8 +194,8 @@ void test_bdm2_callback()
 
     auto config = r2s::createBDM2Config(singleRawdataPath, resPath, calibrationFilePaths, "singles_callback_test", {uint16_t(i * 4), uint16_t(i * 4 + 1), uint16_t(i * 4 + 2), uint16_t(i * 4 + 3)});
 
-    config.saveData2SingleFile = true;
-    config.asyncFileWrite = true;
+    config.saveData2SingleFile = false;
+    config.asyncFileWrite = false;
 
     // 设置回调函数 - 模拟接收数据（实际使用时会通过 gRPC 发送）
     config.onSinglesReady = [&totalSinglesReceived, &totalCallbacks](
@@ -252,13 +252,13 @@ int main()
     std::cout << "======================================\n"
               << std::endl;
 
-    // // 测试1: 保存文件模式
-    // std::cout << "[Test 1] Testing file save mode..." << std::endl;
-    // test_bdm2_saveflie();
+    // 测试1: 保存文件模式
+    std::cout << "[Test 1] Testing file save mode..." << std::endl;
+    test_bdm2_saveflie();
 
-    // 测试2: 回调模式
-    std::cout << "[Test 2] Testing callback mode..." << std::endl;
-    test_bdm2_callback();
+    // // 测试2: 回调模式
+    // std::cout << "[Test 2] Testing callback mode..." << std::endl;
+    // test_bdm2_callback();
 
     std::cout << "\n======================================" << std::endl;
     std::cout << "     All tests completed!" << std::endl;

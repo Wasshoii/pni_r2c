@@ -804,7 +804,7 @@ int main(int argc, char **argv)
 Build example:
   make test-local-grpc-r2s
 
-# 2) 运行（连接外部 coin，3 节点并行注册并等待开始信号）
+运行（连接外部 coin，3 节点并行注册并等待开始信号）
 ./bin/test_local_grpc_r2s \
   --address 127.0.0.1:50061 \
   --split-dir Data/bdm2/split_Data \
@@ -812,7 +812,7 @@ Build example:
   --result-dir Data/result/Bdm2/split \
   --raw-prefix "2_PET_2Bed pet 600s-bed0" \
   --node-count 3 \
-  --max-pending-segments 64 \
+  --max-pending-segments 128 \
   --parallel \
   --no-local-receiver
 */

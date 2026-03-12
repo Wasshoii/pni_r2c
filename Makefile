@@ -10,39 +10,64 @@ CXXFLAGS = -std=c++23 -Wall -Wextra -O2 -pthread
 NVCCFLAGS = -std=c++20 -O2 --expt-relaxed-constexpr
 
 # 链接标志
-LDFLAGS = -pthread
+LDFLAGS =
 
 # ==================== CUDA 配置 ====================
 CUDA_PATH ?= /usr/local/cuda
 CUDA_INCLUDE = -I$(CUDA_PATH)/include
 CUDA_LIBS = -L$(CUDA_PATH)/lib64 -lcudart -lcuda
 
+# ==================== pkg-config 配置 ====================
+PKG_CONFIG = pkg-config
+PKG_CONFIG_PATH_OVERRIDE = /usr/lib/x86_64-linux-gnu/pkgconfig
+
 # ==================== PNI 库配置 ====================
-# PNI 项目路径（可通过环境变量覆盖）
+# 优先使用系统安装的 libpni pkg-config；若不可用则回退到源码目录路径
+PNI_PKG_NAME ?= libpni
+PNI_PKG_CFLAGS = $(shell $(PKG_CONFIG) --cflags $(PNI_PKG_NAME) 2>/dev/null)
+PNI_PKG_CFLAGS_I = $(shell $(PKG_CONFIG) --cflags-only-I $(PNI_PKG_NAME) 2>/dev/null)
+PNI_PKG_LIBS = $(shell $(PKG_CONFIG) --libs $(PNI_PKG_NAME) 2>/dev/null)
+
+ifeq ($(strip $(PNI_PKG_LIBS)),)
+# 回退模式：使用源码树中的 include/build 目录
 PNI_PROJECT_PATH ?= /media/ustc-pni/5282FE19AB6D5297/pni_grpc/pni-standard-project
-PNI_INCLUDE = -I$(PNI_PROJECT_PATH)/include
+PNI_CFLAGS = -I$(PNI_PROJECT_PATH)/include
+PNI_NVCC_CFLAGS = $(PNI_CFLAGS)
 PNI_LIB_PATH = $(PNI_PROJECT_PATH)/build
 PNI_LIBS = -L$(PNI_LIB_PATH) -lpni -lpni_cu -Wl,-rpath,$(PNI_LIB_PATH)
+PNI_EXTRA_CXXFLAGS = $(CUDA_INCLUDE)
+PNI_EXTRA_LDFLAGS = $(CUDA_LIBS) -levent
+else
+# 系统安装模式：使用 pkg-config 提供的完整编译/链接参数
+PNI_CFLAGS = $(PNI_PKG_CFLAGS)
+PNI_NVCC_CFLAGS = $(PNI_PKG_CFLAGS_I)
+PNI_LIBS = $(PNI_PKG_LIBS)
+PNI_EXTRA_CXXFLAGS =
+PNI_EXTRA_LDFLAGS = -lcuda
+endif
 
 # ==================== gRPC 配置 ====================
-PKG_CONFIG_PATH_OVERRIDE = /usr/lib/x86_64-linux-gnu/pkgconfig
-PKG_CONFIG = pkg-config
+GRPC_CFLAGS_RAW = $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH_OVERRIDE) $(PKG_CONFIG) --cflags grpc++ protobuf 2>/dev/null || echo "")
+GRPC_LIBS_RAW = $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH_OVERRIDE) $(PKG_CONFIG) --libs grpc++ protobuf 2>/dev/null || echo "-lgrpc++ -lprotobuf")
+GRPC_CFLAGS = $(filter-out -pthread,$(GRPC_CFLAGS_RAW))
+GRPC_LIBS = $(filter-out -pthread,$(GRPC_LIBS_RAW))
 
-GRPC_CFLAGS = $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH_OVERRIDE) $(PKG_CONFIG) --cflags grpc++ protobuf 2>/dev/null || echo "")
-GRPC_LIBS = $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH_OVERRIDE) $(PKG_CONFIG) --libs grpc++ protobuf 2>/dev/null || echo "-lgrpc++ -lprotobuf")
+# 优先使用系统 protobuf/grpc 动态库，避免误链接到 /usr/local 下的静态 libprotobuf.a
+SYSTEM_LIB_DIR ?= /usr/lib/x86_64-linux-gnu
+SYSTEM_LIB_HINT = -L$(SYSTEM_LIB_DIR)
 
 # ==================== 汇总编译选项 ====================
 # 基础编译选项（不含 PNI/CUDA）
 CXXFLAGS_BASE = $(CXXFLAGS) -Iinclude_override $(GRPC_CFLAGS) -Iinclude -Iprotos -Isrc
 
 # 完整编译选项（含 PNI/CUDA）
-CXXFLAGS_FULL = $(CXXFLAGS_BASE) $(PNI_INCLUDE) $(CUDA_INCLUDE)
+CXXFLAGS_FULL = $(CXXFLAGS_BASE) $(PNI_CFLAGS) $(PNI_EXTRA_CXXFLAGS)
 
 # 基础链接选项
-LDFLAGS_BASE = $(LDFLAGS) $(GRPC_LIBS) -ldl
+LDFLAGS_BASE = $(LDFLAGS) $(SYSTEM_LIB_HINT) $(GRPC_LIBS) -ldl
 
 # 完整链接选项（含 PNI/CUDA）
-LDFLAGS_FULL = $(LDFLAGS_BASE) $(PNI_LIBS) $(CUDA_LIBS) -levent
+LDFLAGS_FULL = $(LDFLAGS_BASE) $(PNI_LIBS) $(PNI_EXTRA_LDFLAGS)
 
 # Tools - Force system versions
 PROTOC = /usr/bin/protoc
@@ -103,7 +128,7 @@ directories:
 
 # 编译原始测试程序（模拟，无 PNI 依赖）
 $(TEST_TARGET): $(TEST_SRC) | directories
-	$(CXX) $(CXXFLAGS_BASE) -o $(TEST_TARGET) $(TEST_SRC) -pthread
+	$(CXX) $(CXXFLAGS_BASE) -o $(TEST_TARGET) $(TEST_SRC)
 	@echo "✓ Test program compiled successfully"
 	@echo "Run: $(TEST_TARGET)"
 
@@ -138,7 +163,7 @@ $(TEST_STREAMING_TARGET): $(TEST_STREAMING_SRC) $(PROTO_OBJS) | directories
 
 # 编译 CUDA 源文件（使用 g++-13 作为 host 编译器以支持 <format>）
 $(CUDA_SINGLES_PROCESS_OBJ): $(CUDA_SINGLES_PROCESS_SRC) | directories
-	$(NVCC) $(NVCCFLAGS) -ccbin g++-13 $(PNI_INCLUDE) $(CUDA_INCLUDE) -Isrc -c $(CUDA_SINGLES_PROCESS_SRC) -o $(CUDA_SINGLES_PROCESS_OBJ)
+	$(NVCC) $(NVCCFLAGS) -ccbin g++-13 $(PNI_NVCC_CFLAGS) $(PNI_EXTRA_CXXFLAGS) -Isrc -c $(CUDA_SINGLES_PROCESS_SRC) -o $(CUDA_SINGLES_PROCESS_OBJ)
 	@echo "✓ CUDA SinglesProcess compiled"
 
 # 编译 PNI R2C 测试程序（需要 PNI 库、CUDA 和 TBB）
@@ -211,6 +236,9 @@ help:
 	@echo ""
 	@echo "环境变量:"
 	@echo "  CUDA_PATH         - CUDA 安装路径 (默认: /usr/local/cuda)"
+	@echo "  SYSTEM_LIB_DIR    - 系统 grpc/protobuf 库路径 (默认: /usr/lib/x86_64-linux-gnu)"
+	@echo "  PNI_PKG_NAME      - OpenPnI pkg-config 名称 (默认: libpni)"
+	@echo "  PNI_PROJECT_PATH  - 当 pkg-config 不可用时的回退源码路径"
 	@echo ""
 	@echo "依赖:"
 	@echo "  基础: libgrpc++-dev, protobuf-compiler-grpc"

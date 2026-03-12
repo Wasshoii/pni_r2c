@@ -4,6 +4,7 @@
 #include <pni/node/Coincidence.hpp>
 #include <pni/tools/Parallel.hpp>
 #include <pni/CudaPtr.hpp>
+#include <pni/tools/UniPtr.hpp>
 #include <pni/io/v1/PetDataType_v1.h>
 
 #include <vector>
@@ -1094,13 +1095,11 @@ namespace openpni::distributed::streaming
 
             try
             {
-                // 使用 cuda_sync_ptr 管理设备内存
-                auto d_singles = openpni::make_cuda_sync_ptr_from_hcopy(
-                    std::span<const Single>(localSingles),
-                    "StreamingTimeAligner_singles");
+                // 统一使用 UniPtr 管理 host/device 双端数据
+                m_singleBuffer.CopyFromHost(std::span<const Single>(localSingles));
 
                 std::vector<std::span<Single const>> inputList;
-                inputList.push_back(d_singles.CSpan());
+                inputList.push_back(m_singleBuffer.CudaRSpan());
 
                 auto [prompt, delay] = m_coinNode.getDListmode(inputList, m_config.coinProtocol);
 
@@ -1134,10 +1133,9 @@ namespace openpni::distributed::streaming
             if (coins.empty())
                 return;
 
-            // GPU -> Host 拷贝
-            std::vector<Listmode> hostBuf(coins.size());
-            openpni::cuda_ptr::cuda_ptr_allocator<openpni::cuda_ptr::CudaPtrType::sync> allocator;
-            allocator.copy_from_device_to_host(hostBuf.data(), coins);
+            // 统一使用 UniPtr 做 device -> host 同步
+            m_coinBuffer.CopyFromCuda(coins);
+            auto hostBuf = m_coinBuffer.HostRSpan();
 
             // 转换格式
             std::vector<openpni::v1::basic::Listmode_t> listmodeData(coins.size());
@@ -1195,6 +1193,8 @@ namespace openpni::distributed::streaming
 
         // 符合处理
         openpni::Coincidence m_coinNode;
+        openpni::tools::UniPtr<Single> m_singleBuffer{"StreamingTimeAligner_singles"};
+        openpni::tools::UniPtr<Listmode> m_coinBuffer{"StreamingTimeAligner_coins"};
 
         // 输出
         std::unique_ptr<openpni::io::v1::listmode::ListmodeFileOutput> m_promptWriter;

@@ -152,6 +152,7 @@ r2c/
 | 文档 | 对象 | 内容 |
 |-----|------|------|
 | [QUICK_REFERENCE.md](QUICK_REFERENCE.md) | 所有用户 | 快速命令和常见问题 |
+| [docs/BUILD_AND_SETUP.md](docs/BUILD_AND_SETUP.md) | 开发者/部署者 | 本项目编译与构建流程（不重复 OpenPnI 基础安装） |
 | [SETUP_GUIDE.md](SETUP_GUIDE.md) | 系统管理员 | 详细安装和配置步骤 |
 | [README_CLOCK_SYNC.md](docs/README_CLOCK_SYNC.md) | 所有用户 | 时钟同步快速参考 |
 | [DISTRIBUTED_CLOCK_SYNC_INTEGRATION.md](docs/DISTRIBUTED_CLOCK_SYNC_INTEGRATION.md) | 集成工程师 | 详细的集成步骤和架构 |

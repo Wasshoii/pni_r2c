@@ -46,6 +46,7 @@ namespace
         std::string rawPrefix = "2_PET_2Bed pet 600s-bed0";
         uint32_t nodeCount = 3;
         size_t maxPendingSegments = 64;
+        uint32_t batchSegmentsPerMessage = 1;
         bool parallelNodes = false;
         bool noLocalReceiver = false;
         bool helpOnly = false;
@@ -86,26 +87,57 @@ namespace
             {
                 const uint32_t nodeId = msg.node_id();
                 const uint64_t singlesCount = static_cast<uint64_t>(msg.singles_size());
+                const uint64_t segmentCount =
+                    msg.segment_metas_size() > 0 ? static_cast<uint64_t>(msg.segment_metas_size()) : 1ULL;
 
                 totalReceivedInRpc += singlesCount;
-                m_totalChunksReceived.fetch_add(1, std::memory_order_relaxed);
+                m_totalChunksReceived.fetch_add(segmentCount, std::memory_order_relaxed);
                 m_totalSinglesReceived.fetch_add(singlesCount, std::memory_order_relaxed);
 
                 {
                     std::lock_guard<std::mutex> lock(m_mutex);
                     auto &node = m_nodes[nodeId];
                     node.connected = true;
-                    node.chunksReceived += 1;
-                    node.singlesReceived += singlesCount;
-                }
 
-                if (msg.chunk_id() % 500 == 0)
-                {
-                    std::cout << "[Receiver] node=" << nodeId
-                              << " chunk=" << msg.chunk_id()
-                              << " singles=" << singlesCount
-                              << " totalSingles=" << m_totalSinglesReceived.load(std::memory_order_relaxed)
-                              << std::endl;
+                    if (msg.segment_metas_size() > 0)
+                    {
+                        uint64_t singlesFromMeta = 0;
+                        for (const auto &meta : msg.segment_metas())
+                        {
+                            const uint64_t segmentSingles = static_cast<uint64_t>(meta.singles_count());
+                            node.chunksReceived += 1;
+                            node.singlesReceived += segmentSingles;
+                            singlesFromMeta += segmentSingles;
+
+                            if (meta.chunk_id() % 500 == 0)
+                            {
+                                std::cout << "[Receiver] node=" << nodeId
+                                          << " chunk=" << meta.chunk_id()
+                                          << " singles=" << segmentSingles
+                                          << " totalSingles=" << m_totalSinglesReceived.load(std::memory_order_relaxed)
+                                          << std::endl;
+                            }
+                        }
+
+                        if (singlesFromMeta < singlesCount)
+                        {
+                            node.singlesReceived += (singlesCount - singlesFromMeta);
+                        }
+                    }
+                    else
+                    {
+                        node.chunksReceived += 1;
+                        node.singlesReceived += singlesCount;
+
+                        if (msg.chunk_id() % 500 == 0)
+                        {
+                            std::cout << "[Receiver] node=" << nodeId
+                                      << " chunk=" << msg.chunk_id()
+                                      << " singles=" << singlesCount
+                                      << " totalSingles=" << m_totalSinglesReceived.load(std::memory_order_relaxed)
+                                      << std::endl;
+                        }
+                    }
                 }
             }
 
@@ -301,6 +333,7 @@ namespace
                   << "  --raw-prefix <name>           Split rawdata file prefix\n"
                   << "  --node-count <N>              Number of nodes/files to process (default: 3)\n"
                   << "  --max-pending-segments <N>    Async sender queue length in segments (default: 64)\n"
+                  << "  --batch-segments <N>          Segments packed into one gRPC message (default: 1)\n"
                   << "  --no-local-receiver           Do not start built-in receiver; use external coin host\n"
                   << "  --parallel                    Run node conversion in parallel\n"
                   << "  --help                        Print this message\n"
@@ -440,6 +473,32 @@ namespace
                 continue;
             }
 
+            if (arg == "--batch-segments")
+            {
+                const char *v = requireValue(arg);
+                if (!v)
+                {
+                    return false;
+                }
+
+                try
+                {
+                    const uint64_t parsed = std::stoull(v);
+                    if (parsed == 0)
+                    {
+                        std::cerr << "--batch-segments must be positive" << std::endl;
+                        return false;
+                    }
+                    opts.batchSegmentsPerMessage = static_cast<uint32_t>(parsed);
+                }
+                catch (const std::exception &)
+                {
+                    std::cerr << "Invalid --batch-segments value: " << v << std::endl;
+                    return false;
+                }
+                continue;
+            }
+
             std::cerr << "Unknown argument: " << arg << std::endl;
             printUsage(argv[0]);
             return false;
@@ -561,7 +620,12 @@ namespace
             opts.maxPendingSegments,
             "127.0.0.1",
             "BDM2",
-            50);
+            50,
+            true,
+            0,
+            15000,
+            1000,
+            opts.batchSegmentsPerMessage);
 
         std::cout << "[Node " << node.nodeId << "] R2S start, file=" << node.rawdataPath << std::endl;
         nodeRunner.run();
@@ -653,6 +717,7 @@ int main(int argc, char **argv)
     std::cout << "rawPrefix    : " << opts.rawPrefix << std::endl;
     std::cout << "nodeCount    : " << opts.nodeCount << std::endl;
     std::cout << "maxPendingSegments: " << opts.maxPendingSegments << std::endl;
+    std::cout << "batchSegmentsPerMessage: " << opts.batchSegmentsPerMessage << std::endl;
     std::cout << "parallelNodes: " << (opts.parallelNodes ? "true" : "false") << std::endl;
     std::cout << "noLocalReceiver: " << (opts.noLocalReceiver ? "true" : "false") << std::endl;
 
@@ -813,6 +878,7 @@ Build example:
   --raw-prefix "2_PET_2Bed pet 600s-bed0" \
   --node-count 3 \
   --max-pending-segments 128 \
+    --batch-segments 3 \
   --parallel \
   --no-local-receiver
 */

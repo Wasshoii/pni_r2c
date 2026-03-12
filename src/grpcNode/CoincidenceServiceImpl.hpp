@@ -105,6 +105,57 @@ namespace openpni::distributed::streaming
                         "Invalid node ID: " + std::to_string(nodeId));
                 }
 
+                auto appendSingle = [](const coincidence::SingleEvent &s, std::vector<GlobalSingle> &out)
+                {
+                    GlobalSingle single;
+                    single.globalCrystalIndex = s.crystal_index();
+                    single.energy = s.energy();
+                    single.timeValue_pico = s.time_pico();
+                    out.push_back(single);
+                };
+
+                if (msg.segment_metas_size() > 0)
+                {
+                    const uint64_t totalSinglesInMessage = static_cast<uint64_t>(msg.singles_size());
+
+                    for (const auto &meta : msg.segment_metas())
+                    {
+                        const uint64_t offset = static_cast<uint64_t>(meta.singles_offset());
+                        const uint64_t count = static_cast<uint64_t>(meta.singles_count());
+                        if (offset + count > totalSinglesInMessage)
+                        {
+                            return grpc::Status(
+                                grpc::StatusCode::INVALID_ARGUMENT,
+                                "Invalid segment metadata range: offset/count exceed singles size");
+                        }
+
+                        TimestampedSingleChunk chunk;
+                        chunk.nodeId = static_cast<uint16_t>(nodeId);
+                        chunk.chunkId = meta.chunk_id();
+                        chunk.computerClock_ms = meta.computer_clock_ms();
+                        chunk.duration_ms = meta.duration_ms();
+                        chunk.singles.reserve(static_cast<size_t>(count));
+
+                        for (uint64_t i = 0; i < count; ++i)
+                        {
+                            const auto &s = msg.singles(static_cast<int>(offset + i));
+                            appendSingle(s, chunk.singles);
+                        }
+
+                        if (!buffer->push(std::move(chunk)))
+                        {
+                            return grpc::Status(
+                                grpc::StatusCode::RESOURCE_EXHAUSTED,
+                                "Buffer full or closed for node " + std::to_string(nodeId));
+                        }
+
+                        totalReceived += count;
+                        updateNodeStats(nodeId, count);
+                    }
+
+                    continue;
+                }
+
                 TimestampedSingleChunk chunk;
                 chunk.nodeId = static_cast<uint16_t>(nodeId);
                 chunk.chunkId = msg.chunk_id();
@@ -114,11 +165,7 @@ namespace openpni::distributed::streaming
                 chunk.singles.reserve(msg.singles_size());
                 for (const auto &s : msg.singles())
                 {
-                    GlobalSingle single;
-                    single.globalCrystalIndex = s.crystal_index();
-                    single.energy = s.energy();
-                    single.timeValue_pico = s.time_pico();
-                    chunk.singles.push_back(single);
+                    appendSingle(s, chunk.singles);
                 }
 
                 if (!buffer->push(std::move(chunk)))

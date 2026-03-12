@@ -5,7 +5,7 @@
 #include <string>
 #include <utility>
 
-#include "core/streaming-coin/CoincidenceServiceImpl.hpp"
+#include "src/grpcNode/CoincidenceServiceImpl.hpp"
 
 namespace openpni::distributed::grpcnode
 {

@@ -23,6 +23,22 @@ message SingleChunkMessage {
     uint64 computer_clock_ms = 3; // 计算机时钟（ms，粗略参考）
     uint32 duration_ms = 4;       // 持续时间（ms）
     repeated SingleEvent singles = 5; // 单事件数据列表
+
+    // 批量发送时用于还原每个 segment 的顺序和时间信息。
+    // 兼容性：若为空，接收端应按旧逻辑将整条消息视为单个 segment。
+    repeated SegmentMeta segment_metas = 6;
+
+    // 可选批次编号，仅用于诊断与追踪。
+    uint64 batch_id = 7;
+}
+
+// 批内 segment 元信息（用于在接收端恢复单段边界与时间信息）
+message SegmentMeta {
+    uint64 chunk_id = 1;          // segment 的全局序号（按节点内发送顺序递增）
+    uint64 computer_clock_ms = 2; // 该 segment 对应的计算机时钟（ms）
+    uint32 duration_ms = 3;       // 该 segment 持续时间（ms）
+    uint32 singles_offset = 4;    // 在 singles 列表中的起始偏移
+    uint32 singles_count = 5;     // 该 segment 的 singles 数量
 }
 
 // 流式传输响应

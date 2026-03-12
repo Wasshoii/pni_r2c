@@ -9,6 +9,13 @@ NVCC = nvcc
 CXXFLAGS = -std=c++23 -Wall -Wextra -O2 -pthread
 NVCCFLAGS = -std=c++20 -O2 --expt-relaxed-constexpr
 
+# 调试开关：使用 `make DEBUG=1 <target>` 启用
+DEBUG ?= 0
+ifeq ($(DEBUG),1)
+CXXFLAGS += -DDEBUG -g
+NVCCFLAGS += -DDEBUG -lineinfo
+endif
+
 # 链接标志
 LDFLAGS =
 
@@ -239,6 +246,7 @@ help:
 	@echo "  SYSTEM_LIB_DIR    - 系统 grpc/protobuf 库路径 (默认: /usr/lib/x86_64-linux-gnu)"
 	@echo "  PNI_PKG_NAME      - OpenPnI pkg-config 名称 (默认: libpni)"
 	@echo "  PNI_PROJECT_PATH  - 当 pkg-config 不可用时的回退源码路径"
+	@echo "  DEBUG             - 调试开关，1 启用 -DDEBUG -g (示例: make DEBUG=1 test-local-grpc-r2s)"
 	@echo ""
 	@echo "依赖:"
 	@echo "  基础: libgrpc++-dev, protobuf-compiler-grpc"

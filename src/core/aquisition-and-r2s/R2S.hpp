@@ -6,9 +6,11 @@
 #include <pni/node/ConvergedR2S.hpp>
 #include <pni/node/Coincidence.hpp>
 #include "../../tools/SinglesProcess.hpp"
+#include <algorithm>
 #include <iostream>
 #include <fstream>
 #include <functional>
+#include <span>
 #include <thread>
 #include <queue>
 #include <mutex>
@@ -18,6 +20,7 @@
 namespace openpni::distributed::r2s
 {
     using GlobalSingle = openpni::v1::basic::GlobalSingle_t;
+    using Single = openpni::Single;
 
     /**
      * @brief 单事件数据就绪回调函数类型
@@ -31,7 +34,19 @@ namespace openpni::distributed::r2s
         std::vector<GlobalSingle> &&singles,
         uint64_t clock_ms,
         uint32_t duration_ms)>;
-    using Single = openpni::Single;
+
+    /**
+     * @brief 原始 Single 视图回调（零额外 GlobalSingle 中间转换）
+     *
+     * 说明：
+     * - span 仅在回调函数返回前有效，回调内若异步使用需自行拷贝。
+     * - 当该回调已设置时，processR2S 会优先调用它，以避免额外的
+     *   LocalSingle -> GlobalSingle 转换。
+     */
+    using SinglesSpanReadyCallback = std::function<bool(
+        std::span<Single const> singles,
+        uint64_t clock_ms,
+        uint32_t duration_ms)>;
     // 判断 ptr 是否为 GPU Device 内存
     inline bool isDevicePointer(const void *ptr)
     {
@@ -45,6 +60,39 @@ namespace openpni::distributed::r2s
             return true;
 #endif
         return false;
+    }
+
+    /**
+     * @brief 将 R2S 输出 singles 物化到 host 侧内存
+     *
+     * 该函数用于异步处理链路：回调返回后原始 span 不再保证有效，
+     * 因此需要在回调内完成 host 拷贝并持有数据所有权。
+     */
+    inline std::vector<Single> materializeSinglesOnHost(std::span<Single const> singles)
+    {
+        std::vector<Single> hostSingles;
+        if (singles.empty())
+        {
+            return hostSingles;
+        }
+
+        hostSingles.resize(singles.size());
+        const Single *dataPtr = singles.data();
+        if (isDevicePointer(dataPtr))
+        {
+            cudaError_t err = cudaMemcpy(hostSingles.data(), dataPtr,
+                                         singles.size() * sizeof(Single),
+                                         cudaMemcpyDeviceToHost);
+            if (err != cudaSuccess)
+            {
+                throw std::runtime_error("cudaMemcpyDeviceToHost failed: " +
+                                         std::string(cudaGetErrorString(err)));
+            }
+            return hostSingles;
+        }
+
+        std::copy(singles.begin(), singles.end(), hostSingles.begin());
+        return hostSingles;
     }
 
     auto timer(auto func, auto time)
@@ -86,7 +134,8 @@ namespace openpni::distributed::r2s
         size_t asyncWriteQueueSize = 200;          // 异步写入队列大小
 
         // 分布式处理回调，使用时需设置（可与 saveData2SingleFile 同时使用，支持同时保存文件和流式传输）
-        SinglesReadyCallback onSinglesReady = nullptr;
+        SinglesReadyCallback onSinglesReady = nullptr;         // 传输转换后的 GlobalSingle
+        SinglesSpanReadyCallback onSinglesSpanReady = nullptr; // 直接传输原始 Single 数据，避免转换开销
 
         R2SProcessConfig()
             : detectorType(DetectorType::Unknown), crystalsPerChannel(0), r2sResultIndex(0), outputFileName("singles")
@@ -506,8 +555,12 @@ namespace openpni::distributed::r2s
             std::unique_ptr<AsyncSingleFileWriter> asyncWriter;                      // 异步写入
             std::string outputFilePath;
 
+            const bool hasStreamingCallback =
+                static_cast<bool>(config.onSinglesSpanReady) ||
+                static_cast<bool>(config.onSinglesReady);
+
             // 检查是否至少有一种输出方式
-            if (!config.saveData2SingleFile && !config.onSinglesReady)
+            if (!config.saveData2SingleFile && !hasStreamingCallback)
             {
                 std::cerr << "Error: saveData2SingleFile is false and no callback is set" << std::endl;
                 return false;
@@ -543,11 +596,11 @@ namespace openpni::distributed::r2s
             }
 
             // 输出模式信息
-            if (config.saveData2SingleFile && config.onSinglesReady)
+            if (config.saveData2SingleFile && hasStreamingCallback)
             {
                 std::cout << "Dual mode: data will be saved to file AND sent via callback" << std::endl;
             }
-            else if (config.onSinglesReady)
+            else if (hasStreamingCallback)
             {
                 std::cout << "Streaming mode: data will be sent via callback only" << std::endl;
             }
@@ -603,11 +656,22 @@ namespace openpni::distributed::r2s
                             bool fileSuccess = true;
                             bool callbackSuccess = true;
 
-                            // 通过回调发送数据
-                            std::vector<GlobalSingle> globalSingles;
-                            if (config.onSinglesReady)
+                            // 通过回调发送数据。优先使用 span 回调，避免额外中间转换。
+                            if (config.onSinglesSpanReady)
                             {
-                                globalSingles = convertLocalToGlobalSingles(
+                                callbackSuccess = config.onSinglesSpanReady(
+                                    singlesSpan,
+                                    segHeader.clock,
+                                    segHeader.duration);
+
+                                if (!callbackSuccess)
+                                {
+                                    std::cerr << "Callback returned false at segment " << i << ", stopping" << std::endl;
+                                }
+                            }
+                            else if (config.onSinglesReady)
+                            {
+                                auto globalSingles = convertLocalToGlobalSingles(
                                     singlesSpan,
                                     config.crystalsPerChannel);
                                 callbackSuccess = config.onSinglesReady(
@@ -691,7 +755,7 @@ namespace openpni::distributed::r2s
             std::cout << "Singles/Packet ratio: "
                       << (totalCount_raw > 0 ? (double)totalCount_single / totalCount_raw : 0.0)
                       << std::endl;
-            if (config.saveData2SingleFile && config.onSinglesReady)
+            if (config.saveData2SingleFile && hasStreamingCallback)
             {
                 std::cout << "Output file: " << outputFilePath
                           << (config.asyncFileWrite ? " (async)" : " (sync)") << std::endl;

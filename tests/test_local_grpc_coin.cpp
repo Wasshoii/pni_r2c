@@ -87,8 +87,10 @@ namespace
             {
                 const uint32_t nodeId = msg.node_id();
                 const uint64_t singlesCount = static_cast<uint64_t>(msg.singles_size());
+                const uint64_t segmentCount =
+                    msg.segment_metas_size() > 0 ? static_cast<uint64_t>(msg.segment_metas_size()) : 1ULL;
 
-                m_totalChunksReceived.fetch_add(1, std::memory_order_relaxed);
+                m_totalChunksReceived.fetch_add(segmentCount, std::memory_order_relaxed);
                 m_totalSinglesReceived.fetch_add(singlesCount, std::memory_order_relaxed);
                 totalReceivedInRpc += singlesCount;
                 m_lastActivityNs.store(nowNs(), std::memory_order_relaxed);
@@ -99,26 +101,66 @@ namespace
                     node.connected = true;
                     node.registered = true;
 
-                    if (node.hasLastChunk && msg.chunk_id() != node.lastChunkId + 1)
+                    if (msg.segment_metas_size() > 0)
                     {
-                        node.chunkGapCount += 1;
-                        std::cerr << "[CoinReceiver] chunk gap node=" << nodeId
-                                  << " prev=" << node.lastChunkId
-                                  << " current=" << msg.chunk_id() << std::endl;
+                        uint64_t singlesFromMeta = 0;
+                        for (const auto &meta : msg.segment_metas())
+                        {
+                            const uint64_t chunkId = meta.chunk_id();
+                            const uint64_t segmentSingles = static_cast<uint64_t>(meta.singles_count());
+
+                            if (node.hasLastChunk && chunkId != node.lastChunkId + 1)
+                            {
+                                node.chunkGapCount += 1;
+                                std::cerr << "[CoinReceiver] chunk gap node=" << nodeId
+                                          << " prev=" << node.lastChunkId
+                                          << " current=" << chunkId << std::endl;
+                            }
+
+                            node.lastChunkId = chunkId;
+                            node.hasLastChunk = true;
+                            node.chunksReceived += 1;
+                            node.singlesReceived += segmentSingles;
+                            singlesFromMeta += segmentSingles;
+
+                            if (node.chunksReceived == 1 || node.chunksReceived % 200 == 0)
+                            {
+                                std::cout << "[CoinReceiver] node=" << nodeId
+                                          << " chunks=" << node.chunksReceived
+                                          << " singles=" << node.singlesReceived
+                                          << " totalSingles=" << m_totalSinglesReceived.load(std::memory_order_relaxed)
+                                          << std::endl;
+                            }
+                        }
+
+                        if (singlesFromMeta < singlesCount)
+                        {
+                            node.singlesReceived += (singlesCount - singlesFromMeta);
+                        }
                     }
-
-                    node.lastChunkId = msg.chunk_id();
-                    node.hasLastChunk = true;
-                    node.chunksReceived += 1;
-                    node.singlesReceived += singlesCount;
-
-                    if (node.chunksReceived == 1 || node.chunksReceived % 200 == 0)
+                    else
                     {
-                        std::cout << "[CoinReceiver] node=" << nodeId
-                                  << " chunks=" << node.chunksReceived
-                                  << " singles=" << node.singlesReceived
-                                  << " totalSingles=" << m_totalSinglesReceived.load(std::memory_order_relaxed)
-                                  << std::endl;
+                        if (node.hasLastChunk && msg.chunk_id() != node.lastChunkId + 1)
+                        {
+                            node.chunkGapCount += 1;
+                            std::cerr << "[CoinReceiver] chunk gap node=" << nodeId
+                                      << " prev=" << node.lastChunkId
+                                      << " current=" << msg.chunk_id() << std::endl;
+                        }
+
+                        node.lastChunkId = msg.chunk_id();
+                        node.hasLastChunk = true;
+                        node.chunksReceived += 1;
+                        node.singlesReceived += singlesCount;
+
+                        if (node.chunksReceived == 1 || node.chunksReceived % 200 == 0)
+                        {
+                            std::cout << "[CoinReceiver] node=" << nodeId
+                                      << " chunks=" << node.chunksReceived
+                                      << " singles=" << node.singlesReceived
+                                      << " totalSingles=" << m_totalSinglesReceived.load(std::memory_order_relaxed)
+                                      << std::endl;
+                        }
                     }
                 }
             }

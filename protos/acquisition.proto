@@ -11,6 +11,42 @@ message ChannelConfig {
     uint32 channel_index = 5;    // 通道索引
 }
 
+// 采集算法类型
+enum AcquisitionAlgorithmType {
+    ALGORITHM_TYPE_UNSPECIFIED = 0;
+    ALGORITHM_TYPE_SOCKET = 1;
+    ALGORITHM_TYPE_DPDK = 2;
+}
+
+// DPDK 参数
+message DpdkOptions {
+    uint32 copy_thread_num = 1;
+    uint32 rx_rings_per_port = 2;
+    repeated string bind_ips = 3;
+    uint32 rte_mbuf_double_pointer_size_multiply = 4;
+    uint32 rte_mbuf_double_pointer_num_multiply = 5;
+}
+
+// 探测器源信息（由控制节点用于自动生成通道映射）
+message DetectorSource {
+    string detector_id = 1; // 可选：探测器标识
+    uint32 ip_source = 2;
+    uint32 port_source = 3;
+}
+
+// 目的地址分配规则（按 detector_sources 顺序分配）
+message DetectorDestinationRule {
+    uint32 ip_destination = 1;
+    uint32 port_destination_base = 2;
+    uint32 port_destination_stride = 3; // 0 视作 1
+}
+
+// 通道号分配规则（按 detector_sources 顺序分配）
+message ChannelIndexRule {
+    uint32 channel_index_base = 1;   // 缺省建议 0（与 acquisition.cpp 对齐）
+    uint32 channel_index_stride = 2; // 0 视作 1
+}
+
 // 采集任务配置
 message AcquisitionTask {
     // 全局配置
@@ -19,9 +55,33 @@ message AcquisitionTask {
     uint32 time_switch_buffer_ms = 3;
     uint32 total_channel_num = 4; // 总通道数
     uint32 min_packet_size = 6;   // 最小包大小，用于过滤
+    AcquisitionAlgorithmType algorithm_type = 7;
+    DpdkOptions dpdk_options = 8;
+    string session_name = 9;
+    uint64 reserved_storage_gib = 10;
+    uint64 max_file_size_mb = 11;
+
+    // 自动映射输入：当 channels 为空且 detector_sources 非空时，
+    // 由控制节点根据规则自动生成 channels 并下发给采集节点。
+    repeated DetectorSource detector_sources = 12;
+    DetectorDestinationRule destination_rule = 13;
+    ChannelIndexRule channel_index_rule = 14;
 
     // 分配给该节点的通道列表
     repeated ChannelConfig channels = 5;
+}
+
+message StartControl {
+    uint64 planned_start_time_ms = 1;
+    uint32 duration_ms = 2;
+}
+
+message StopControl {
+    string reason = 1;
+}
+
+message ShutdownControl {
+    string reason = 1;
 }
 
 // 节点信息
@@ -46,7 +106,10 @@ enum CommandType {
 message MasterCommand {
     CommandType type = 1;
     AcquisitionTask task = 2; // 仅在 CMD_CONFIGURE 时有效
-    string message = 3;       // 附加消息
+    string message = 3;       // 兼容旧版本，建议使用显式字段
+    StartControl start_control = 4;
+    StopControl stop_control = 5;
+    ShutdownControl shutdown_control = 6;
 }
 
 // 节点状态

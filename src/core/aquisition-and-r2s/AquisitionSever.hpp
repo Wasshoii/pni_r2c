@@ -7,10 +7,12 @@
 #include <functional>
 #include <iostream>
 #include <format>
+#include <algorithm>
 #include <mutex>
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <stdexcept>
 
 #include <pni/node/Acquisition.hpp>
 #include <pni/io/IO.hpp>
@@ -34,10 +36,27 @@ namespace openpni::distributed::acquisition
     // 采集节点配置，用于生成 AcquisitionInfo
     struct NodeAcquisitionConfig
     {
+        enum class RuntimeType
+        {
+            Socket,
+            Dpdk
+        };
+
+        struct DpdkConfig
+        {
+            uint32_t copy_thread_num = 8;
+            uint32_t rx_rings_per_port = 1;
+            std::vector<std::string> bind_ips;
+            uint32_t rte_mbuf_double_pointer_size_multiply = 32;
+            uint32_t rte_mbuf_double_pointer_num_multiply = 2;
+        };
+
+        RuntimeType runtime_type = RuntimeType::Socket;
         uint32_t min_packet_size = 1024;
         uint32_t max_packet_size = 1024; // 对应 storageUnitSize
         uint64_t max_buffer_size = 4ull * 1024 * 1024 * 1024;
         uint32_t time_switch_buffer_ms = 1000;
+        DpdkConfig dpdk;
 
         struct Channel
         {
@@ -50,13 +69,80 @@ namespace openpni::distributed::acquisition
         std::vector<Channel> channels;
     };
 
+    inline NodeAcquisitionConfig MakeNodeAcquisitionConfig(const AcquisitionTask &task)
+    {
+        NodeAcquisitionConfig config;
+
+        switch (task.algorithm_type())
+        {
+        case ALGORITHM_TYPE_DPDK:
+            config.runtime_type = NodeAcquisitionConfig::RuntimeType::Dpdk;
+            break;
+        case ALGORITHM_TYPE_UNSPECIFIED:
+        case ALGORITHM_TYPE_SOCKET:
+        default:
+            config.runtime_type = NodeAcquisitionConfig::RuntimeType::Socket;
+            break;
+        }
+
+        config.min_packet_size = task.min_packet_size() > 0 ? task.min_packet_size() : 1024;
+        config.max_packet_size = task.storage_unit_size() > 0 ? task.storage_unit_size() : 1024;
+        config.max_buffer_size = task.max_buffer_size() > 0 ? task.max_buffer_size() : (4ull * 1024ull * 1024ull * 1024ull);
+        config.time_switch_buffer_ms = task.time_switch_buffer_ms() > 0 ? task.time_switch_buffer_ms() : 1000;
+
+        if (task.has_dpdk_options())
+        {
+            const auto &dpdk = task.dpdk_options();
+            config.dpdk.copy_thread_num = dpdk.copy_thread_num() > 0 ? dpdk.copy_thread_num() : 8;
+            config.dpdk.rx_rings_per_port = dpdk.rx_rings_per_port() > 0 ? dpdk.rx_rings_per_port() : 1;
+            config.dpdk.rte_mbuf_double_pointer_size_multiply =
+                dpdk.rte_mbuf_double_pointer_size_multiply() > 0 ? dpdk.rte_mbuf_double_pointer_size_multiply() : 32;
+            config.dpdk.rte_mbuf_double_pointer_num_multiply =
+                dpdk.rte_mbuf_double_pointer_num_multiply() > 0 ? dpdk.rte_mbuf_double_pointer_num_multiply() : 2;
+            config.dpdk.bind_ips.assign(dpdk.bind_ips().begin(), dpdk.bind_ips().end());
+        }
+
+        if (config.max_packet_size < config.min_packet_size)
+        {
+            throw std::invalid_argument("max_packet_size must be >= min_packet_size");
+        }
+
+        if (task.channels_size() == 0)
+        {
+            throw std::invalid_argument("AcquisitionTask.channels is empty");
+        }
+
+        config.channels.reserve(static_cast<size_t>(task.channels_size()));
+        for (const auto &ch : task.channels())
+        {
+            NodeAcquisitionConfig::Channel item;
+            item.ip_source = ch.ip_source();
+            item.port_source = static_cast<uint16_t>(std::min<uint32_t>(ch.port_source(), 65535));
+            item.ip_dest = ch.ip_destination();
+            item.port_dest = static_cast<uint16_t>(std::min<uint32_t>(ch.port_destination(), 65535));
+            item.channel_index = static_cast<uint16_t>(std::min<uint32_t>(ch.channel_index(), 65535));
+            config.channels.push_back(item);
+        }
+
+        return config;
+    }
+
     // 辅助函数：创建 AcquisitionInfo
     inline openpni::AcquisitionInfo MakeAcquisitionInfo(const NodeAcquisitionConfig &config)
     {
+        if (config.channels.empty())
+        {
+            throw std::invalid_argument("NodeAcquisitionConfig.channels is empty");
+        }
+        if (config.max_packet_size < config.min_packet_size)
+        {
+            throw std::invalid_argument("max_packet_size must be >= min_packet_size");
+        }
+
         openpni::AcquisitionInfo info;
         info.storageUnitSize = config.max_packet_size;
         info.maxBufferSize = config.max_buffer_size;
-        info.timeSwitchBuffer_ms = config.time_switch_buffer_ms;
+        info.timeSwitchBuffer_ms = std::max<uint32_t>(config.time_switch_buffer_ms, 10);
         info.totalChannelNum = config.channels.size();
 
         for (const auto &chan : config.channels)
@@ -90,7 +176,7 @@ namespace openpni::distributed::acquisition
         using FileReadyCallback = std::function<void(const std::string &)>;
 
         RollingRawFileOutput(const StorageConfig &config)
-            : config_(config), file_seq_(0), current_size_(0)
+            : config_(config), current_size_(0), file_seq_(0)
         {
 
             session_dir_ = fs::path(config_.output_root) / config_.session_name;
@@ -267,8 +353,14 @@ namespace openpni::distributed::acquisition
         // 启动采集
         bool Start()
         {
-            if (running_)
+            if (running_.load(std::memory_order_acquire))
                 return true;
+
+            if (acq_info_.channelSettings.empty())
+            {
+                NotifyError("No acquisition channels configured");
+                return false;
+            }
 
             // 初始化 writer
             writer_ = std::make_unique<RollingRawFileOutput>(storage_config_);
@@ -277,7 +369,7 @@ namespace openpni::distributed::acquisition
                 writer_->SetFileReadyCallback(file_ready_callback_);
             }
 
-            running_ = true;
+            running_.store(true, std::memory_order_release);
 
             // 启动采集线程
             worker_thread_ = std::thread([this]()
@@ -293,7 +385,16 @@ namespace openpni::distributed::acquisition
         // 停止采集
         void Stop()
         {
-            running_ = false;
+            running_.store(false, std::memory_order_release);
+
+            {
+                std::lock_guard<std::mutex> lock(algo_mutex_);
+                if (algo_)
+                {
+                    algo_->stop();
+                }
+            }
+
             if (worker_thread_.joinable())
             {
                 worker_thread_.join();
@@ -307,6 +408,8 @@ namespace openpni::distributed::acquisition
                 writer_->Stop();
                 writer_.reset();
             }
+
+            NotifyState(openpni::distributed::acquisition::STATE_IDLE);
         }
 
     private:
@@ -329,43 +432,68 @@ namespace openpni::distributed::acquisition
             }
             catch (const std::exception &e)
             {
-                std::cerr << "Failed to init algorithm: " << e.what() << std::endl;
+                NotifyError(std::string("Failed to init algorithm: ") + e.what());
+                running_.store(false, std::memory_order_release);
                 return;
             }
 
-            if (!algo_->start())
+            AlgoType *algo = nullptr;
             {
-                std::cerr << "Failed to start acquisition." << std::endl;
+                std::lock_guard<std::mutex> lock(algo_mutex_);
+                algo = algo_.get();
+            }
+
+            if (!algo)
+            {
+                NotifyError("Acquisition algorithm object is null");
+                running_.store(false, std::memory_order_release);
                 return;
             }
+
+            if (!algo->start())
+            {
+                NotifyError("Failed to start acquisition");
+                running_.store(false, std::memory_order_release);
+                return;
+            }
+
+            auto readHandler = openpni::read_from_acquisition(std::ref(*algo));
+
+            int missTime = 0;
 
             // 采集循环
-            while (running_ && !algo_->isFinished())
+            while (running_.load(std::memory_order_acquire) && !algo->isFinished())
             {
                 // 尝试读取数据
-                auto data_opt = algo_->read();
+                auto data_opt = algo->read();
 
                 if (data_opt && data_opt->count > 0)
                 {
                     // 写入文件（内部会自动处理分卷）
                     if (!writer_->Write(data_opt.value()))
                     {
-                        std::cerr << "Write failed, stopping acquisition." << std::endl;
-                        running_ = false;
+                        NotifyError("Raw data write failed, stopping acquisition");
+                        running_.store(false, std::memory_order_release);
                     }
+                    missTime = 0;
                 }
                 else
                 {
-                    // 避免空转占用过多 CPU
-                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    const auto sleepMs = std::max<int>(std::min<int>(missTime++, 100), 15);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
                 }
             }
 
             {
                 std::lock_guard<std::mutex> lock(algo_mutex_);
-                algo_->stop();
+                if (algo_)
+                {
+                    algo_->stop();
+                }
                 // 停止后不要立即销毁 algo_，因为 monitor 可能会最后访问一次 status
             }
+
+            running_.store(false, std::memory_order_release);
         }
 
         void MonitorLoop()
@@ -375,7 +503,7 @@ namespace openpni::distributed::acquisition
             uint64_t last_bytes = 0;
             uint64_t last_packets = 0;
 
-            while (running_)
+            while (running_.load(std::memory_order_acquire))
             {
                 std::this_thread::sleep_for(milliseconds(1000));
 
@@ -442,6 +570,32 @@ namespace openpni::distributed::acquisition
             }
         }
 
+        void NotifyState(openpni::distributed::acquisition::NodeState state)
+        {
+            if (!status_report_callback_)
+            {
+                return;
+            }
+
+            openpni::distributed::acquisition::NodeStatus status;
+            status.set_state(state);
+            status_report_callback_(status);
+        }
+
+        void NotifyError(const std::string &message)
+        {
+            std::cerr << message << std::endl;
+            if (!status_report_callback_)
+            {
+                return;
+            }
+
+            openpni::distributed::acquisition::NodeStatus status;
+            status.set_state(openpni::distributed::acquisition::STATE_ERROR);
+            status.set_error_message(message);
+            status_report_callback_(status);
+        }
+
         AcquisitionInfo acq_info_;
         StorageConfig storage_config_;
         std::unique_ptr<RollingRawFileOutput> writer_;
@@ -456,4 +610,4 @@ namespace openpni::distributed::acquisition
         std::unique_ptr<AlgoType> algo_;
     };
 
-} // namespace openpni::process::distributed
+} // namespace openpni::distributed::acquisition

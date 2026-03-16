@@ -107,6 +107,14 @@ TEST_LOCAL_GRPC_R2S_TARGET = $(BIN_DIR)/test_local_grpc_r2s
 TEST_LOCAL_GRPC_COIN_SRC = tests/test_local_grpc_coin.cpp
 TEST_LOCAL_GRPC_COIN_TARGET = $(BIN_DIR)/test_local_grpc_coin
 
+# Acquisition control protocol/state-machine smoke compile
+TEST_ACQ_CONTROL_SMOKE_SRC = tests/test_acquisition_control_smoke.cpp
+TEST_ACQ_CONTROL_SMOKE_OBJ = $(BUILD_DIR)/test_acquisition_control_smoke.o
+
+# Acquisition control init integration test (1 master + 2 nodes, init only)
+TEST_ACQ_CONTROL_INIT_SRC = tests/test_acquisition_control_init.cpp
+TEST_ACQ_CONTROL_INIT_TARGET = $(BIN_DIR)/test_acquisition_control_init
+
 # CUDA source files for PNI R2C
 CUDA_SINGLES_PROCESS_SRC = src/tools/SinglesProcess.cu
 CUDA_SINGLES_PROCESS_OBJ = $(BUILD_DIR)/SinglesProcess.o
@@ -194,6 +202,18 @@ $(TEST_LOCAL_GRPC_COIN_TARGET): $(TEST_LOCAL_GRPC_COIN_SRC) $(PROTO_OBJS) | dire
 	@echo "✓ Local gRPC coin receiver test program compiled successfully"
 	@echo "Run: $(TEST_LOCAL_GRPC_COIN_TARGET)"
 
+# 采集控制路径冒烟编译（仅编译，不链接运行）
+$(TEST_ACQ_CONTROL_SMOKE_OBJ): $(TEST_ACQ_CONTROL_SMOKE_SRC) | directories
+	$(CXX) $(CXXFLAGS_FULL) -c $(TEST_ACQ_CONTROL_SMOKE_SRC) -o $(TEST_ACQ_CONTROL_SMOKE_OBJ)
+	@echo "✓ Acquisition control smoke compile succeeded"
+
+# 编译采集控制初始化测试（1 主 + 2 采集节点，仅初始化）
+$(TEST_ACQ_CONTROL_INIT_TARGET): $(TEST_ACQ_CONTROL_INIT_SRC) $(PROTO_OBJS) | directories
+	$(CXX) $(CXXFLAGS_FULL) -c $(TEST_ACQ_CONTROL_INIT_SRC) -o build/test_acquisition_control_init.o
+	$(CXX) $(CXXFLAGS_FULL) -o $(TEST_ACQ_CONTROL_INIT_TARGET) build/test_acquisition_control_init.o $(PROTO_OBJS) $(LDFLAGS_FULL)
+	@echo "✓ Acquisition control init test program compiled successfully"
+	@echo "Run: $(TEST_ACQ_CONTROL_INIT_TARGET)"
+
 # 清理
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)
@@ -236,6 +256,8 @@ help:
 	@echo "  make test-pni-r2c     - 编译并运行 PNI R2C 测试"
 	@echo "  make test-local-grpc-coin - 编译并运行本地 gRPC 符合主机接收测试"
 	@echo "  make test-local-grpc-r2s - 编译并运行本地 gRPC 单事件转换测试(BDM2)"
+	@echo "  make test-acq-control-smoke - 仅编译采集控制协议/状态机路径"
+	@echo "  make test-acq-control-init - 编译并运行采集控制初始化测试(1主2节点)"
 	@echo ""
 	@echo "清理:"
 	@echo "  make clean        - 删除构建文件"
@@ -284,4 +306,16 @@ test-local-grpc-coin: $(TEST_LOCAL_GRPC_COIN_TARGET)
 	@echo "========================================="
 	@echo "✓ Tests completed"
 
-.PHONY: all all-full test test-grpc test-streaming test-pni-r2c test-local-grpc-coin test-local-grpc-r2s clean clean-proto help directories
+# 运行采集控制路径冒烟编译
+test-acq-control-smoke: $(TEST_ACQ_CONTROL_SMOKE_OBJ)
+	@echo "Acquisition control smoke compile completed"
+
+# 运行采集控制初始化测试（不执行采集）
+test-acq-control-init: $(TEST_ACQ_CONTROL_INIT_TARGET)
+	@echo "Running acquisition control init test (1 master + 2 nodes)..."
+	@echo "============================================================"
+	@$(TEST_ACQ_CONTROL_INIT_TARGET)
+	@echo "============================================================"
+	@echo "✓ Init test completed"
+
+.PHONY: all all-full test test-grpc test-streaming test-pni-r2c test-local-grpc-coin test-local-grpc-r2s test-acq-control-smoke test-acq-control-init clean clean-proto help directories

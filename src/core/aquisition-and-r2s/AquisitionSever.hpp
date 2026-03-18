@@ -26,11 +26,12 @@ namespace openpni::distributed::acquisition
     // 存储配置
     struct StorageConfig
     {
-        std::string output_root;          // 存储根目录
-        std::string session_name;         // 本次采集的会话名（子目录）
-        size_t max_file_size_mb = 512;    // 分卷大小阈值 (MB)
-        uint64_t total_reserved_gib = 20; // 磁盘保留空间 (GiB)
-        uint16_t channel_num = 0;         // 通道数（自动填充）
+        std::string output_root;           // 存储根目录
+        std::string session_name;          // 本次采集的会话名（子目录）
+        size_t max_file_size_mb = 512;     // 分卷大小阈值 (MB)
+        uint64_t total_reserved_gib = 20;  // 磁盘保留空间 (GiB)
+        uint16_t channel_num = 0;          // 通道数（自动填充）
+        bool enable_raw_file_write = true; // 是否写 raw 文件，false 时仅通过内存回调输出
     };
 
     // 采集节点配置，用于生成 AcquisitionInfo
@@ -324,6 +325,8 @@ namespace openpni::distributed::acquisition
     public:
         // 回调函数：用于向主服务器报告状态
         using StatusReportCallback = std::function<void(const openpni::distributed::acquisition::NodeStatus &)>;
+        // 回调函数：每次采集到新段数据时调用。回调内不可持久化引用，若异步处理需自行拷贝。
+        using RawDataReadyCallback = std::function<bool(const openpni::RawDataView &)>;
 
         DistributedAcquisitionNode(AcquisitionInfo acq_info, StorageConfig storage_config)
             : acq_info_(acq_info), storage_config_(storage_config)
@@ -350,6 +353,12 @@ namespace openpni::distributed::acquisition
             status_report_callback_ = cb;
         }
 
+        // 设置原始数据就绪回调（用于内存直连 R2S 等场景）
+        void SetRawDataReadyCallback(RawDataReadyCallback cb)
+        {
+            raw_data_ready_callback_ = std::move(cb);
+        }
+
         // 启动采集
         bool Start()
         {
@@ -362,11 +371,26 @@ namespace openpni::distributed::acquisition
                 return false;
             }
 
-            // 初始化 writer
-            writer_ = std::make_unique<RollingRawFileOutput>(storage_config_);
-            if (file_ready_callback_)
+            if (!storage_config_.enable_raw_file_write && !raw_data_ready_callback_)
             {
-                writer_->SetFileReadyCallback(file_ready_callback_);
+                NotifyError("No output sink configured: raw file write is disabled and raw data callback is not set");
+                return false;
+            }
+
+            // 初始化 writer（可选）
+            if (storage_config_.enable_raw_file_write)
+            {
+                writer_ = std::make_unique<RollingRawFileOutput>(storage_config_);
+                if (file_ready_callback_)
+                {
+                    writer_->SetFileReadyCallback(file_ready_callback_);
+                }
+            }
+            else
+            {
+                writer_.reset();
+                std::cout << "[Acquisition] raw file write disabled, data will be forwarded via callback only"
+                          << std::endl;
             }
 
             running_.store(true, std::memory_order_release);
@@ -469,12 +493,25 @@ namespace openpni::distributed::acquisition
 
                 if (data_opt && data_opt->count > 0)
                 {
+                    bool sinkOk = true;
+
+                    if (raw_data_ready_callback_)
+                    {
+                        sinkOk = raw_data_ready_callback_(data_opt.value());
+                        if (!sinkOk)
+                        {
+                            NotifyError("Raw data callback failed, stopping acquisition");
+                            running_.store(false, std::memory_order_release);
+                        }
+                    }
+
                     // 写入文件（内部会自动处理分卷）
-                    if (!writer_->Write(data_opt.value()))
+                    if (sinkOk && writer_ && !writer_->Write(data_opt.value()))
                     {
                         NotifyError("Raw data write failed, stopping acquisition");
                         running_.store(false, std::memory_order_release);
                     }
+
                     missTime = 0;
                 }
                 else
@@ -600,6 +637,7 @@ namespace openpni::distributed::acquisition
         StorageConfig storage_config_;
         std::unique_ptr<RollingRawFileOutput> writer_;
         RollingRawFileOutput::FileReadyCallback file_ready_callback_;
+        RawDataReadyCallback raw_data_ready_callback_;
         StatusReportCallback status_report_callback_;
 
         std::thread worker_thread_;

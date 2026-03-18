@@ -33,6 +33,7 @@ namespace openpni::distributed::grpcnode
     {
     public:
         using FileReadyCallback = acqproto::RollingRawFileOutput::FileReadyCallback;
+        using RawDataReadyCallback = std::function<bool(const openpni::RawDataView &)>;
 
         struct InitOptions
         {
@@ -44,6 +45,7 @@ namespace openpni::distributed::grpcnode
             std::string sessionNamePrefix = "acq_session";
             size_t maxFileSizeMb = 1024;
             uint64_t reservedStorageGiB = 20;
+            bool enableRawFileWrite = true;
 
             uint32_t statusIntervalMs = 1000;
         };
@@ -66,6 +68,16 @@ namespace openpni::distributed::grpcnode
             if (m_runtimeNode && m_fileReadyCallback)
             {
                 m_runtimeNode->SetFileCompleteCallback(m_fileReadyCallback);
+            }
+        }
+
+        void setRawDataReadyCallback(RawDataReadyCallback callback)
+        {
+            std::lock_guard<std::mutex> lock(m_runtimeMutex);
+            m_rawDataReadyCallback = std::move(callback);
+            if (m_runtimeNode && m_rawDataReadyCallback)
+            {
+                m_runtimeNode->SetRawDataReadyCallback(m_rawDataReadyCallback);
             }
         }
 
@@ -164,6 +176,7 @@ namespace openpni::distributed::grpcnode
             virtual bool Start() = 0;
             virtual void Stop() = 0;
             virtual void SetFileCompleteCallback(FileReadyCallback callback) = 0;
+            virtual void SetRawDataReadyCallback(RawDataReadyCallback callback) = 0;
             virtual void SetStatusReportCallback(std::function<void(const acqproto::NodeStatus &)> callback) = 0;
         };
 
@@ -191,6 +204,11 @@ namespace openpni::distributed::grpcnode
             void SetFileCompleteCallback(FileReadyCallback callback) override
             {
                 m_node->SetFileCompleteCallback(std::move(callback));
+            }
+
+            void SetRawDataReadyCallback(RawDataReadyCallback callback) override
+            {
+                m_node->SetRawDataReadyCallback(std::move(callback));
             }
 
             void SetStatusReportCallback(std::function<void(const acqproto::NodeStatus &)> callback) override
@@ -392,6 +410,7 @@ namespace openpni::distributed::grpcnode
                 task.max_file_size_mb() > 0 ? static_cast<size_t>(task.max_file_size_mb()) : m_init.maxFileSizeMb;
             storageConfig.total_reserved_gib =
                 task.reserved_storage_gib() > 0 ? task.reserved_storage_gib() : m_init.reservedStorageGiB;
+            storageConfig.enable_raw_file_write = m_init.enableRawFileWrite;
 
             logConfigureDetails(task, storageConfig);
 
@@ -420,6 +439,11 @@ namespace openpni::distributed::grpcnode
                 if (m_fileReadyCallback)
                 {
                     m_runtimeNode->SetFileCompleteCallback(m_fileReadyCallback);
+                }
+
+                if (m_rawDataReadyCallback)
+                {
+                    m_runtimeNode->SetRawDataReadyCallback(m_rawDataReadyCallback);
                 }
 
                 m_runtimeNode->SetStatusReportCallback(
@@ -792,6 +816,7 @@ namespace openpni::distributed::grpcnode
         mutable std::mutex m_runtimeMutex;
         std::unique_ptr<INodeRuntime> m_runtimeNode;
         FileReadyCallback m_fileReadyCallback;
+        RawDataReadyCallback m_rawDataReadyCallback;
         bool m_dpdkInitialized{false};
 
         mutable std::mutex m_statusMutex;

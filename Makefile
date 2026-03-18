@@ -115,6 +115,14 @@ TEST_ACQ_CONTROL_SMOKE_OBJ = $(BUILD_DIR)/test_acquisition_control_smoke.o
 TEST_ACQ_CONTROL_INIT_SRC = tests/test_acquisition_control_init.cpp
 TEST_ACQ_CONTROL_INIT_TARGET = $(BIN_DIR)/test_acquisition_control_init
 
+# Acquisition data-path test with UDP packet simulation (scheme-1)
+TEST_ACQ_DATAPATH_UDP_SRC = tests/test_acquisition_datapath_udp.cpp
+TEST_ACQ_DATAPATH_UDP_TARGET = $(BIN_DIR)/test_acquisition_datapath_udp
+
+# Acquisition -> R2S end-to-end pipeline test (UDP replay + lock-free raw queue)
+TEST_ACQ_R2S_PIPELINE_SRC = tests/test_acquisition_r2s_pipeline.cpp
+TEST_ACQ_R2S_PIPELINE_TARGET = $(BIN_DIR)/test_acquisition_r2s_pipeline
+
 # CUDA source files for PNI R2C
 CUDA_SINGLES_PROCESS_SRC = src/tools/SinglesProcess.cu
 CUDA_SINGLES_PROCESS_OBJ = $(BUILD_DIR)/SinglesProcess.o
@@ -214,6 +222,20 @@ $(TEST_ACQ_CONTROL_INIT_TARGET): $(TEST_ACQ_CONTROL_INIT_SRC) $(PROTO_OBJS) | di
 	@echo "✓ Acquisition control init test program compiled successfully"
 	@echo "Run: $(TEST_ACQ_CONTROL_INIT_TARGET)"
 
+# 编译采集通路 UDP 模拟测试（仅验证采集链路，不含单事件转换）
+$(TEST_ACQ_DATAPATH_UDP_TARGET): $(TEST_ACQ_DATAPATH_UDP_SRC) $(PROTO_OBJS) | directories
+	$(CXX) $(CXXFLAGS_FULL) -c $(TEST_ACQ_DATAPATH_UDP_SRC) -o build/test_acquisition_datapath_udp.o
+	$(CXX) $(CXXFLAGS_FULL) -o $(TEST_ACQ_DATAPATH_UDP_TARGET) build/test_acquisition_datapath_udp.o $(PROTO_OBJS) $(LDFLAGS_FULL)
+	@echo "✓ Acquisition datapath UDP test program compiled successfully"
+	@echo "Run: $(TEST_ACQ_DATAPATH_UDP_TARGET)"
+
+# 编译采集->单事件转换端到端测试（UDP回放 + 无锁 raw 队列 + R2S）
+$(TEST_ACQ_R2S_PIPELINE_TARGET): $(TEST_ACQ_R2S_PIPELINE_SRC) $(PROTO_OBJS) $(CUDA_SINGLES_PROCESS_OBJ) | directories
+	$(CXX) $(CXXFLAGS_FULL) -O3 -march=native -fopenmp -c $(TEST_ACQ_R2S_PIPELINE_SRC) -o build/test_acquisition_r2s_pipeline.o
+	$(CXX) $(CXXFLAGS_FULL) -O3 -march=native -fopenmp -o $(TEST_ACQ_R2S_PIPELINE_TARGET) build/test_acquisition_r2s_pipeline.o $(CUDA_SINGLES_PROCESS_OBJ) $(PROTO_OBJS) $(LDFLAGS_FULL) -ltbb
+	@echo "✓ Acquisition -> R2S pipeline test program compiled successfully"
+	@echo "Run: $(TEST_ACQ_R2S_PIPELINE_TARGET)"
+
 # 清理
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)
@@ -258,6 +280,8 @@ help:
 	@echo "  make test-local-grpc-r2s - 编译并运行本地 gRPC 单事件转换测试(BDM2)"
 	@echo "  make test-acq-control-smoke - 仅编译采集控制协议/状态机路径"
 	@echo "  make test-acq-control-init - 编译并运行采集控制初始化测试(1主2节点)"
+	@echo "  make test-acq-datapath-udp - 编译并运行采集通路UDP模拟测试(不含单事件转换)"
+	@echo "  make test-acq-r2s-pipeline - 编译并运行采集->单事件转换端到端测试"
 	@echo ""
 	@echo "清理:"
 	@echo "  make clean        - 删除构建文件"
@@ -318,4 +342,20 @@ test-acq-control-init: $(TEST_ACQ_CONTROL_INIT_TARGET)
 	@echo "============================================================"
 	@echo "✓ Init test completed"
 
-.PHONY: all all-full test test-grpc test-streaming test-pni-r2c test-local-grpc-coin test-local-grpc-r2s test-acq-control-smoke test-acq-control-init clean clean-proto help directories
+# 运行采集通路 UDP 模拟测试（不执行单事件转换）
+test-acq-datapath-udp: $(TEST_ACQ_DATAPATH_UDP_TARGET)
+	@echo "Running acquisition datapath UDP simulation test..."
+	@echo "===================================================="
+	@$(TEST_ACQ_DATAPATH_UDP_TARGET)
+	@echo "===================================================="
+	@echo "✓ Datapath UDP test completed"
+
+# 运行采集->单事件转换端到端测试
+test-acq-r2s-pipeline: $(TEST_ACQ_R2S_PIPELINE_TARGET)
+	@echo "Running acquisition -> R2S end-to-end pipeline test..."
+	@echo "========================================================"
+	@$(TEST_ACQ_R2S_PIPELINE_TARGET)
+	@echo "========================================================"
+	@echo "✓ Acquisition -> R2S pipeline test completed"
+
+.PHONY: all all-full test test-grpc test-streaming test-pni-r2c test-local-grpc-coin test-local-grpc-r2s test-acq-control-smoke test-acq-control-init test-acq-datapath-udp test-acq-r2s-pipeline clean clean-proto help directories

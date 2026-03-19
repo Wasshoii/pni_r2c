@@ -22,7 +22,7 @@
 #include <sys/sysinfo.h>
 #include <unistd.h>
 
-#include "core/aquisition-and-r2s/AquisitionSever.hpp"
+#include "core/acquisition/AcquisitionServer.hpp"
 #include "protos/acquisition.grpc.pb.h"
 
 namespace openpni::distributed::grpcnode

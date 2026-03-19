@@ -163,13 +163,13 @@ strings bin/test_distributed_clock_sync | grep -i "optimization"
 
 ```cpp
 // 客户端使用
-#include "include/timesync/TimeSyncClient.hpp"
+#include "include/grpcService/timesync/TimeSyncClient.hpp"
 auto client = TimeSyncClient(node_id, "server:50051");
 client.StartSync();
 uint64_t corrected_time = client.GetCorrectedTimeNs();
 
 // 服务器使用
-#include "include/timesync/TimeSyncServer.hpp"
+#include "include/grpcService/timesync/TimeSyncServer.hpp"
 TimeSyncServer server;
 uint64_t server_time;
 int64_t offset;
@@ -177,7 +177,7 @@ server.SyncClock(client_id, hostname, client_time,
                  server_time, offset, network_delay);
 
 // 合并应用
-#include "include/timesync/DistributedClockSyncManager.hpp"
+#include "include/grpcService/timesync/DistributedClockSyncManager.hpp"
 auto calib = ClockCalibrationUtil::CalibrateSegmentTime(
     start, end, client_id, offset_ns);
 bool merge = ClockCalibrationUtil::ShouldMerge(seg1, seg2, tolerance);

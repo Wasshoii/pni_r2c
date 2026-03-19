@@ -65,7 +65,7 @@ SYSTEM_LIB_HINT = -L$(SYSTEM_LIB_DIR)
 
 # ==================== 汇总编译选项 ====================
 # 基础编译选项（不含 PNI/CUDA）
-CXXFLAGS_BASE = $(CXXFLAGS) -Iinclude_override $(GRPC_CFLAGS) -Iinclude -Iprotos -Isrc
+CXXFLAGS_BASE = $(CXXFLAGS) -I. -Iinclude_override $(GRPC_CFLAGS) -Iinclude -Iprotos -Isrc
 
 # 完整编译选项（含 PNI/CUDA）
 CXXFLAGS_FULL = $(CXXFLAGS_BASE) $(PNI_CFLAGS) $(PNI_EXTRA_CXXFLAGS)
@@ -127,6 +127,22 @@ TEST_ACQ_R2S_PIPELINE_TARGET = $(BIN_DIR)/test_acquisition_r2s_pipeline
 CUDA_SINGLES_PROCESS_SRC = src/tools/SinglesProcess.cu
 CUDA_SINGLES_PROCESS_OBJ = $(BUILD_DIR)/SinglesProcess.o
 
+# grpcService split source files
+GRPC_SERVICE_DIR = src/grpcService
+GRPC_SERVICE_SRCS = $(GRPC_SERVICE_DIR)/AcquisitionMaster.cpp \
+					$(GRPC_SERVICE_DIR)/CoincidenceClient.cpp \
+					$(GRPC_SERVICE_DIR)/CoincidenceServiceImpl.cpp
+GRPC_SERVICE_OBJS = $(patsubst $(GRPC_SERVICE_DIR)/%.cpp,$(BUILD_DIR)/grpc_service_%.o,$(GRPC_SERVICE_SRCS))
+GRPC_ACQ_MASTER_OBJ = $(BUILD_DIR)/grpc_service_AcquisitionMaster.o
+GRPC_COIN_CLIENT_OBJ = $(BUILD_DIR)/grpc_service_CoincidenceClient.o
+GRPC_COIN_SERVICE_OBJ = $(BUILD_DIR)/grpc_service_CoincidenceServiceImpl.o
+
+# core split source files
+CORE_ACQ_SRC = src/core/acquisition/AcquisitionServer.cpp
+CORE_STREAMING_SRC = src/core/streaming/StreamingCoincidence.cpp
+CORE_ACQ_OBJ = $(BUILD_DIR)/core_acquisition_AcquisitionServer.o
+CORE_STREAMING_OBJ = $(BUILD_DIR)/core_streaming_StreamingCoincidence.o
+
 # Proto files
 PROTO_DIR = protos
 PROTO_SRCS = $(wildcard $(PROTO_DIR)/*.proto)
@@ -170,6 +186,17 @@ $(BUILD_DIR)/%.pb.o: $(PROTO_DIR)/%.pb.cc | directories
 $(BUILD_DIR)/%.grpc.pb.o: $(PROTO_DIR)/%.grpc.pb.cc | directories
 	$(CXX) $(CXXFLAGS_BASE) -c $< -o $@
 
+# 编译 grpcService 拆分后的实现文件
+$(BUILD_DIR)/grpc_service_%.o: $(GRPC_SERVICE_DIR)/%.cpp | directories
+	$(CXX) $(CXXFLAGS_FULL) -c $< -o $@
+
+# 编译 core 拆分后的实现文件
+$(CORE_ACQ_OBJ): $(CORE_ACQ_SRC) | directories
+	$(CXX) $(CXXFLAGS_FULL) -c $(CORE_ACQ_SRC) -o $(CORE_ACQ_OBJ)
+
+$(CORE_STREAMING_OBJ): $(CORE_STREAMING_SRC) | directories
+	$(CXX) $(CXXFLAGS_FULL) -c $(CORE_STREAMING_SRC) -o $(CORE_STREAMING_OBJ)
+
 # 编译 gRPC 测试程序
 $(TEST_GRPC_TARGET): $(TEST_GRPC_SRC) $(PROTO_OBJS) | directories
 	$(CXX) $(CXXFLAGS_BASE) -c $(TEST_GRPC_SRC) -o build/test_grpc.o
@@ -178,15 +205,15 @@ $(TEST_GRPC_TARGET): $(TEST_GRPC_SRC) $(PROTO_OBJS) | directories
 	@echo "Run: $(TEST_GRPC_TARGET)"
 
 # 编译流式符合测试程序（需要 PNI 库和 CUDA）
-$(TEST_STREAMING_TARGET): $(TEST_STREAMING_SRC) $(PROTO_OBJS) | directories
+$(TEST_STREAMING_TARGET): $(TEST_STREAMING_SRC) $(PROTO_OBJS) $(CORE_STREAMING_OBJ) | directories
 	$(CXX) $(CXXFLAGS_FULL) -c $(TEST_STREAMING_SRC) -o build/test_streaming.o
-	$(CXX) $(CXXFLAGS_FULL) -o $(TEST_STREAMING_TARGET) build/test_streaming.o $(PROTO_OBJS) $(LDFLAGS_FULL)
+	$(CXX) $(CXXFLAGS_FULL) -o $(TEST_STREAMING_TARGET) build/test_streaming.o $(CORE_STREAMING_OBJ) $(PROTO_OBJS) $(LDFLAGS_FULL)
 	@echo "✓ Streaming coincidence test program compiled successfully"
 	@echo "Run: $(TEST_STREAMING_TARGET)"
 
 # 编译 CUDA 源文件（使用 g++-13 作为 host 编译器以支持 <format>）
 $(CUDA_SINGLES_PROCESS_OBJ): $(CUDA_SINGLES_PROCESS_SRC) | directories
-	$(NVCC) $(NVCCFLAGS) -ccbin g++-13 $(PNI_NVCC_CFLAGS) $(PNI_EXTRA_CXXFLAGS) -Isrc -c $(CUDA_SINGLES_PROCESS_SRC) -o $(CUDA_SINGLES_PROCESS_OBJ)
+	$(NVCC) $(NVCCFLAGS) -ccbin g++-13 $(PNI_NVCC_CFLAGS) $(PNI_EXTRA_CXXFLAGS) -Iinclude -Iprotos -Isrc -c $(CUDA_SINGLES_PROCESS_SRC) -o $(CUDA_SINGLES_PROCESS_OBJ)
 	@echo "✓ CUDA SinglesProcess compiled"
 
 # 编译 PNI R2C 测试程序（需要 PNI 库、CUDA 和 TBB）
@@ -204,9 +231,9 @@ $(TEST_LOCAL_GRPC_R2S_TARGET): $(TEST_LOCAL_GRPC_R2S_SRC) $(PROTO_OBJS) $(CUDA_S
 	@echo "Run: $(TEST_LOCAL_GRPC_R2S_TARGET)"
 
 # 编译本地 gRPC Coin 接收测试程序（仅接收 + 发开始信号）
-$(TEST_LOCAL_GRPC_COIN_TARGET): $(TEST_LOCAL_GRPC_COIN_SRC) $(PROTO_OBJS) | directories
-	$(CXX) $(CXXFLAGS_BASE) -c $(TEST_LOCAL_GRPC_COIN_SRC) -o build/test_local_grpc_coin.o
-	$(CXX) $(CXXFLAGS_BASE) -o $(TEST_LOCAL_GRPC_COIN_TARGET) build/test_local_grpc_coin.o $(PROTO_OBJS) $(LDFLAGS_BASE)
+$(TEST_LOCAL_GRPC_COIN_TARGET): $(TEST_LOCAL_GRPC_COIN_SRC) $(PROTO_OBJS) $(GRPC_COIN_SERVICE_OBJ) $(GRPC_COIN_CLIENT_OBJ) $(CORE_STREAMING_OBJ) | directories
+	$(CXX) $(CXXFLAGS_FULL) -c $(TEST_LOCAL_GRPC_COIN_SRC) -o build/test_local_grpc_coin.o
+	$(CXX) $(CXXFLAGS_FULL) -o $(TEST_LOCAL_GRPC_COIN_TARGET) build/test_local_grpc_coin.o $(GRPC_COIN_SERVICE_OBJ) $(GRPC_COIN_CLIENT_OBJ) $(CORE_STREAMING_OBJ) $(PROTO_OBJS) $(LDFLAGS_FULL)
 	@echo "✓ Local gRPC coin receiver test program compiled successfully"
 	@echo "Run: $(TEST_LOCAL_GRPC_COIN_TARGET)"
 
@@ -216,23 +243,23 @@ $(TEST_ACQ_CONTROL_SMOKE_OBJ): $(TEST_ACQ_CONTROL_SMOKE_SRC) | directories
 	@echo "✓ Acquisition control smoke compile succeeded"
 
 # 编译采集控制初始化测试（1 主 + 2 采集节点，仅初始化）
-$(TEST_ACQ_CONTROL_INIT_TARGET): $(TEST_ACQ_CONTROL_INIT_SRC) $(PROTO_OBJS) | directories
+$(TEST_ACQ_CONTROL_INIT_TARGET): $(TEST_ACQ_CONTROL_INIT_SRC) $(PROTO_OBJS) $(GRPC_ACQ_MASTER_OBJ) $(CORE_ACQ_OBJ) | directories
 	$(CXX) $(CXXFLAGS_FULL) -c $(TEST_ACQ_CONTROL_INIT_SRC) -o build/test_acquisition_control_init.o
-	$(CXX) $(CXXFLAGS_FULL) -o $(TEST_ACQ_CONTROL_INIT_TARGET) build/test_acquisition_control_init.o $(PROTO_OBJS) $(LDFLAGS_FULL)
+	$(CXX) $(CXXFLAGS_FULL) -o $(TEST_ACQ_CONTROL_INIT_TARGET) build/test_acquisition_control_init.o $(GRPC_ACQ_MASTER_OBJ) $(CORE_ACQ_OBJ) $(PROTO_OBJS) $(LDFLAGS_FULL)
 	@echo "✓ Acquisition control init test program compiled successfully"
 	@echo "Run: $(TEST_ACQ_CONTROL_INIT_TARGET)"
 
 # 编译采集通路 UDP 模拟测试（仅验证采集链路，不含单事件转换）
-$(TEST_ACQ_DATAPATH_UDP_TARGET): $(TEST_ACQ_DATAPATH_UDP_SRC) $(PROTO_OBJS) | directories
+$(TEST_ACQ_DATAPATH_UDP_TARGET): $(TEST_ACQ_DATAPATH_UDP_SRC) $(PROTO_OBJS) $(GRPC_ACQ_MASTER_OBJ) $(CORE_ACQ_OBJ) | directories
 	$(CXX) $(CXXFLAGS_FULL) -c $(TEST_ACQ_DATAPATH_UDP_SRC) -o build/test_acquisition_datapath_udp.o
-	$(CXX) $(CXXFLAGS_FULL) -o $(TEST_ACQ_DATAPATH_UDP_TARGET) build/test_acquisition_datapath_udp.o $(PROTO_OBJS) $(LDFLAGS_FULL)
+	$(CXX) $(CXXFLAGS_FULL) -o $(TEST_ACQ_DATAPATH_UDP_TARGET) build/test_acquisition_datapath_udp.o $(GRPC_ACQ_MASTER_OBJ) $(CORE_ACQ_OBJ) $(PROTO_OBJS) $(LDFLAGS_FULL)
 	@echo "✓ Acquisition datapath UDP test program compiled successfully"
 	@echo "Run: $(TEST_ACQ_DATAPATH_UDP_TARGET)"
 
 # 编译采集->单事件转换端到端测试（UDP回放 + 无锁 raw 队列 + R2S）
-$(TEST_ACQ_R2S_PIPELINE_TARGET): $(TEST_ACQ_R2S_PIPELINE_SRC) $(PROTO_OBJS) $(CUDA_SINGLES_PROCESS_OBJ) | directories
+$(TEST_ACQ_R2S_PIPELINE_TARGET): $(TEST_ACQ_R2S_PIPELINE_SRC) $(PROTO_OBJS) $(CUDA_SINGLES_PROCESS_OBJ) $(GRPC_ACQ_MASTER_OBJ) $(CORE_ACQ_OBJ) | directories
 	$(CXX) $(CXXFLAGS_FULL) -O3 -march=native -fopenmp -c $(TEST_ACQ_R2S_PIPELINE_SRC) -o build/test_acquisition_r2s_pipeline.o
-	$(CXX) $(CXXFLAGS_FULL) -O3 -march=native -fopenmp -o $(TEST_ACQ_R2S_PIPELINE_TARGET) build/test_acquisition_r2s_pipeline.o $(CUDA_SINGLES_PROCESS_OBJ) $(PROTO_OBJS) $(LDFLAGS_FULL) -ltbb
+	$(CXX) $(CXXFLAGS_FULL) -O3 -march=native -fopenmp -o $(TEST_ACQ_R2S_PIPELINE_TARGET) build/test_acquisition_r2s_pipeline.o $(CUDA_SINGLES_PROCESS_OBJ) $(GRPC_ACQ_MASTER_OBJ) $(CORE_ACQ_OBJ) $(PROTO_OBJS) $(LDFLAGS_FULL) -ltbb
 	@echo "✓ Acquisition -> R2S pipeline test program compiled successfully"
 	@echo "Run: $(TEST_ACQ_R2S_PIPELINE_TARGET)"
 

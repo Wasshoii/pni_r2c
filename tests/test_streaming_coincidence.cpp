@@ -11,7 +11,7 @@
 // 必须首先包含 PnI-Config.hpp 以定义 __PNI_CUDA_MACRO__ 等宏
 #include <pni/PnI-Config.hpp>
 
-#include "../src/core/streaming-coin/StreamingCoincidence.hpp"
+#include "core/streaming/StreamingCoincidence.hpp"
 #include <pni/io/IO.hpp>
 #include <iostream>
 #include <random>

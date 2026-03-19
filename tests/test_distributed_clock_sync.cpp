@@ -1,6 +1,6 @@
-#include "../include/timesync/TimeSyncClient.hpp"
-#include "../include/timesync/TimeSyncServer.hpp"
-#include "../include/timesync/DistributedClockSyncManager.hpp"
+#include "grpcService/timesync/TimeSyncClient.hpp"
+#include "grpcService/timesync/TimeSyncServer.hpp"
+#include "grpcService/timesync/DistributedClockSyncManager.hpp"
 #include <iostream>
 #include <iomanip>
 #include <cmath>

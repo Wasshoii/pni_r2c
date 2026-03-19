@@ -21,8 +21,8 @@
 
 #include <pni/io/IO.hpp>
 
-#include "core/aquisition-and-r2s/R2S.hpp"
-#include "distributed/AcquisitionMaster.hpp"
+#include "core/r2s/R2S.hpp"
+#include "grpcService/AcquisitionMaster.hpp"
 #include "grpcNode/acquisitionNode.hpp"
 
 namespace

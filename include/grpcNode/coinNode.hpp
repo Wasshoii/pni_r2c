@@ -5,7 +5,7 @@
 #include <string>
 #include <utility>
 
-#include "src/grpcNode/CoincidenceServiceImpl.hpp"
+#include "grpcService/CoincidenceServiceImpl.hpp"
 
 namespace openpni::distributed::grpcnode
 {

@@ -53,7 +53,7 @@ r2c/
 
 ## 文件分类详解
 
-### 📦 include/timesync/ - 时钟同步头文件
+### 📦 include/grpcService/timesync/ - 时钟同步头文件
 用于分布式采集系统的时钟同步功能。
 
 | 文件 | 大小 | 用途 |
@@ -185,7 +185,7 @@ make clean
 ### 场景1：采集节点集成
 
 ```cpp
-#include "include/timesync/TimeSyncClient.hpp"
+#include "include/grpcService/timesync/TimeSyncClient.hpp"
 
 // 在采集模块中（例如 src/core/raw2coin.cpp）
 auto time_sync = TimeSyncClient(node_id, "server:50051");
@@ -198,7 +198,7 @@ while (collecting) {
 ```
 
 **相关文件**:
-- `include/timesync/TimeSyncClient.hpp` - 客户端
+- `include/grpcService/timesync/TimeSyncClient.hpp` - 客户端
 - `src/core/raw2coin.cpp` - 集成位置
 
 ---
@@ -206,7 +206,7 @@ while (collecting) {
 ### 场景2：合并服务器处理
 
 ```cpp
-#include "include/timesync/DistributedClockSyncManager.hpp"
+#include "include/grpcService/timesync/DistributedClockSyncManager.hpp"
 #include "src/core/MergeAndCoin.hpp"
 
 // 在合并模块中
@@ -219,7 +219,7 @@ for (auto& seg : segments) {
 ```
 
 **相关文件**:
-- `include/timesync/DistributedClockSyncManager.hpp` - 校正工具
+- `include/grpcService/timesync/DistributedClockSyncManager.hpp` - 校正工具
 - `src/core/MergeAndCoin.hpp` - 合并逻辑
 
 ---

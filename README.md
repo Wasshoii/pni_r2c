@@ -78,7 +78,7 @@ make test
 ### 集成到采集代码
 
 ```cpp
-#include "include/timesync/TimeSyncClient.hpp"
+#include "include/grpcService/timesync/TimeSyncClient.hpp"
 
 // 创建同步客户端
 auto time_sync = std::make_shared<TimeSyncClient>(
@@ -96,7 +96,7 @@ event.timestamp_ns = time_sync->GetCorrectedTimeNs();
 ### 集成到合并代码
 
 ```cpp
-#include "include/timesync/DistributedClockSyncManager.hpp"
+#include "include/grpcService/timesync/DistributedClockSyncManager.hpp"
 
 // 应用时钟校正
 auto calib_segment = ClockCalibrationUtil::CalibrateSegmentTime(
@@ -117,7 +117,7 @@ bool should_merge = ClockCalibrationUtil::ShouldMerge(
 
 ```
 r2c/
-├── include/timesync/              # 时钟同步头文件
+├── include/grpcService/timesync/              # 时钟同步头文件
 │   ├── TimeSyncCommon.hpp         # 公共工具
 │   ├── TimeSyncServer.hpp         # 服务器实现
 │   ├── TimeSyncClient.hpp         # 客户端实现
@@ -508,7 +508,7 @@ echo "=== Compilation Test ===" && make test 2>&1 | tail -5
 **Q: 如何在现有项目中最快集成？**
 
 A: 
-1. 复制 `include/timesync/` 目录到项目
+1. 复制 `include/grpcService/timesync/` 目录到项目
 2. 在采集代码中创建 `TimeSyncClient` 实例
 3. 使用 `GetCorrectedTimeNs()` 替代直接时间戳
 4. 在合并时应用 `ClockCalibrationUtil`

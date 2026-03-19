@@ -13,7 +13,7 @@
 #include <pni/PnI-Config.hpp>
 #include <pni/io/IO.hpp>
 // #include <json.hpp>
-#include "../src/core/aquisition-and-r2s/R2S.hpp"
+#include "core/r2s/R2S.hpp"
 #include "../src/tools/testTool.hpp"
 #include "../src/core/merge-and-coin/MergeAndCoin.hpp"
 

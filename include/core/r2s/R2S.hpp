@@ -1,11 +1,15 @@
 #pragma once
+
+#include <pni/PnI-Config.hpp>
+
+#include <cstdint>
 #include <pni/io/IO.hpp>
 // #include <pni/node/BDMBiDR2S.hpp>
 
 #include <pni/node/BDM2R2S.hpp>
 #include <pni/node/ConvergedR2S.hpp>
 #include <pni/node/Coincidence.hpp>
-#include "../../tools/SinglesProcess.hpp"
+#include "tools/SinglesProcess.hpp"
 #include <algorithm>
 #include <cstring>
 #include <limits>

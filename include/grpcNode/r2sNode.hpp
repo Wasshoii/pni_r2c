@@ -20,7 +20,7 @@
 #include <vector>
 
 #include "coincidence.grpc.pb.h"
-#include "core/aquisition-and-r2s/R2S.hpp"
+#include "core/r2s/R2S.hpp"
 
 namespace openpni::distributed::grpcnode
 {

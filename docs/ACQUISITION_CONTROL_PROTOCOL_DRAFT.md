@@ -14,8 +14,8 @@ This draft focuses on:
 ## Scope
 
 - Control-plane protocol: `protos/acquisition.proto`
-- Master service implementation: `include/distributed/AcquisitionMaster.hpp`
-- Node state machine implementation: `src/grpcNode/acquisitionNode.hpp`
+- Master service implementation: `include/grpcService/AcquisitionMaster.hpp`
+- Node state machine implementation: `include/grpcNode/acquisitionNode.hpp`
 
 ## Master API (current implementation)
 

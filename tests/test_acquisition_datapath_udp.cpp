@@ -15,7 +15,8 @@
 #include <thread>
 #include <vector>
 
-#include "distributed/AcquisitionMaster.hpp"
+#include "core/acquisition/AcquisitionServer.hpp"
+#include "grpcService/AcquisitionMaster.hpp"
 #include "grpcNode/acquisitionNode.hpp"
 
 namespace

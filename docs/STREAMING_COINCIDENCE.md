@@ -161,8 +161,10 @@ int main() {
 ## 文件结构
 
 ```
-src/core/streaming-coin/
-├── StreamingCoincidence.hpp    # 核心流式处理组件
+include/core/streaming/
+└── StreamingCoincidence.hpp    # 核心流式处理组件
+
+include/grpcService/
 ├── CoincidenceServiceImpl.hpp  # gRPC 服务端实现
 └── CoincidenceClient.hpp       # gRPC 客户端实现
 

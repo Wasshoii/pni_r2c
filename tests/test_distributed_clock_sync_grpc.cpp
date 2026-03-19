@@ -12,8 +12,8 @@
 #include "timesync.grpc.pb.h"
 
 // 包含服务器实现
-#include "include/timesync/TimeSyncServiceImpl.hpp"
-#include "include/timesync/TimeSyncCommon.hpp"
+#include "grpcService/timesync/TimeSyncServiceImpl.hpp"
+#include "grpcService/timesync/TimeSyncCommon.hpp"
 
 using grpc::Channel;
 using grpc::ClientContext;

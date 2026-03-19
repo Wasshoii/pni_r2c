@@ -6,7 +6,7 @@
 #include <string>
 #include <pni/tools/Parallel.hpp>
 #include <pni/node/Coincidence.hpp>
-#include "../aquisition-and-r2s/R2S.hpp"
+#include "core/r2s/R2S.hpp"
 #include <execution>
 #include <chrono>
 #include <thread>

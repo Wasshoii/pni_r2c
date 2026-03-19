@@ -37,7 +37,7 @@ r2c/
 
 ## 详细整理结果
 
-### 📂 include/timesync/ (5个文件)
+### 📂 include/grpcService/timesync/ (5个文件)
 | 文件 | 大小 | 说明 |
 |-----|------|------|
 | TimeSyncCommon.hpp | 2.3KB | 公共工具和数据结构 |
@@ -161,7 +161,7 @@ make clean
 
 | 任务 | 之前 | 之后 |
 |-----|------|------|
-| 找到时钟同步头文件 | 扫描全部 5 个 .hpp | 直接看 `include/timesync/` |
+| 找到时钟同步头文件 | 扫描全部 5 个 .hpp | 直接看 `include/grpcService/timesync/` |
 | 找到核心处理代码 | 扫描全部 5 个 .cpp/.hpp | 直接看 `src/core/` |
 | 找到测试代码 | 扫描全部 2 个 .cpp | 直接看 `tests/` |
 | 找到文档 | 扫描全部 3 个 .md | 直接看 `docs/` |
@@ -202,11 +202,11 @@ CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -pthread -Iinclude
 
 | 源位置 | 目标位置 | 说明 |
 |--------|---------|------|
-| `TimeSyncCommon.hpp` | `include/timesync/` | 时钟同步工具 |
-| `TimeSyncServer.hpp` | `include/timesync/` | 同步服务器 |
-| `TimeSyncClient.hpp` | `include/timesync/` | 同步客户端 |
-| `DistributedClockSyncManager.hpp` | `include/timesync/` | 集成接口 |
-| `timesync.proto` | `include/timesync/` | gRPC 定义 |
+| `TimeSyncCommon.hpp` | `include/grpcService/timesync/` | 时钟同步工具 |
+| `TimeSyncServer.hpp` | `include/grpcService/timesync/` | 同步服务器 |
+| `TimeSyncClient.hpp` | `include/grpcService/timesync/` | 同步客户端 |
+| `DistributedClockSyncManager.hpp` | `include/grpcService/timesync/` | 集成接口 |
+| `timesync.proto` | `include/grpcService/timesync/` | gRPC 定义 |
 | `raw2coin.cpp` | `src/core/` | 主程序 |
 | `raw2coin01.cpp` | `src/core/` | 替代实现 |
 | `MergeAndCoin.hpp` | `src/core/` | 合并逻辑 |

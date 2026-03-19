@@ -27,7 +27,7 @@
 #include <grpcpp/grpcpp.h>
 
 #include "protos/coincidence.grpc.pb.h"
-#include "../src/core/aquisition-and-r2s/R2S.hpp"
+#include "core/r2s/R2S.hpp"
 #include "grpcNode/r2sNode.hpp"
 
 namespace fs = std::filesystem;

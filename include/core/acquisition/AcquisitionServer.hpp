@@ -19,7 +19,7 @@
 
 #include <pni/node/Acquisition.hpp>
 #include <pni/io/IO.hpp>
-#include "protos/acquisition.pb.h" // 引用 proto 生成的头文件
+#include "protos/acquisition.pb.h"
 
 namespace openpni::distributed::acquisition
 {

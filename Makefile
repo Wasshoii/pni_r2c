@@ -127,6 +127,14 @@ TEST_ACQ_DATAPATH_UDP_TARGET = $(BIN_DIR)/test_acquisition_datapath_udp
 TEST_ACQ_R2S_PIPELINE_SRC = tests/test_acquisition_r2s_pipeline.cpp
 TEST_ACQ_R2S_PIPELINE_TARGET = $(BIN_DIR)/test_acquisition_r2s_pipeline
 
+# Deployable app entrypoints
+APP_ACQ_R2S_NODE_SRC = app/acq_r2s_node_main.cpp
+APP_ACQ_R2S_NODE_TARGET = $(BIN_DIR)/app_acq_r2s_node
+APP_COIN_MASTER_SRC = app/coin_master_main.cpp
+APP_COIN_MASTER_TARGET = $(BIN_DIR)/app_coin_master
+APP_COMMON_CONFIG_SRC = app/common/AppConfig.cpp
+APP_COMMON_CONFIG_OBJ = $(BUILD_DIR)/app_common_AppConfig.o
+
 # CUDA source files for PNI R2C
 CUDA_SINGLES_PROCESS_SRC = src/tools/SinglesProcess.cu
 CUDA_SINGLES_PROCESS_OBJ = $(BUILD_DIR)/SinglesProcess.o
@@ -223,6 +231,9 @@ $(CORE_STREAMING_OBJ): $(CORE_STREAMING_SRC) | directories
 $(CORE_R2S_OBJ): $(CORE_R2S_SRC) | directories
 	$(CXX) $(CXXFLAGS_FULL) -c $(CORE_R2S_SRC) -o $(CORE_R2S_OBJ)
 
+$(APP_COMMON_CONFIG_OBJ): $(APP_COMMON_CONFIG_SRC) | directories
+	$(CXX) $(CXXFLAGS_FULL) -c $(APP_COMMON_CONFIG_SRC) -o $(APP_COMMON_CONFIG_OBJ)
+
 # 编译 gRPC 测试程序
 $(TEST_GRPC_TARGET): $(TEST_GRPC_SRC) $(PROTO_OBJS) | directories
 	$(CXX) $(CXXFLAGS_BASE) -c $(TEST_GRPC_SRC) -o build/test_grpc.o
@@ -296,6 +307,20 @@ $(TEST_ACQ_R2S_PIPELINE_TARGET): $(TEST_ACQ_R2S_PIPELINE_SRC) $(PROTO_OBJS) $(CU
 	@echo "✓ Acquisition -> R2S pipeline test program compiled successfully"
 	@echo "Run: $(TEST_ACQ_R2S_PIPELINE_TARGET)"
 
+# 编译应用：采集-单事件转换子节点
+$(APP_ACQ_R2S_NODE_TARGET): $(APP_ACQ_R2S_NODE_SRC) $(APP_COMMON_CONFIG_OBJ) $(PROTO_OBJS) $(CUDA_SINGLES_PROCESS_OBJ) $(CORE_R2S_OBJ) $(CORE_ACQ_OBJ) $(GRPC_NODE_ACQ_OBJ) $(GRPC_COIN_CLIENT_OBJ) | directories
+	$(CXX) $(CXXFLAGS_FULL) -O3 -march=native -fopenmp -c $(APP_ACQ_R2S_NODE_SRC) -o build/app_acq_r2s_node_main.o
+	$(CXX) $(CXXFLAGS_FULL) -O3 -march=native -fopenmp -o $(APP_ACQ_R2S_NODE_TARGET) build/app_acq_r2s_node_main.o $(APP_COMMON_CONFIG_OBJ) $(CUDA_SINGLES_PROCESS_OBJ) $(CORE_R2S_OBJ) $(CORE_ACQ_OBJ) $(GRPC_NODE_ACQ_OBJ) $(GRPC_COIN_CLIENT_OBJ) $(PROTO_OBJS) $(LDFLAGS_FULL) -ltbb
+	@echo "✓ App acquisition + R2S node compiled successfully"
+	@echo "Run: $(APP_ACQ_R2S_NODE_TARGET) --config app/config/examples/acq_r2s_node.example.json"
+
+# 编译应用：符合主控节点（可选采集主控）
+$(APP_COIN_MASTER_TARGET): $(APP_COIN_MASTER_SRC) $(APP_COMMON_CONFIG_OBJ) $(PROTO_OBJS) $(GRPC_ACQ_MASTER_OBJ) $(CORE_STREAMING_OBJ) $(GRPC_COIN_SERVICE_OBJ) $(GRPC_NODE_COIN_OBJ) | directories
+	$(CXX) $(CXXFLAGS_FULL) -O3 -march=native -fopenmp -c $(APP_COIN_MASTER_SRC) -o build/app_coin_master_main.o
+	$(CXX) $(CXXFLAGS_FULL) -O3 -march=native -fopenmp -o $(APP_COIN_MASTER_TARGET) build/app_coin_master_main.o $(APP_COMMON_CONFIG_OBJ) $(GRPC_ACQ_MASTER_OBJ) $(CORE_STREAMING_OBJ) $(GRPC_COIN_SERVICE_OBJ) $(GRPC_NODE_COIN_OBJ) $(PROTO_OBJS) $(LDFLAGS_FULL) -ltbb
+	@echo "✓ App coin master node compiled successfully"
+	@echo "Run: $(APP_COIN_MASTER_TARGET) --config app/config/examples/coin_master.example.json"
+
 # 清理
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)
@@ -343,6 +368,8 @@ help:
 	@echo "  make test-acq-control-init - 编译并运行采集控制初始化测试(1主2节点)"
 	@echo "  make test-acq-datapath-udp - 编译并运行采集通路UDP模拟测试(不含单事件转换)"
 	@echo "  make test-acq-r2s-pipeline - 编译并运行采集->单事件转换端到端测试"
+	@echo "  make app-acq-r2s-node      - 编译可部署采集-单事件转换子节点程序"
+	@echo "  make app-coin-master       - 编译可部署符合主控节点程序"
 	@echo ""
 	@echo "清理:"
 	@echo "  make clean        - 删除构建文件"
@@ -427,4 +454,8 @@ test-acq-r2s-pipeline: $(TEST_ACQ_R2S_PIPELINE_TARGET)
 	@echo "========================================================"
 	@echo "✓ Acquisition -> R2S pipeline test completed"
 
-.PHONY: all all-full test test-grpc test-streaming test-pni-r2c test-pni-coin test-local-grpc-coin test-local-grpc-r2s test-acq-control-smoke test-acq-control-init test-acq-datapath-udp test-acq-r2s-pipeline clean clean-proto help directories
+app-acq-r2s-node: $(APP_ACQ_R2S_NODE_TARGET)
+
+app-coin-master: $(APP_COIN_MASTER_TARGET)
+
+.PHONY: all all-full test test-grpc test-streaming test-pni-r2c test-pni-coin test-local-grpc-coin test-local-grpc-r2s test-acq-control-smoke test-acq-control-init test-acq-datapath-udp test-acq-r2s-pipeline app-acq-r2s-node app-coin-master clean clean-proto help directories

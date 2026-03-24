@@ -133,20 +133,20 @@ namespace openpni::distributed::streaming
 
     struct TimeAlignerConfig
     {
-        uint64_t networkLatencyMargin_pico = 5'000'000'000;
+        uint64_t networkLatencyMargin_pico = 5'000'000'000; // 网络延迟安全边际，单位皮秒（默认 5 秒）
 
-        openpni::CoincidenceProtocol coinProtocol;
-        uint16_t channelNum = 0;
+        openpni::CoincidenceProtocol coinProtocol; // Coincidence 协议配置，包含时间窗口、能量窗口等参数
+        uint16_t channelNum = 0;                   // 总通道数
         uint32_t crystalsPerChannel = 0;
 
         std::string outputDir;
         bool savePrompt = true;
         bool saveDelay = true;
 
-        size_t maxChunksPerNode = 100;
-        uint32_t processingIntervalMs = 200;
+        size_t maxChunksPerNode = 100;       // 每个节点的 RingBuffer 大小（单位：Chunk 数量）
+        uint32_t processingIntervalMs = 200; // 处理循环的时间间隔，单位毫秒
 
-        size_t maxTotalMemoryBytes = 2ULL * 1024 * 1024 * 1024;
+        size_t maxTotalMemoryBytes = 2ULL * 1024 * 1024 * 1024; // 内存池最大容量，单位字节（默认 2 GB）
         bool useMemoryPool = true;
 
         uint64_t getTotalSafetyMargin() const;

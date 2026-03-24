@@ -1,0 +1,46 @@
+{
+  "acqNode": {
+    "masterAddress": "127.0.0.1:50093",
+    "nodeId": "acq-r2s-node-1",
+    "nodeAddress": "127.0.0.1",
+    "outputRoot": "Data/raw_data",
+    "sessionNamePrefix": "acq_r2s_node",
+    "statusIntervalMs": 500,
+    "enableRawFileWrite": false
+  },
+  "r2s": {
+    "calibrationDir": "Data/bdm2/calibration",
+    "resultDir": "Data/result/Bdm2/split",
+    "channelIndices": [0, 1, 2, 3],
+    "sortDataByTime": true,
+    "saveData2SingleFile": false,
+    "asyncFileWrite": false
+  },
+  "bridge": {
+    "enabled": true,
+    "queueCapacity": 256,
+    "reservePacketsPerSlot": 4096,
+    "reserveBytesPerSlot": 4194304,
+    "blockWhenQueueFull": true,
+    "queueFullWarnEvery": 5000,
+    "inputChannelCount": 4
+  },
+  "coinClient": {
+    "enabled": true,
+    "serverAddress": "127.0.0.1:50061",
+    "nodeId": 0,
+    "nodeAddress": "127.0.0.1",
+    "channelCount": 4,
+    "detectorType": "BDM2",
+    "maxPendingChunks": 128,
+    "batchSize": 1,
+    "heartbeatIntervalMs": 5000,
+    "waitForStartSignal": true,
+    "waitForStartTimeoutMs": 0,
+    "waitForStartRpcTimeoutMs": 15000,
+    "waitForStartRetryIntervalMs": 1000
+  },
+  "runtime": {
+    "shutdownGraceMs": 1000
+  }
+}

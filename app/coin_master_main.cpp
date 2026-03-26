@@ -49,12 +49,27 @@ namespace
         task->set_reserved_storage_gib(c.reservedStorageGiB);
         task->set_max_file_size_mb(c.maxFileSizeMb);
 
-        for (uint16_t i = 0; i < c.channelCount; ++i)
+        task->clear_detector_sources();
+        if (!c.detectorSources.empty())
         {
-            auto *source = task->add_detector_sources();
-            source->set_detector_id("detector-" + std::to_string(i));
-            source->set_ip_source(ipToInt(c.sourceIp));
-            source->set_port_source(static_cast<uint32_t>(c.sourcePortBase + i));
+            for (size_t i = 0; i < c.detectorSources.size(); ++i)
+            {
+                const auto &det = c.detectorSources[i];
+                auto *source = task->add_detector_sources();
+                source->set_detector_id(det.detectorId.empty() ? ("detector-" + std::to_string(i)) : det.detectorId);
+                source->set_ip_source(ipToInt(det.sourceIp));
+                source->set_port_source(det.sourcePort);
+            }
+        }
+        else
+        {
+            for (uint16_t i = 0; i < c.channelCount; ++i)
+            {
+                auto *source = task->add_detector_sources();
+                source->set_detector_id("detector-" + std::to_string(i));
+                source->set_ip_source(ipToInt(c.sourceIp));
+                source->set_port_source(static_cast<uint32_t>(c.sourcePortBase + i));
+            }
         }
 
         auto *dest = task->mutable_destination_rule();
@@ -147,6 +162,7 @@ int main(int argc, char **argv)
     std::cout << "coin.expectedNodeCount   : " << cfg.coinMaster.expectedNodeCount << std::endl;
     std::cout << "aligner.outputDir        : " << cfg.aligner.outputDir << std::endl;
     std::cout << "acqControl.enabled       : " << (cfg.acquisitionControl.enabled ? "true" : "false") << std::endl;
+    std::cout << "acqControl.detectorSources: " << cfg.acquisitionControl.detectorSources.size() << std::endl;
 
     if (dryRun)
     {
@@ -173,6 +189,28 @@ int main(int argc, char **argv)
     alignerConfig.coinProtocol.delayTime_ps = cfg.aligner.coinProtocol.delayTimePs;
     alignerConfig.coinProtocol.energyLower_eV = cfg.aligner.coinProtocol.energyLowerEV;
     alignerConfig.coinProtocol.energyUpper_eV = cfg.aligner.coinProtocol.energyUpperEV;
+
+    if (cfg.acquisitionControl.enabled)
+    {
+        const size_t effectiveMappedChannels =
+            !cfg.acquisitionControl.detectorSources.empty()
+                ? cfg.acquisitionControl.detectorSources.size()
+                : static_cast<size_t>(cfg.acquisitionControl.channelCount);
+
+        if (effectiveMappedChannels == 0)
+        {
+            std::cerr << "[CoinMaster] invalid acquisitionControl mapping: no detector sources configured" << std::endl;
+            return 3;
+        }
+
+        if (effectiveMappedChannels > alignerConfig.channelNum)
+        {
+            std::cerr << "[CoinMaster] invalid mapping: detector source count=" << effectiveMappedChannels
+                      << " exceeds aligner.channelNum=" << alignerConfig.channelNum
+                      << ". Increase aligner.channelNum or reduce detectorSources." << std::endl;
+            return 3;
+        }
+    }
 
     grpcnode::CoinGrpcNode::InitOptions coinInit;
     coinInit.alignerConfig = alignerConfig;
@@ -201,6 +239,9 @@ int main(int argc, char **argv)
     {
         acq::AcquisitionTask globalTask;
         fillAcquisitionTask(&globalTask, cfg.acquisitionControl);
+
+        std::cout << "[CoinMaster] Acquisition mapping prepared: detector_sources="
+                  << globalTask.detector_sources_size() << std::endl;
 
         acqMaster.Initialize(globalTask);
         acqMaster.StartServer(cfg.acquisitionControl.masterAddress);

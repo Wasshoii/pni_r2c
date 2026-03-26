@@ -106,6 +106,13 @@ namespace openpni::distributed::app
 
     struct AcqControlSection
     {
+        struct DetectorSource
+        {
+            std::string detectorId;
+            std::string sourceIp;
+            uint16_t sourcePort = 0;
+        };
+
         bool enabled = false;
         std::string masterAddress = "127.0.0.1:50093";
         bool autoDistributeWhenAllConnected = true;
@@ -116,6 +123,7 @@ namespace openpni::distributed::app
         uint16_t destinationPortBase = 18100;
         uint16_t channelCount = 4;
         std::string sourceIp = "127.0.0.1";
+        std::vector<DetectorSource> detectorSources;
         std::string destinationIp = "127.0.0.1";
 
         std::string sessionName = "app_coin_master_session";

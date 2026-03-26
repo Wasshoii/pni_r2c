@@ -527,6 +527,61 @@ namespace openpni::distributed::app
                 {
                     return fail(err, "acquisitionControl.sourceIp must be string");
                 }
+
+                if (const Value *sourcesValue = findField(*sec, "detectorSources"))
+                {
+                    if (sourcesValue->kind_case() != Value::kListValue)
+                    {
+                        return fail(err, "acquisitionControl.detectorSources must be an array");
+                    }
+
+                    std::vector<AcqControlSection::DetectorSource> sources;
+                    sources.reserve(static_cast<size_t>(sourcesValue->list_value().values_size()));
+
+                    size_t idx = 0;
+                    for (const auto &item : sourcesValue->list_value().values())
+                    {
+                        if (item.kind_case() != Value::kStructValue)
+                        {
+                            return fail(err, "acquisitionControl.detectorSources entries must be objects");
+                        }
+
+                        const Struct &itemObj = item.struct_value();
+                        AcqControlSection::DetectorSource source;
+                        if (!readString(itemObj, "detectorId", &source.detectorId))
+                        {
+                            return fail(err, "acquisitionControl.detectorSources[].detectorId must be string");
+                        }
+                        if (!readString(itemObj, "sourceIp", &source.sourceIp))
+                        {
+                            return fail(err, "acquisitionControl.detectorSources[].sourceIp must be string");
+                        }
+                        if (!readUInt(itemObj, "sourcePort", &source.sourcePort))
+                        {
+                            return fail(err, "acquisitionControl.detectorSources[].sourcePort must be non-negative integer");
+                        }
+
+                        if (source.sourceIp.empty())
+                        {
+                            return fail(err, "acquisitionControl.detectorSources[].sourceIp must not be empty");
+                        }
+                        if (source.sourcePort == 0)
+                        {
+                            return fail(err, "acquisitionControl.detectorSources[].sourcePort must be > 0");
+                        }
+
+                        if (source.detectorId.empty())
+                        {
+                            source.detectorId = "detector-" + std::to_string(idx);
+                        }
+
+                        sources.push_back(std::move(source));
+                        ++idx;
+                    }
+
+                    cfg->acquisitionControl.detectorSources = std::move(sources);
+                }
+
                 if (!readString(*sec, "destinationIp", &cfg->acquisitionControl.destinationIp))
                 {
                     return fail(err, "acquisitionControl.destinationIp must be string");

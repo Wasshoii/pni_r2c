@@ -132,6 +132,8 @@ APP_ACQ_R2S_NODE_SRC = app/acq_r2s_node_main.cpp
 APP_ACQ_R2S_NODE_TARGET = $(BIN_DIR)/app_acq_r2s_node
 APP_COIN_MASTER_SRC = app/coin_master_main.cpp
 APP_COIN_MASTER_TARGET = $(BIN_DIR)/app_coin_master
+APP_UDP_REPLAYER_SRC = app/udp_raw_replayer_main.cpp
+APP_UDP_REPLAYER_TARGET = $(BIN_DIR)/app_udp_raw_replayer
 APP_COMMON_CONFIG_SRC = app/common/AppConfig.cpp
 APP_COMMON_CONFIG_OBJ = $(BUILD_DIR)/app_common_AppConfig.o
 
@@ -321,6 +323,13 @@ $(APP_COIN_MASTER_TARGET): $(APP_COIN_MASTER_SRC) $(APP_COMMON_CONFIG_OBJ) $(PRO
 	@echo "✓ App coin master node compiled successfully"
 	@echo "Run: $(APP_COIN_MASTER_TARGET) --config app/config/examples/coin_master.example.json"
 
+# 编译应用：UDP 原始数据回放发包器
+$(APP_UDP_REPLAYER_TARGET): $(APP_UDP_REPLAYER_SRC) | directories
+	$(CXX) $(CXXFLAGS_FULL) -O3 -march=native -fopenmp -c $(APP_UDP_REPLAYER_SRC) -o build/app_udp_raw_replayer_main.o
+	$(CXX) $(CXXFLAGS_FULL) -O3 -march=native -fopenmp -o $(APP_UDP_REPLAYER_TARGET) build/app_udp_raw_replayer_main.o $(LDFLAGS_FULL)
+	@echo "✓ App UDP raw replayer compiled successfully"
+	@echo "Run: $(APP_UDP_REPLAYER_TARGET) --help"
+
 # 清理
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)
@@ -370,6 +379,7 @@ help:
 	@echo "  make test-acq-r2s-pipeline - 编译并运行采集->单事件转换端到端测试"
 	@echo "  make app-acq-r2s-node      - 编译可部署采集-单事件转换子节点程序"
 	@echo "  make app-coin-master       - 编译可部署符合主控节点程序"
+	@echo "  make app-udp-replayer      - 编译UDP原始数据回放发包器"
 	@echo ""
 	@echo "清理:"
 	@echo "  make clean        - 删除构建文件"
@@ -458,4 +468,6 @@ app-acq-r2s-node: $(APP_ACQ_R2S_NODE_TARGET)
 
 app-coin-master: $(APP_COIN_MASTER_TARGET)
 
-.PHONY: all all-full test test-grpc test-streaming test-pni-r2c test-pni-coin test-local-grpc-coin test-local-grpc-r2s test-acq-control-smoke test-acq-control-init test-acq-datapath-udp test-acq-r2s-pipeline app-acq-r2s-node app-coin-master clean clean-proto help directories
+app-udp-replayer: $(APP_UDP_REPLAYER_TARGET)
+
+.PHONY: all all-full test test-grpc test-streaming test-pni-r2c test-pni-coin test-local-grpc-coin test-local-grpc-r2s test-acq-control-smoke test-acq-control-init test-acq-datapath-udp test-acq-r2s-pipeline app-acq-r2s-node app-coin-master app-udp-replayer clean clean-proto help directories

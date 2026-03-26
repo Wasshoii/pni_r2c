@@ -1,0 +1,67 @@
+{
+  "coinMaster": {
+    "listenAddress": "0.0.0.0:50061",
+    "expectedNodeCount": 3,
+    "autoStartWhenAllRegistered": true,
+    "startLeadTimeMs": 800,
+    "waitForStartDefaultTimeoutMs": 30000,
+    "rejectStreamBeforeStart": true,
+    "statusPrintIntervalMs": 1000,
+    "runSeconds": 0
+  },
+  "aligner": {
+    "outputDir": "Data/result/Bdm2/pniCoin/exp_balanced",
+    "channelNum": 48,
+    "crystalsPerChannel": 676,
+    "networkLatencyMarginPico": 5000000000,
+    "processingIntervalMs": 80,
+    "maxChunksPerNode": 400,
+    "maxTotalMemoryBytes": 4294967296,
+    "useMemoryPool": true,
+    "savePrompt": true,
+    "saveDelay": true,
+    "coinProtocol": {
+      "timeWindowPs": 2000,
+      "delayTimePs": 2000000,
+      "energyLowerEV": 350000.0,
+      "energyUpperEV": 650000.0
+    }
+  },
+  "acquisitionControl": {
+    "enabled": true,
+    "masterAddress": "127.0.0.1:50093",
+    "autoDistributeWhenAllConnected": true,
+    "autoStartOnCoinStartSignal": true,
+    "startDurationMs": 0,
+    "sourcePortBase": 17100,
+    "destinationPortBase": 18100,
+    "channelCount": 12,
+    "sourceIp": "127.0.0.1",
+    "detectorSources": [
+      {"detectorId": "d0", "sourceIp": "127.0.0.1", "sourcePort": 17100},
+      {"detectorId": "d1", "sourceIp": "127.0.0.1", "sourcePort": 17101},
+      {"detectorId": "d2", "sourceIp": "127.0.0.1", "sourcePort": 17102},
+      {"detectorId": "d3", "sourceIp": "127.0.0.1", "sourcePort": 17103},
+      {"detectorId": "d4", "sourceIp": "127.0.0.1", "sourcePort": 17104},
+      {"detectorId": "d5", "sourceIp": "127.0.0.1", "sourcePort": 17105},
+      {"detectorId": "d6", "sourceIp": "127.0.0.1", "sourcePort": 17106},
+      {"detectorId": "d7", "sourceIp": "127.0.0.1", "sourcePort": 17107},
+      {"detectorId": "d8", "sourceIp": "127.0.0.1", "sourcePort": 17108},
+      {"detectorId": "d9", "sourceIp": "127.0.0.1", "sourcePort": 17109},
+      {"detectorId": "d10", "sourceIp": "127.0.0.1", "sourcePort": 17110},
+      {"detectorId": "d11", "sourceIp": "127.0.0.1", "sourcePort": 17111}
+    ],
+    "destinationIp": "127.0.0.1",
+    "sessionName": "exp_balanced_session",
+    "storageUnitSize": 2048,
+    "minPacketSize": 1,
+    "maxBufferSize": 4294967296,
+    "timeSwitchBufferMs": 150,
+    "reservedStorageGiB": 20,
+    "maxFileSizeMb": 256,
+    "dpdkCopyThreadNum": 12,
+    "dpdkRxRingsPerPort": 1,
+    "dpdkMbufDoublePointerSizeMultiply": 48,
+    "dpdkMbufDoublePointerNumMultiply": 3
+  }
+}

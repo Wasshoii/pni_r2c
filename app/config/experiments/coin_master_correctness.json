@@ -1,21 +1,21 @@
 {
   "coinMaster": {
     "listenAddress": "0.0.0.0:50061",
-    "expectedNodeCount": 1,
+    "expectedNodeCount": 3,
     "autoStartWhenAllRegistered": true,
     "startLeadTimeMs": 1000,
     "waitForStartDefaultTimeoutMs": 30000,
     "rejectStreamBeforeStart": true,
-    "statusPrintIntervalMs": 2000,
+    "statusPrintIntervalMs": 1000,
     "runSeconds": 0
   },
   "aligner": {
-    "outputDir": "Data/result/Bdm2/pniCoin",
+    "outputDir": "Data/result/Bdm2/pniCoin/exp_correctness",
     "channelNum": 48,
     "crystalsPerChannel": 676,
     "networkLatencyMarginPico": 5000000000,
-    "processingIntervalMs": 200,
-    "maxChunksPerNode": 100,
+    "processingIntervalMs": 100,
+    "maxChunksPerNode": 200,
     "maxTotalMemoryBytes": 2147483648,
     "useMemoryPool": true,
     "savePrompt": true,
@@ -28,39 +28,31 @@
     }
   },
   "acquisitionControl": {
-    "enabled": false,
+    "enabled": true,
     "masterAddress": "127.0.0.1:50093",
     "autoDistributeWhenAllConnected": true,
     "autoStartOnCoinStartSignal": true,
     "startDurationMs": 0,
     "sourcePortBase": 17100,
     "destinationPortBase": 18100,
-    "channelCount": 4,
+    "channelCount": 12,
     "sourceIp": "127.0.0.1",
     "detectorSources": [
-      {
-        "detectorId": "detector-a0",
-        "sourceIp": "10.10.1.10",
-        "sourcePort": 17100
-      },
-      {
-        "detectorId": "detector-a1",
-        "sourceIp": "10.10.1.11",
-        "sourcePort": 17101
-      },
-      {
-        "detectorId": "detector-b0",
-        "sourceIp": "10.10.2.10",
-        "sourcePort": 17102
-      },
-      {
-        "detectorId": "detector-b1",
-        "sourceIp": "10.10.2.11",
-        "sourcePort": 17103
-      }
+      {"detectorId": "d0", "sourceIp": "127.0.0.1", "sourcePort": 17100},
+      {"detectorId": "d1", "sourceIp": "127.0.0.1", "sourcePort": 17101},
+      {"detectorId": "d2", "sourceIp": "127.0.0.1", "sourcePort": 17102},
+      {"detectorId": "d3", "sourceIp": "127.0.0.1", "sourcePort": 17103},
+      {"detectorId": "d4", "sourceIp": "127.0.0.1", "sourcePort": 17104},
+      {"detectorId": "d5", "sourceIp": "127.0.0.1", "sourcePort": 17105},
+      {"detectorId": "d6", "sourceIp": "127.0.0.1", "sourcePort": 17106},
+      {"detectorId": "d7", "sourceIp": "127.0.0.1", "sourcePort": 17107},
+      {"detectorId": "d8", "sourceIp": "127.0.0.1", "sourcePort": 17108},
+      {"detectorId": "d9", "sourceIp": "127.0.0.1", "sourcePort": 17109},
+      {"detectorId": "d10", "sourceIp": "127.0.0.1", "sourcePort": 17110},
+      {"detectorId": "d11", "sourceIp": "127.0.0.1", "sourcePort": 17111}
     ],
     "destinationIp": "127.0.0.1",
-    "sessionName": "app_coin_master_session",
+    "sessionName": "exp_correctness_session",
     "storageUnitSize": 2048,
     "minPacketSize": 1,
     "maxBufferSize": 4294967296,

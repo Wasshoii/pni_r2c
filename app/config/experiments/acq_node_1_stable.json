@@ -4,7 +4,7 @@
     "nodeId": "acq-r2s-node-1",
     "nodeAddress": "127.0.0.1",
     "outputRoot": "Data/raw_data",
-    "sessionNamePrefix": "exp_correctness_node1",
+    "sessionNamePrefix": "exp_balanced_stable_node1",
     "statusIntervalMs": 300,
     "enableRawFileWrite": false
   },
@@ -18,9 +18,9 @@
   },
   "bridge": {
     "enabled": true,
-    "queueCapacity": 256,
-    "reservePacketsPerSlot": 4096,
-    "reserveBytesPerSlot": 4194304,
+    "queueCapacity": 64,
+    "reservePacketsPerSlot": 1024,
+    "reserveBytesPerSlot": 1048576,
     "blockWhenQueueFull": true,
     "queueFullWarnEvery": 5000,
     "inputChannelCount": 4
@@ -35,7 +35,7 @@
     "remapLocalToGlobalChannels": true,
     "globalChannelOffset": 4,
     "crystalsPerChannel": 676,
-    "maxPendingChunks": 128,
+    "maxPendingChunks": 64,
     "batchSize": 2,
     "heartbeatIntervalMs": 2000,
     "waitForStartSignal": true,

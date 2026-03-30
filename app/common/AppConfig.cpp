@@ -335,6 +335,18 @@ namespace openpni::distributed::app
                 {
                     return fail(err, "coinClient.detectorType must be string");
                 }
+                if (!readBool(*sec, "remapLocalToGlobalChannels", &cfg->coinClient.remapLocalToGlobalChannels))
+                {
+                    return fail(err, "coinClient.remapLocalToGlobalChannels must be bool");
+                }
+                if (!readUInt(*sec, "globalChannelOffset", &cfg->coinClient.globalChannelOffset))
+                {
+                    return fail(err, "coinClient.globalChannelOffset must be non-negative integer");
+                }
+                if (!readUInt(*sec, "crystalsPerChannel", &cfg->coinClient.crystalsPerChannel))
+                {
+                    return fail(err, "coinClient.crystalsPerChannel must be non-negative integer");
+                }
                 if (!readUInt(*sec, "maxPendingChunks", &cfg->coinClient.maxPendingChunks))
                 {
                     return fail(err, "coinClient.maxPendingChunks must be non-negative integer");

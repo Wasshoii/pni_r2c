@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <iostream>
+#include <limits>
 #include <thread>
 #include <utility>
 
@@ -95,7 +96,44 @@ namespace openpni::distributed::streaming
         for (const auto &s : singles)
         {
             auto *event = msg->add_singles();
-            event->set_crystal_index(s.globalCrystalIndex);
+            uint32_t crystalIndexToSend = s.globalCrystalIndex;
+
+            if (m_config.remapLocalToGlobalChannels)
+            {
+                if (m_config.crystalsPerChannel == 0)
+                {
+                    std::cerr << "[CoincidenceClient] invalid crystalsPerChannel=0" << std::endl;
+                    return false;
+                }
+
+                const uint32_t localChannel = s.globalCrystalIndex / m_config.crystalsPerChannel;
+                const uint32_t crystalInChannel = s.globalCrystalIndex % m_config.crystalsPerChannel;
+                const uint64_t globalChannel = static_cast<uint64_t>(localChannel) +
+                                              static_cast<uint64_t>(m_config.globalChannelOffset);
+                const uint64_t remapped =
+                    globalChannel * static_cast<uint64_t>(m_config.crystalsPerChannel) +
+                    static_cast<uint64_t>(crystalInChannel);
+
+                if (remapped > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()))
+                {
+                    std::cerr << "[CoincidenceClient] remapped crystal index overflow: " << remapped << std::endl;
+                    return false;
+                }
+
+                crystalIndexToSend = static_cast<uint32_t>(remapped);
+
+                if (!m_remapSampleLogged.exchange(true))
+                {
+                    std::cout << "[CoincidenceClient] remap sample node=" << m_config.nodeId
+                              << " local_channel=" << localChannel
+                              << " global_channel=" << globalChannel
+                              << " local_index=" << s.globalCrystalIndex
+                              << " remapped_index=" << crystalIndexToSend
+                              << std::endl;
+                }
+            }
+
+            event->set_crystal_index(crystalIndexToSend);
             event->set_energy(s.energy);
             event->set_time_pico(s.timeValue_pico);
         }

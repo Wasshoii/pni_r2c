@@ -674,6 +674,7 @@ namespace openpni::distributed::streaming
 
             if (!allSingles.empty())
             {
+                m_stats.totalSinglesReceived += allSingles.size();
                 processCoincidence(allSingles);
 
                 m_stats.totalSinglesProcessed += allSingles.size();
@@ -792,6 +793,7 @@ namespace openpni::distributed::streaming
         {
             std::cout << "[StreamingTimeAligner] Processing " << remaining.size()
                       << " remaining singles..." << std::endl;
+            m_stats.totalSinglesReceived += remaining.size();
             processCoincidence(remaining);
             m_stats.totalSinglesProcessed += remaining.size();
         }

@@ -596,7 +596,11 @@ namespace openpni::distributed::acquisition
                     break;
                 }
 
-                *task.add_channels() = effectiveTask.channels(static_cast<int>(cursor));
+                auto *channel = task.add_channels();
+                *channel = effectiveTask.channels(static_cast<int>(cursor));
+                // Runtime acquisition uses node-local channel indexing; normalize each node task
+                // to [0..assigned-1] while preserving global source/destination mapping.
+                channel->set_channel_index(static_cast<uint32_t>(j));
                 ++cursor;
             }
 

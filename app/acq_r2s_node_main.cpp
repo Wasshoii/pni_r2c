@@ -128,6 +128,9 @@ int main(int argc, char **argv)
     std::cout << "r2s.resultDir         : " << cfg.r2s.resultDir << std::endl;
     std::cout << "bridge.enabled        : " << (cfg.bridge.enabled ? "true" : "false") << std::endl;
     std::cout << "coinClient.enabled    : " << (cfg.coinClient.enabled ? "true" : "false") << std::endl;
+    std::cout << "coinClient.remapGlobal: " << (cfg.coinClient.remapLocalToGlobalChannels ? "true" : "false") << std::endl;
+    std::cout << "coinClient.globalOffset: " << cfg.coinClient.globalChannelOffset << std::endl;
+    std::cout << "coinClient.cpc        : " << cfg.coinClient.crystalsPerChannel << std::endl;
 
     if (dryRun)
     {
@@ -146,6 +149,9 @@ int main(int argc, char **argv)
     coinClientConfig.nodeAddress = cfg.coinClient.nodeAddress;
     coinClientConfig.channelCount = cfg.coinClient.channelCount;
     coinClientConfig.detectorType = cfg.coinClient.detectorType;
+    coinClientConfig.remapLocalToGlobalChannels = cfg.coinClient.remapLocalToGlobalChannels;
+    coinClientConfig.globalChannelOffset = cfg.coinClient.globalChannelOffset;
+    coinClientConfig.crystalsPerChannel = cfg.coinClient.crystalsPerChannel;
     coinClientConfig.maxPendingChunks = cfg.coinClient.maxPendingChunks;
     coinClientConfig.batchSize = cfg.coinClient.batchSize;
     coinClientConfig.heartbeatIntervalMs = cfg.coinClient.heartbeatIntervalMs;

@@ -11,7 +11,7 @@
   "r2s": {
     "calibrationDir": "Data/bdm2/calibration",
     "resultDir": "Data/result/Bdm2/split",
-    "channelIndices": [8, 9, 10, 11],
+    "channelIndices": [0, 1, 2, 3],
     "sortDataByTime": true,
     "saveData2SingleFile": false,
     "asyncFileWrite": false
@@ -32,6 +32,9 @@
     "nodeAddress": "127.0.0.1",
     "channelCount": 4,
     "detectorType": "BDM2",
+    "remapLocalToGlobalChannels": true,
+    "globalChannelOffset": 8,
+    "crystalsPerChannel": 676,
     "maxPendingChunks": 128,
     "batchSize": 2,
     "heartbeatIntervalMs": 2000,

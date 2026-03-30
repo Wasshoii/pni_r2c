@@ -30,3 +30,6 @@ protos/*.pb.h
 protos/*.grpc.pb.cc
 protos/*.grpc.pb.h
 
+# Experims log flies
+app/experiments/logs/
+

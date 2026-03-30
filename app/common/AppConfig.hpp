@@ -46,6 +46,9 @@ namespace openpni::distributed::app
         std::string nodeAddress = "127.0.0.1";
         uint32_t channelCount = 4;
         std::string detectorType = "BDM2";
+        bool remapLocalToGlobalChannels = false;
+        uint32_t globalChannelOffset = 0;
+        uint32_t crystalsPerChannel = 169 * 4;
         size_t maxPendingChunks = 128;
         size_t batchSize = 1;
         uint32_t heartbeatIntervalMs = 5000;

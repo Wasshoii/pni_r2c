@@ -27,6 +27,9 @@ namespace openpni::distributed::streaming
         std::string nodeAddress = "";
         uint32_t channelCount = 0;
         std::string detectorType = "Unknown";
+        bool remapLocalToGlobalChannels = false;
+        uint32_t globalChannelOffset = 0;
+        uint32_t crystalsPerChannel = 169 * 4;
 
         size_t maxPendingChunks = 100;
         size_t batchSize = 1000;
@@ -90,6 +93,7 @@ namespace openpni::distributed::streaming
 
         std::atomic<bool> m_running{false};
         std::atomic<bool> m_connected{false};
+        std::atomic<bool> m_remapSampleLogged{false};
         std::atomic<uint64_t> m_chunkIdCounter{0};
         std::atomic<uint64_t> m_totalSinglesSent{0};
     };

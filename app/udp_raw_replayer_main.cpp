@@ -24,6 +24,7 @@ namespace
         uint16_t sourcePortBase = 17100;
         uint16_t destinationPortBase = 18100;
         uint16_t channelCount = 4;
+        uint16_t channelOffset = 0;
         uint32_t maxSegments = 80;
         uint32_t interPacketUs = 2;
         uint32_t repeat = 1;
@@ -81,7 +82,14 @@ namespace
 
                     for (uint64_t i = 0; i < view.count; ++i)
                     {
-                        const uint16_t ch = view.channel[i];
+                        const uint16_t rawChannel = view.channel[i];
+                        if (rawChannel < m_opts.channelOffset)
+                        {
+                            result.skippedPackets += 1;
+                            continue;
+                        }
+
+                        const uint16_t ch = static_cast<uint16_t>(rawChannel - m_opts.channelOffset);
                         if (ch >= m_opts.channelCount)
                         {
                             result.skippedPackets += 1;
@@ -108,7 +116,10 @@ namespace
                         else
                         {
                             std::cerr << "[UdpReplayer] sendto failed at segment=" << seg
-                                      << " packet=" << i << " channel=" << ch << std::endl;
+                                      << " packet=" << i
+                                      << " raw_channel=" << rawChannel
+                                      << " local_channel=" << ch
+                                      << std::endl;
                             closeSockets(sockets);
                             return result;
                         }
@@ -203,6 +214,7 @@ namespace
                   << "  --source-port-base <port>     source base port (default: 17100)\n"
                   << "  --destination-port-base <port> destination base port (default: 18100)\n"
                   << "  --channel-count <n>           channel count (default: 4)\n"
+                  << "  --channel-offset <n>          raw channel offset mapped to local [0..channel-count-1] (default: 0)\n"
                   << "  --max-segments <n>            max segments replayed each run (default: 80)\n"
                   << "  --inter-packet-us <n>         delay between packets in us (default: 2)\n"
                   << "  --repeat <n>                  replay repeat times (default: 1)\n"
@@ -301,6 +313,16 @@ namespace
                 opts->maxSegments = static_cast<uint32_t>(std::stoul(v));
                 continue;
             }
+            if (arg == "--channel-offset")
+            {
+                const char *v = needValue(arg);
+                if (!v)
+                {
+                    return false;
+                }
+                opts->channelOffset = static_cast<uint16_t>(std::stoul(v));
+                continue;
+            }
             if (arg == "--inter-packet-us")
             {
                 const char *v = needValue(arg);
@@ -370,6 +392,7 @@ int main(int argc, char **argv)
     std::cout << "sourcePortBase      : " << opts.sourcePortBase << std::endl;
     std::cout << "destinationPortBase : " << opts.destinationPortBase << std::endl;
     std::cout << "channelCount        : " << opts.channelCount << std::endl;
+    std::cout << "channelOffset       : " << opts.channelOffset << std::endl;
     std::cout << "maxSegments         : " << opts.maxSegments << std::endl;
     std::cout << "interPacketUs       : " << opts.interPacketUs << std::endl;
     std::cout << "repeat              : " << opts.repeat << std::endl;

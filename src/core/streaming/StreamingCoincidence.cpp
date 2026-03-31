@@ -2,6 +2,7 @@
 
 #include <iterator>
 #include <utility>
+#include <glog/logging.h>
 
 namespace openpni::distributed::streaming
 {
@@ -50,8 +51,8 @@ namespace openpni::distributed::streaming
         std::lock_guard<std::mutex> lock(m_mutex);
         if (bytes > m_usedMemoryBytes)
         {
-            std::cerr << "[SharedMemoryPool] Warning: releasing more than allocated ("
-                      << bytes << " > " << m_usedMemoryBytes << ")" << std::endl;
+            LOG(WARNING) << "[SharedMemoryPool] releasing more than allocated ("
+                         << bytes << " > " << m_usedMemoryBytes << ")";
             m_usedMemoryBytes = 0;
         }
         else
@@ -109,12 +110,12 @@ namespace openpni::distributed::streaming
     void SharedMemoryPool::printStatus() const
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        std::cout << "[SharedMemoryPool] Status:\n"
+        LOG(INFO) << "[SharedMemoryPool] Status\n"
                   << "  Max memory:   " << (m_maxMemoryBytes / 1024.0 / 1024.0) << " MB\n"
                   << "  Used memory:  " << (m_usedMemoryBytes / 1024.0 / 1024.0) << " MB ("
                   << (100.0 * m_usedMemoryBytes / m_maxMemoryBytes) << "%)\n"
                   << "  Peak memory:  " << (m_peakMemoryBytes / 1024.0 / 1024.0) << " MB\n"
-                  << "  Allocations:  " << m_totalAllocations << "\n";
+                  << "  Allocations:  " << m_totalAllocations;
     }
 
     void TimestampedSingleChunk::updateTimeRange()
@@ -164,9 +165,9 @@ namespace openpni::distributed::streaming
         {
             if (!m_memoryPool->tryAllocate(chunkMemory, timeoutMs))
             {
-                std::cerr << "[NodeRingBuffer] Node " << m_nodeId
-                          << " failed to allocate memory for chunk "
-                          << chunk.chunkId << std::endl;
+                LOG(WARNING) << "[NodeRingBuffer] Node " << m_nodeId
+                             << " failed to allocate memory for chunk "
+                             << chunk.chunkId;
                 return false;
             }
         }
@@ -188,8 +189,8 @@ namespace openpni::distributed::streaming
                 {
                     m_memoryPool->release(chunkMemory);
                 }
-                std::cerr << "[NodeRingBuffer] Node " << m_nodeId
-                          << " push timeout for chunk " << chunk.chunkId << std::endl;
+                LOG(WARNING) << "[NodeRingBuffer] Node " << m_nodeId
+                             << " push timeout for chunk " << chunk.chunkId;
                 return false;
             }
         }
@@ -206,10 +207,10 @@ namespace openpni::distributed::streaming
         if (m_expectedChunkId > 0 && chunk.chunkId != m_expectedChunkId)
         {
             m_outOfOrderCount++;
-            std::cerr << "[NodeRingBuffer] Warning: Node " << m_nodeId
-                      << " received chunk " << chunk.chunkId
-                      << ", expected " << m_expectedChunkId
-                      << " (out of order or gap)" << std::endl;
+            LOG(WARNING) << "[NodeRingBuffer] Node " << m_nodeId
+                         << " received chunk " << chunk.chunkId
+                         << ", expected " << m_expectedChunkId
+                         << " (out of order or gap)";
         }
         m_expectedChunkId = chunk.chunkId + 1;
 
@@ -487,9 +488,8 @@ namespace openpni::distributed::streaming
         if (config.useMemoryPool)
         {
             m_memoryPool = std::make_unique<SharedMemoryPool>(config.maxTotalMemoryBytes);
-            std::cout << "[StreamingTimeAligner] Memory pool enabled: "
-                      << (config.maxTotalMemoryBytes / (1024 * 1024)) << " MB limit"
-                      << std::endl;
+            LOG(INFO) << "[StreamingTimeAligner] Memory pool enabled: "
+                      << (config.maxTotalMemoryBytes / (1024 * 1024)) << " MB limit";
         }
 
         SharedMemoryPool *poolPtr = m_memoryPool.get();
@@ -503,9 +503,8 @@ namespace openpni::distributed::streaming
             config.channelNum, config.crystalsPerChannel);
         m_coinNode.setTotalCrystalNumOfEachChannel(crystalNumOfEachChannel);
 
-        std::cout << "[StreamingTimeAligner] Initialized with " << nodeCount
-                  << " nodes, " << config.channelNum << " channels"
-                  << std::endl;
+        LOG(INFO) << "[StreamingTimeAligner] Initialized with " << nodeCount
+                  << " nodes, " << config.channelNum << " channels";
     }
 
     StreamingTimeAligner::~StreamingTimeAligner()
@@ -526,14 +525,14 @@ namespace openpni::distributed::streaming
     {
         if (m_running.exchange(true))
         {
-            std::cerr << "[StreamingTimeAligner] Already running" << std::endl;
+            LOG(WARNING) << "[StreamingTimeAligner] Already running";
             return;
         }
 
         initializeOutput();
         m_processorThread = std::thread([this]()
                                         { processingLoop(); });
-        std::cout << "[StreamingTimeAligner] Started" << std::endl;
+        LOG(INFO) << "[StreamingTimeAligner] Started";
     }
 
     void StreamingTimeAligner::stop(bool waitForCompletion)
@@ -561,7 +560,7 @@ namespace openpni::distributed::streaming
         }
 
         finalizeOutput();
-        std::cout << "[StreamingTimeAligner] Stopped" << std::endl;
+        LOG(INFO) << "[StreamingTimeAligner] Stopped";
     }
 
     SharedMemoryPool::MemoryStatus StreamingTimeAligner::getMemoryStatus() const
@@ -740,8 +739,7 @@ namespace openpni::distributed::streaming
         }
         catch (const std::exception &e)
         {
-            std::cerr << "[StreamingTimeAligner] Coincidence error: "
-                      << e.what() << std::endl;
+            LOG(ERROR) << "[StreamingTimeAligner] Coincidence error: " << e.what();
         }
     }
 
@@ -775,7 +773,7 @@ namespace openpni::distributed::streaming
 
     void StreamingTimeAligner::flushRemaining()
     {
-        std::cout << "[StreamingTimeAligner] Flushing remaining data..." << std::endl;
+        LOG(INFO) << "[StreamingTimeAligner] Flushing remaining data...";
 
         std::vector<GlobalSingle> remaining;
 
@@ -791,14 +789,14 @@ namespace openpni::distributed::streaming
 
         if (!remaining.empty())
         {
-            std::cout << "[StreamingTimeAligner] Processing " << remaining.size()
-                      << " remaining singles..." << std::endl;
+            LOG(INFO) << "[StreamingTimeAligner] Processing " << remaining.size()
+                      << " remaining singles...";
             m_stats.totalSinglesReceived += remaining.size();
             processCoincidence(remaining);
             m_stats.totalSinglesProcessed += remaining.size();
         }
 
-        std::cout << "[StreamingTimeAligner] Flush complete" << std::endl;
+        LOG(INFO) << "[StreamingTimeAligner] Flush complete";
     }
 
     TimeAlignerConfig createBDM2AlignerConfig(

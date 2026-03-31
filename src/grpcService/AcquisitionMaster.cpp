@@ -5,6 +5,7 @@
 #include <limits>
 #include <stdexcept>
 #include <utility>
+#include <glog/logging.h>
 
 namespace openpni::distributed::acquisition
 {
@@ -317,7 +318,7 @@ namespace openpni::distributed::acquisition
     {
         if (server_)
         {
-            std::cerr << "[AcquisitionMaster] Server already running" << std::endl;
+            LOG(WARNING) << "Server already running";
             return;
         }
 
@@ -334,7 +335,7 @@ namespace openpni::distributed::acquisition
             throw std::runtime_error("Failed to start AcquisitionMaster server at " + server_address);
         }
 
-        std::cout << "[AcquisitionMaster] Listening on " << server_address << std::endl;
+        LOG(INFO) << "Listening on " << server_address;
     }
 
     void AcquisitionMaster::Wait()
@@ -351,7 +352,7 @@ namespace openpni::distributed::acquisition
         {
             server_->Shutdown();
             server_.reset();
-            std::cout << "[AcquisitionMaster] Stopped" << std::endl;
+            LOG(INFO) << "Stopped";
         }
     }
 
@@ -374,7 +375,7 @@ namespace openpni::distributed::acquisition
         }
         catch (const std::exception &e)
         {
-            std::cerr << "[AcquisitionMaster] SendConfigureToNode failed: " << e.what() << std::endl;
+            LOG(ERROR) << "SendConfigureToNode failed: " << e.what();
             return false;
         }
     }
@@ -388,7 +389,7 @@ namespace openpni::distributed::acquisition
         }
         catch (const std::exception &e)
         {
-            std::cerr << "[AcquisitionMaster] BroadcastConfigure failed: " << e.what() << std::endl;
+            LOG(ERROR) << "BroadcastConfigure failed: " << e.what();
             return 0;
         }
     }
@@ -398,7 +399,7 @@ namespace openpni::distributed::acquisition
         const auto nodeIds = SortNodeIds(service_->ListConnectedNodeIds());
         if (nodeIds.empty())
         {
-            std::cerr << "[AcquisitionMaster] No connected nodes, skip task distribution" << std::endl;
+            LOG(WARNING) << "No connected nodes, skip task distribution";
             return;
         }
 
@@ -409,13 +410,13 @@ namespace openpni::distributed::acquisition
         }
         catch (const std::exception &e)
         {
-            std::cerr << "[AcquisitionMaster] Failed to build node tasks: " << e.what() << std::endl;
+            LOG(ERROR) << "Failed to build node tasks: " << e.what();
             return;
         }
 
         if (nodeTasks.empty())
         {
-            std::cerr << "[AcquisitionMaster] No task generated, skip CONFIGURE broadcast" << std::endl;
+            LOG(WARNING) << "No task generated, skip CONFIGURE broadcast";
             return;
         }
         size_t configured = 0;
@@ -429,8 +430,8 @@ namespace openpni::distributed::acquisition
             }
         }
 
-        std::cout << "[AcquisitionMaster] Sent CONFIGURE to " << configured
-                  << "/" << nodeIds.size() << " node(s)" << std::endl;
+        LOG(INFO) << "Sent CONFIGURE to " << configured
+                  << "/" << nodeIds.size() << " node(s)";
     }
 
     size_t AcquisitionMaster::SendStart(uint64_t plannedStartTimeMs, uint32_t durationMs)

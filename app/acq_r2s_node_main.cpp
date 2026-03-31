@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -10,6 +11,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <glog/logging.h>
 
 #include "app/common/AppConfig.hpp"
 #include "core/r2s/R2S.hpp"
@@ -101,6 +104,10 @@ namespace
 
 int main(int argc, char **argv)
 {
+    google::InitGoogleLogging(argv[0]);
+    std::atexit([]()
+                { google::ShutdownGoogleLogging(); });
+
     std::string configPath;
     bool dryRun = false;
     if (!parseArgs(argc, argv, &configPath, &dryRun))
@@ -230,8 +237,7 @@ int main(int argc, char **argv)
     std::thread nodeThread([&]()
                            {
                                nodeRunOk.store(node.run(), std::memory_order_relaxed);
-                               nodeDone.store(true, std::memory_order_relaxed);
-                           });
+                               nodeDone.store(true, std::memory_order_relaxed); });
 
     while (!g_stopRequested.load(std::memory_order_relaxed) && !nodeDone.load(std::memory_order_relaxed))
     {

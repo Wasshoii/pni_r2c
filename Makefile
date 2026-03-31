@@ -63,15 +63,20 @@ GRPC_LIBS = $(filter-out -pthread,$(GRPC_LIBS_RAW))
 SYSTEM_LIB_DIR ?= /usr/lib/x86_64-linux-gnu
 SYSTEM_LIB_HINT = -L$(SYSTEM_LIB_DIR)
 
+# ==================== glog 配置 ====================
+# Google logging library for structured logging with thread safety
+GLOG_CFLAGS = $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH_OVERRIDE) $(PKG_CONFIG) --cflags libglog gflags 2>/dev/null || echo "")
+GLOG_LIBS = $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH_OVERRIDE) $(PKG_CONFIG) --libs libglog gflags 2>/dev/null || echo "-lglog -lgflags")
+
 # ==================== 汇总编译选项 ====================
 # 基础编译选项（不含 PNI/CUDA）
-CXXFLAGS_BASE = $(CXXFLAGS) -I. -Iinclude_override $(GRPC_CFLAGS) -Iinclude -Iprotos -Isrc
+CXXFLAGS_BASE = $(CXXFLAGS) -I. -Iinclude_override $(GRPC_CFLAGS) $(GLOG_CFLAGS) -Iinclude -Iprotos -Isrc
 
 # 完整编译选项（含 PNI/CUDA）
 CXXFLAGS_FULL = $(CXXFLAGS_BASE) $(PNI_CFLAGS) $(PNI_EXTRA_CXXFLAGS)
 
 # 基础链接选项
-LDFLAGS_BASE = $(LDFLAGS) $(SYSTEM_LIB_HINT) $(GRPC_LIBS) -ldl
+LDFLAGS_BASE = $(LDFLAGS) $(SYSTEM_LIB_HINT) $(GRPC_LIBS) $(GLOG_LIBS) -ldl
 
 # 完整链接选项（含 PNI/CUDA）
 LDFLAGS_FULL = $(LDFLAGS_BASE) $(PNI_LIBS) $(PNI_EXTRA_LDFLAGS)
@@ -335,7 +340,29 @@ clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)
 	@echo "✓ Cleaned"
 
-# 清理 proto 生成的文件
+# ==================== glog 依赖检查 ====================
+# 检查 glog 和 gflags 是否正确安装
+check-glog-deps:
+	@echo "Checking glog/gflags dependencies..."
+	@if pkg-config --modversion libglog > /dev/null 2>&1; then \
+		echo "✓ libglog found: $$(pkg-config --modversion libglog)"; \
+	else \
+		echo "✗ libglog not found! Install with: sudo apt-get install libgoogle-glog-dev"; \
+		exit 1; \
+	fi
+	@if pkg-config --modversion gflags > /dev/null 2>&1; then \
+		echo "✓ gflags found: $$(pkg-config --modversion gflags)"; \
+	else \
+		echo "✗ gflags not found! Install with: sudo apt-get install libgflags-dev"; \
+		exit 1; \
+	fi
+	@echo "✓ All glog dependencies satisfied"
+
+# 验证编译（不含测试）
+verify-glog-compile: check-glog-deps $(TEST_TARGET) $(TEST_GRPC_TARGET)
+	@echo "✓ glog compilation verified successfully"
+
+# 清理
 clean-proto:
 	rm -f $(PROTO_DIR)/*.pb.cc $(PROTO_DIR)/*.pb.h $(PROTO_DIR)/*.grpc.pb.cc $(PROTO_DIR)/*.grpc.pb.h
 	@echo "✓ Proto files cleaned"
@@ -470,4 +497,4 @@ app-coin-master: $(APP_COIN_MASTER_TARGET)
 
 app-udp-replayer: $(APP_UDP_REPLAYER_TARGET)
 
-.PHONY: all all-full test test-grpc test-streaming test-pni-r2c test-pni-coin test-local-grpc-coin test-local-grpc-r2s test-acq-control-smoke test-acq-control-init test-acq-datapath-udp test-acq-r2s-pipeline app-acq-r2s-node app-coin-master app-udp-replayer clean clean-proto help directories
+.PHONY: all all-full test test-grpc test-streaming test-pni-r2c test-pni-coin test-local-grpc-coin test-local-grpc-r2s test-acq-control-smoke test-acq-control-init test-acq-datapath-udp test-acq-r2s-pipeline app-acq-r2s-node app-coin-master app-udp-replayer clean clean-proto help directories check-glog-deps verify-glog-compile

@@ -5,6 +5,7 @@
 #include <limits>
 #include <thread>
 #include <utility>
+#include <glog/logging.h>
 
 namespace openpni::distributed::streaming
 {
@@ -27,7 +28,7 @@ namespace openpni::distributed::streaming
     {
         if (m_running.exchange(true))
         {
-            std::cerr << "[CoincidenceClient] Already running" << std::endl;
+            LOG(WARNING) << "Already running";
             return false;
         }
 
@@ -52,7 +53,7 @@ namespace openpni::distributed::streaming
         m_heartbeatThread = std::thread([this]()
                                         { heartbeatLoop(); });
 
-        std::cout << "[CoincidenceClient] Started for node " << m_config.nodeId << std::endl;
+        LOG(INFO) << "Started for node " << m_config.nodeId;
         return true;
     }
 
@@ -74,7 +75,7 @@ namespace openpni::distributed::streaming
             m_heartbeatThread.join();
         }
 
-        std::cout << "[CoincidenceClient] Stopped" << std::endl;
+        LOG(INFO) << "Stopped";
     }
 
     bool CoincidenceClient::sendSingles(
@@ -102,21 +103,21 @@ namespace openpni::distributed::streaming
             {
                 if (m_config.crystalsPerChannel == 0)
                 {
-                    std::cerr << "[CoincidenceClient] invalid crystalsPerChannel=0" << std::endl;
+                    LOG(ERROR) << "invalid crystalsPerChannel=0";
                     return false;
                 }
 
                 const uint32_t localChannel = s.globalCrystalIndex / m_config.crystalsPerChannel;
                 const uint32_t crystalInChannel = s.globalCrystalIndex % m_config.crystalsPerChannel;
                 const uint64_t globalChannel = static_cast<uint64_t>(localChannel) +
-                                              static_cast<uint64_t>(m_config.globalChannelOffset);
+                                               static_cast<uint64_t>(m_config.globalChannelOffset);
                 const uint64_t remapped =
                     globalChannel * static_cast<uint64_t>(m_config.crystalsPerChannel) +
                     static_cast<uint64_t>(crystalInChannel);
 
                 if (remapped > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()))
                 {
-                    std::cerr << "[CoincidenceClient] remapped crystal index overflow: " << remapped << std::endl;
+                    LOG(ERROR) << "remapped crystal index overflow: " << remapped;
                     return false;
                 }
 
@@ -124,12 +125,11 @@ namespace openpni::distributed::streaming
 
                 if (!m_remapSampleLogged.exchange(true))
                 {
-                    std::cout << "[CoincidenceClient] remap sample node=" << m_config.nodeId
+                    LOG(INFO) << "remap sample node=" << m_config.nodeId
                               << " local_channel=" << localChannel
                               << " global_channel=" << globalChannel
                               << " local_index=" << s.globalCrystalIndex
-                              << " remapped_index=" << crystalIndexToSend
-                              << std::endl;
+                              << " remapped_index=" << crystalIndexToSend;
                 }
             }
 
@@ -210,20 +210,17 @@ namespace openpni::distributed::streaming
             {
                 const uint64_t plannedStartMs = response.start_time_ms();
                 waitUntil(plannedStartMs);
-                std::cout << "[CoincidenceClient] Start signal received, planned_start_ms="
-                          << plannedStartMs << std::endl;
+                LOG(INFO) << "Start signal received, planned_start_ms=" << plannedStartMs;
                 return true;
             }
 
             if (!status.ok())
             {
-                std::cerr << "[CoincidenceClient] WaitForStart RPC failed: "
-                          << status.error_message() << std::endl;
+                LOG(ERROR) << "WaitForStart RPC failed: " << status.error_message();
             }
             else
             {
-                std::cerr << "[CoincidenceClient] WaitForStart not ready: "
-                          << response.message() << std::endl;
+                LOG(WARNING) << "WaitForStart not ready: " << response.message();
             }
 
             if (timeoutMs > 0)
@@ -231,8 +228,7 @@ namespace openpni::distributed::streaming
                 const uint64_t elapsed = nowMs() - startTs;
                 if (elapsed >= timeoutMs)
                 {
-                    std::cerr << "[CoincidenceClient] WaitForStart timed out after "
-                              << elapsed << " ms" << std::endl;
+                    LOG(ERROR) << "WaitForStart timed out after " << elapsed << " ms";
                     return false;
                 }
             }
@@ -287,15 +283,13 @@ namespace openpni::distributed::streaming
 
         if (status.ok() && response.success())
         {
-            std::cout << "[CoincidenceClient] Node " << m_config.nodeId
-                      << " registered successfully" << std::endl;
+            LOG(INFO) << "Node " << m_config.nodeId << " registered successfully";
             m_connected = true;
             return true;
         }
 
-        std::cerr << "[CoincidenceClient] Failed to register node: "
-                  << (status.ok() ? response.message() : status.error_message())
-                  << std::endl;
+        LOG(ERROR) << "Failed to register node: "
+                   << (status.ok() ? response.message() : status.error_message());
         return false;
     }
 
@@ -354,8 +348,8 @@ namespace openpni::distributed::streaming
 
             m_connected = false;
             attempts++;
-            std::cerr << "[CoincidenceClient] Send failed, attempt "
-                      << attempts << "/" << m_config.maxReconnectAttempts << std::endl;
+            LOG(WARNING) << "Send failed, attempt "
+                         << attempts << "/" << m_config.maxReconnectAttempts;
 
             std::this_thread::sleep_for(
                 std::chrono::milliseconds(m_config.reconnectDelayMs));
@@ -403,8 +397,7 @@ namespace openpni::distributed::streaming
             if (!status.ok())
             {
                 m_connected = false;
-                std::cerr << "[CoincidenceClient] Heartbeat failed: "
-                          << status.error_message() << std::endl;
+                LOG(WARNING) << "Heartbeat failed: " << status.error_message();
             }
             else
             {

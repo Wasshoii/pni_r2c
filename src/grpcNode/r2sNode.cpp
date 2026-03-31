@@ -15,6 +15,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <glog/logging.h>
 
 #include "coincidence.grpc.pb.h"
 
@@ -110,7 +111,7 @@ namespace openpni::distributed::grpcnode
             {
                 if (m_started.exchange(true))
                 {
-                    std::cerr << "[Node " << m_cfg.nodeId << "] sender already started" << std::endl;
+                    LOG(WARNING) << "[Node " << m_cfg.nodeId << "] sender already started";
                     return false;
                 }
 
@@ -130,7 +131,7 @@ namespace openpni::distributed::grpcnode
                 m_stub = coincidence::CoincidenceService::NewStub(m_channel);
                 if (!m_stub)
                 {
-                    std::cerr << "[Node " << m_cfg.nodeId << "] failed to create coincidence stub" << std::endl;
+                    LOG(ERROR) << "[Node " << m_cfg.nodeId << "] failed to create coincidence stub";
                     m_started = false;
                     return false;
                 }
@@ -146,7 +147,7 @@ namespace openpni::distributed::grpcnode
                     uint64_t plannedStartMs = 0;
                     if (!waitForStartSignal(&plannedStartMs))
                     {
-                        std::cerr << "[Node " << m_cfg.nodeId << "] wait-for-start failed" << std::endl;
+                        LOG(ERROR) << "[Node " << m_cfg.nodeId << "] wait-for-start failed";
                         m_started = false;
                         return false;
                     }
@@ -157,7 +158,7 @@ namespace openpni::distributed::grpcnode
                 m_writer = m_stub->StreamSingles(m_streamContext.get(), &m_streamResponse);
                 if (!m_writer)
                 {
-                    std::cerr << "[Node " << m_cfg.nodeId << "] failed to open StreamSingles writer" << std::endl;
+                    LOG(ERROR) << "[Node " << m_cfg.nodeId << "] failed to open StreamSingles writer";
                     m_started = false;
                     return false;
                 }
@@ -253,9 +254,8 @@ namespace openpni::distributed::grpcnode
                     if (!writesDone || !status.ok() || !m_streamResponse.success())
                     {
                         ok = false;
-                        std::cerr << "[Node " << m_cfg.nodeId << "] stream finish failed: "
-                                  << (status.ok() ? m_streamResponse.message() : status.error_message())
-                                  << std::endl;
+                        LOG(ERROR) << "[Node " << m_cfg.nodeId << "] stream finish failed: "
+                                   << (status.ok() ? m_streamResponse.message() : status.error_message());
                     }
                 }
 
@@ -300,9 +300,8 @@ namespace openpni::distributed::grpcnode
                 grpc::Status status = m_stub->RegisterNode(&context, request, &response);
                 if (!status.ok() || !response.success())
                 {
-                    std::cerr << "[Node " << m_cfg.nodeId << "] register failed: "
-                              << (status.ok() ? response.message() : status.error_message())
-                              << std::endl;
+                    LOG(ERROR) << "[Node " << m_cfg.nodeId << "] register failed: "
+                               << (status.ok() ? response.message() : status.error_message());
                     return false;
                 }
                 return true;
@@ -356,21 +355,21 @@ namespace openpni::distributed::grpcnode
                         {
                             *plannedStartMs = response.start_time_ms();
                         }
-                        std::cout << "[Node " << m_cfg.nodeId
+                        LOG(INFO) << "[Node " << m_cfg.nodeId
                                   << "] start signal received, planned_start_ms="
-                                  << response.start_time_ms() << std::endl;
+                                  << response.start_time_ms();
                         return true;
                     }
 
                     if (!status.ok())
                     {
-                        std::cerr << "[Node " << m_cfg.nodeId << "] WaitForStart RPC failed: "
-                                  << status.error_message() << std::endl;
+                        LOG(WARNING) << "[Node " << m_cfg.nodeId << "] WaitForStart RPC failed: "
+                                     << status.error_message();
                     }
                     else
                     {
-                        std::cerr << "[Node " << m_cfg.nodeId << "] WaitForStart not ready: "
-                                  << response.message() << std::endl;
+                        VLOG(1) << "[Node " << m_cfg.nodeId << "] WaitForStart not ready: "
+                                << response.message();
                     }
 
                     if (m_cfg.waitForStartTimeoutMs > 0)
@@ -378,9 +377,9 @@ namespace openpni::distributed::grpcnode
                         const uint64_t elapsed = nowMs() - beginMs;
                         if (elapsed >= m_cfg.waitForStartTimeoutMs)
                         {
-                            std::cerr << "[Node " << m_cfg.nodeId
-                                      << "] wait-for-start timeout after "
-                                      << elapsed << " ms" << std::endl;
+                            LOG(ERROR) << "[Node " << m_cfg.nodeId
+                                       << "] wait-for-start timeout after "
+                                       << elapsed << " ms";
                             return false;
                         }
                     }
@@ -475,14 +474,14 @@ namespace openpni::distributed::grpcnode
                     const size_t segmentSingles = payload.singles.size();
                     if (segmentSingles > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
                     {
-                        std::cerr << "[Node " << m_cfg.nodeId << "] segment singles exceed uint32 range" << std::endl;
+                        LOG(ERROR) << "[Node " << m_cfg.nodeId << "] segment singles exceed uint32 range";
                         return false;
                     }
 
                     const uint32_t segmentSinglesU32 = static_cast<uint32_t>(segmentSingles);
                     if (singlesOffset > std::numeric_limits<uint32_t>::max() - segmentSinglesU32)
                     {
-                        std::cerr << "[Node " << m_cfg.nodeId << "] batched singles offset overflow" << std::endl;
+                        LOG(ERROR) << "[Node " << m_cfg.nodeId << "] batched singles offset overflow";
                         return false;
                     }
 
@@ -509,8 +508,8 @@ namespace openpni::distributed::grpcnode
                             static_cast<uint64_t>(s.crystalIndex);
                         if (globalCrystalIndex64 > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()))
                         {
-                            std::cerr << "[Node " << m_cfg.nodeId
-                                      << "] global crystal index overflow: " << globalCrystalIndex64 << std::endl;
+                            LOG(ERROR) << "[Node " << m_cfg.nodeId
+                                       << "] global crystal index overflow: " << globalCrystalIndex64;
                             return false;
                         }
 
@@ -536,8 +535,8 @@ namespace openpni::distributed::grpcnode
                 writeOptions.set_buffer_hint();
                 if (!m_writer->Write(msg, writeOptions))
                 {
-                    std::cerr << "[Node " << m_cfg.nodeId << "] stream write failed at chunk "
-                              << msg.chunk_id() << std::endl;
+                    LOG(ERROR) << "[Node " << m_cfg.nodeId << "] stream write failed at chunk "
+                               << msg.chunk_id();
                     return false;
                 }
 
@@ -638,8 +637,8 @@ namespace openpni::distributed::grpcnode
 
         if (m_init.r2sConfig.crystalsPerChannel == 0)
         {
-            std::cerr << "[Node " << m_init.nodeId
-                      << "] invalid crystalsPerChannel=0 in R2S config" << std::endl;
+            LOG(ERROR) << "[Node " << m_init.nodeId
+                       << "] invalid crystalsPerChannel=0 in R2S config";
             return false;
         }
 
@@ -660,7 +659,7 @@ namespace openpni::distributed::grpcnode
         PersistentNodeStreamSender sender(std::move(senderConfig));
         if (!sender.start())
         {
-            std::cerr << "[Node " << m_init.nodeId << "] failed to start persistent sender" << std::endl;
+            LOG(ERROR) << "[Node " << m_init.nodeId << "] failed to start persistent sender";
             return false;
         }
 
@@ -680,25 +679,25 @@ namespace openpni::distributed::grpcnode
             }
             catch (const std::exception &e)
             {
-                std::cerr << "[Node " << m_init.nodeId
-                          << "] failed to materialize singles on host: "
-                          << e.what() << std::endl;
+                LOG(ERROR) << "[Node " << m_init.nodeId
+                           << "] failed to materialize singles on host: "
+                           << e.what();
                 return false;
             }
 
             const bool sent = sender.enqueue(std::move(hostSingles), clock_ms, duration_ms);
             if (!sent)
             {
-                std::cerr << "[Node " << m_init.nodeId << "] enqueue failed at callback "
-                          << m_stats.callbackCount << std::endl;
+                LOG(ERROR) << "[Node " << m_init.nodeId << "] enqueue failed at callback "
+                           << m_stats.callbackCount;
                 return false;
             }
 
-            if (m_init.progressLogInterval > 0 &&
-                (m_stats.callbackCount == 1 || m_stats.callbackCount % m_init.progressLogInterval == 0))
+            if (m_init.progressLogInterval > 0)
             {
-                std::cout << "[Node " << m_init.nodeId << "] callbacks=" << m_stats.callbackCount
-                          << " (streaming queue active)" << std::endl;
+                LOG_EVERY_N(INFO, static_cast<int>(m_init.progressLogInterval))
+                    << "[Node " << m_init.nodeId << "] callbacks=" << m_stats.callbackCount
+                    << " (streaming queue active)";
             }
 
             return true;

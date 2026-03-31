@@ -23,6 +23,10 @@ sudo apt install -y \
 	libgrpc-dev \
 	libgrpc++-dev
 ```
+**glog 日志库（0.4.0+）：**
+```bash
+sudo apt-get install libgoogle-glog-dev libgflags-dev
+```
 
 安装后建议执行以下检查：
 
@@ -32,6 +36,7 @@ which grpc_cpp_plugin
 pkg-config --modversion protobuf
 pkg-config --modversion grpc++
 pkg-config --cflags --libs grpc++ protobuf
+pkg-config --modversion libglog
 ```
 
 说明：

@@ -5,10 +5,13 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <cstdint>
 #include <iostream>
 #include <string>
 #include <thread>
+
+#include <glog/logging.h>
 
 #include "app/common/AppConfig.hpp"
 #include "grpcNode/coinNode.hpp"
@@ -139,6 +142,10 @@ namespace
 
 int main(int argc, char **argv)
 {
+    google::InitGoogleLogging(argv[0]);
+    std::atexit([]()
+                { google::ShutdownGoogleLogging(); });
+
     std::string configPath;
     bool dryRun = false;
     if (!parseArgs(argc, argv, &configPath, &dryRun))

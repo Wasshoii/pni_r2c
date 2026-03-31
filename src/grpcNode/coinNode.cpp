@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <utility>
+#include <glog/logging.h>
 
 #include "grpcService/CoincidenceServiceImpl.hpp"
 
@@ -13,7 +14,7 @@ namespace openpni::distributed::grpcnode
         {
             if (init.expectedNodeCount == 0)
             {
-                std::cerr << "[CoinGrpcNode] expectedNodeCount is 0, force set to 1" << std::endl;
+                LOG(WARNING) << "[CoinGrpcNode] expectedNodeCount is 0, force set to 1";
                 init.expectedNodeCount = 1;
             }
             return init;

@@ -13,6 +13,7 @@
 #include <thread>
 #include <unordered_map>
 #include <utility>
+#include <glog/logging.h>
 
 #include <sys/sysinfo.h>
 #include <unistd.h>
@@ -113,7 +114,7 @@ namespace openpni::distributed::grpcnode
         {
             if (running_.exchange(true))
             {
-                std::cerr << "[AcquisitionNode] already running" << std::endl;
+                LOG(WARNING) << "[AcquisitionNode] already running";
                 return false;
             }
 
@@ -155,8 +156,8 @@ namespace openpni::distributed::grpcnode
                 const grpc::Status status = stream_->Finish();
                 if (!status.ok())
                 {
-                    std::cerr << "[AcquisitionNode] Connect stream finished with error: "
-                              << status.error_message() << std::endl;
+                    LOG(ERROR) << "[AcquisitionNode] Connect stream finished with error: "
+                               << status.error_message();
                 }
             }
 
@@ -258,7 +259,6 @@ namespace openpni::distributed::grpcnode
 
         void logConfigureDetails(const acqproto::AcquisitionTask &task, const acqproto::StorageConfig &storageConfig)
         {
-            static std::mutex s_logMutex;
             std::ostringstream oss;
 
             const std::string algo = (task.algorithm_type() == acqproto::ALGORITHM_TYPE_DPDK) ? "DPDK" : "SOCKET";
@@ -298,8 +298,7 @@ namespace openpni::distributed::grpcnode
                     << "\n";
             }
 
-            std::lock_guard<std::mutex> lock(s_logMutex);
-            std::cout << oss.str();
+            LOG(INFO) << oss.str();
         }
 
         bool openStream()
@@ -337,7 +336,7 @@ namespace openpni::distributed::grpcnode
             case acqproto::CMD_SHUTDOWN:
                 if (command.has_shutdown_control() && !command.shutdown_control().reason().empty())
                 {
-                    std::cout << "[AcquisitionNode] shutdown reason: " << command.shutdown_control().reason() << std::endl;
+                    LOG(INFO) << "[AcquisitionNode] shutdown reason: " << command.shutdown_control().reason();
                 }
                 running_.store(false, std::memory_order_release);
                 stopAcquisition(true);
@@ -498,7 +497,7 @@ namespace openpni::distributed::grpcnode
         {
             if (command.has_stop_control() && !command.stop_control().reason().empty())
             {
-                std::cout << "[AcquisitionNode] stop reason: " << command.stop_control().reason() << std::endl;
+                LOG(INFO) << "[AcquisitionNode] stop reason: " << command.stop_control().reason();
             }
             stopAcquisition(true);
             cleanupDurationThread();
@@ -555,7 +554,7 @@ namespace openpni::distributed::grpcnode
                     dpdkInfo,
                     [](const std::string &message)
                     {
-                        std::cout << "[AcquisitionNode/DPDK] " << message << std::endl;
+                        LOG(INFO) << "[AcquisitionNode/DPDK] " << message;
                     });
                 dpdkInitialized_ = true;
                 return true;
@@ -770,7 +769,7 @@ namespace openpni::distributed::grpcnode
                 errorMessage_ = message;
             }
             state_.store(acqproto::STATE_ERROR, std::memory_order_release);
-            std::cerr << "[AcquisitionNode] " << message << std::endl;
+            LOG(ERROR) << "[AcquisitionNode] " << message;
         }
 
         InitOptions init_;

@@ -1,5 +1,7 @@
 #include "core/acquisition/AcquisitionServer.hpp"
 
+#include <glog/logging.h>
+
 namespace openpni::distributed::acquisition
 {
 
@@ -113,7 +115,7 @@ namespace openpni::distributed::acquisition
             }
             catch (const std::exception &e)
             {
-                std::cerr << "Failed to create directory: " << e.what() << std::endl;
+                LOG(ERROR) << "Failed to create directory: " << e.what();
             }
         }
     }
@@ -170,7 +172,7 @@ namespace openpni::distributed::acquisition
                 return true;
             }
 
-            std::cerr << "RawFileOutput::appendSegment failed. Disk full?" << std::endl;
+            LOG(ERROR) << "RawFileOutput::appendSegment failed. Disk full?";
         }
         return false;
     }
@@ -208,7 +210,7 @@ namespace openpni::distributed::acquisition
         }
         catch (const std::exception &e)
         {
-            std::cerr << "Failed to open raw file " << current_path_ << ": " << e.what() << std::endl;
+            LOG(ERROR) << "Failed to open raw file " << current_path_ << ": " << e.what();
             writer_.reset();
         }
     }

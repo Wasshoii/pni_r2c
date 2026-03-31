@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <utility>
+#include <glog/logging.h>
 
 namespace openpni::distributed::streaming
 {
@@ -406,9 +407,9 @@ namespace openpni::distributed::streaming
         response->set_assigned_node_id(nodeId);
         response->set_message("Node " + std::to_string(nodeId) + " registered successfully");
 
-        std::cout << "[CoincidenceService] Node " << nodeId
+        LOG(INFO) << "Node " << nodeId
                   << " registered from " << request->node_address()
-                  << " (detector: " << request->detector_type() << ")" << std::endl;
+                  << " (detector: " << request->detector_type() << ")";
 
         return grpc::Status::OK;
     }
@@ -565,10 +566,10 @@ namespace openpni::distributed::streaming
         m_startSignalIssued.store(true, std::memory_order_release);
         m_plannedStartTimeMs.store(startTimeMs, std::memory_order_release);
 
-        std::cout << "[CoincidenceService] Start signal issued (reason=" << reason
+        LOG(INFO) << "Start signal issued (reason=" << reason
                   << ", start_time_ms=" << startTimeMs
                   << ", connected=" << m_registeredNodes.size()
-                  << "/" << m_orchestration.expectedNodeCount << ")" << std::endl;
+                  << "/" << m_orchestration.expectedNodeCount << ")";
         return true;
     }
 
@@ -622,7 +623,7 @@ namespace openpni::distributed::streaming
         builder.SetMaxReceiveMessageSize(100 * 1024 * 1024);
         builder.SetMaxSendMessageSize(10 * 1024 * 1024);
 
-        std::cout << "[CoincidenceServer] Starting on " << address << std::endl;
+        LOG(INFO) << "Starting on " << address;
         return builder.BuildAndStart();
     }
 
@@ -653,7 +654,7 @@ namespace openpni::distributed::streaming
     {
         if (m_running.exchange(true))
         {
-            std::cerr << "[CoincidenceServer] Already running" << std::endl;
+            LOG(WARNING) << "Already running";
             return;
         }
 
@@ -670,13 +671,13 @@ namespace openpni::distributed::streaming
         if (!m_server)
         {
             m_running.store(false);
-            std::cerr << "[CoincidenceServer] Failed to start on " << m_address << std::endl;
+            LOG(ERROR) << "Failed to start on " << m_address;
             return;
         }
 
-        std::cout << "[CoincidenceServer] Started on " << m_address
+        LOG(INFO) << "Started on " << m_address
                   << ", waiting for " << m_service.expectedNodeCount()
-                  << " node(s)" << std::endl;
+                  << " node(s)";
     }
 
     void CoincidenceServer::stop()
@@ -699,7 +700,7 @@ namespace openpni::distributed::streaming
             m_aligner.stop(true);
         }
 
-        std::cout << "[CoincidenceServer] Stopped" << std::endl;
+        LOG(INFO) << "Stopped";
     }
 
     void CoincidenceServer::wait()

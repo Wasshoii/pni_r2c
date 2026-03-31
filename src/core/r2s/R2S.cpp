@@ -1,5 +1,7 @@
 #include "core/r2s/R2S.hpp"
 
+#include <glog/logging.h>
+
 namespace openpni::distributed::r2s
 {
     bool isDevicePointer(const void *ptr)
@@ -99,7 +101,7 @@ namespace openpni::distributed::r2s
         }
         catch (const std::exception &e)
         {
-            std::cerr << "Error appending singles to file: " << e.what() << std::endl;
+            LOG(ERROR) << "Error appending singles to file: " << e.what();
             return false;
         }
     }
@@ -149,7 +151,7 @@ namespace openpni::distributed::r2s
         m_writerThread = std::thread([this]
                                      { writerLoop(); });
 
-        std::cout << "[AsyncWriter] Started, queue size: " << m_maxQueueSize << std::endl;
+        LOG(INFO) << "[AsyncWriter] Started, queue size: " << m_maxQueueSize;
         return true;
     }
 
@@ -192,8 +194,8 @@ namespace openpni::distributed::r2s
             m_writerThread.join();
         }
 
-        std::cout << "[AsyncWriter] Stopped, total written: " << m_totalWritten.load()
-                  << " singles" << std::endl;
+        LOG(INFO) << "[AsyncWriter] Stopped, total written: " << m_totalWritten.load()
+                  << " singles";
     }
 
     void AsyncSingleFileWriter::flush()
@@ -239,7 +241,7 @@ namespace openpni::distributed::r2s
                 }
                 else
                 {
-                    std::cerr << "[AsyncWriter] Failed to write segment" << std::endl;
+                    LOG(ERROR) << "[AsyncWriter] Failed to write segment";
                 }
             }
 
@@ -271,11 +273,11 @@ namespace openpni::distributed::r2s
 
         try
         {
-            std::cout << "Starting R2S processing..." << std::endl;
-            std::cout << "Detector: " << (m_config.detectorType == DetectorType::BDM2 ? "BDM2" : "BDMBiD") << std::endl;
+            LOG(INFO) << "Starting R2S processing...";
+            LOG(INFO) << "Detector: " << (m_config.detectorType == DetectorType::BDM2 ? "BDM2" : "BDMBiD");
             if (m_inputChannelNum > 0)
             {
-                std::cout << "Input channels: " << m_inputChannelNum << std::endl;
+                LOG(INFO) << "Input channels: " << m_inputChannelNum;
             }
 
             if (!prepareChannelsToProcess())
@@ -290,9 +292,9 @@ namespace openpni::distributed::r2s
                 return false;
             }
 
-            std::cout << "Setting up ConvergedR2S with generators..." << std::endl;
+            LOG(INFO) << "Setting up ConvergedR2S with generators...";
             m_r2s.SetChannels(m_generatorsVector);
-            std::cout << "Setup complete." << std::endl;
+            LOG(INFO) << "Setup complete.";
 
             if (!prepareOutput())
             {
@@ -306,7 +308,7 @@ namespace openpni::distributed::r2s
         }
         catch (const std::exception &e)
         {
-            std::cerr << "Error initializing R2S stream processor: " << e.what() << std::endl;
+            LOG(ERROR) << "Error initializing R2S stream processor: " << e.what();
             m_hadError = true;
             cleanupGenerators();
             return false;
@@ -317,7 +319,7 @@ namespace openpni::distributed::r2s
     {
         if (!m_initialized)
         {
-            std::cerr << "R2S stream processor is not initialized" << std::endl;
+            LOG(ERROR) << "R2S stream processor is not initialized";
             m_hadError = true;
             return false;
         }
@@ -332,7 +334,7 @@ namespace openpni::distributed::r2s
         {
             if (needPerfLog)
             {
-                std::cout << "Segment " << segmentId << ": No data, skipping" << std::endl;
+                LOG(INFO) << "Segment " << segmentId << ": No data, skipping";
             }
             return true;
         }
@@ -365,8 +367,8 @@ namespace openpni::distributed::r2s
 
             if (m_config.r2sResultIndex >= r2sResults.size())
             {
-                std::cerr << "Error: r2sResultIndex " << m_config.r2sResultIndex
-                          << " is out of range, result size=" << r2sResults.size() << std::endl;
+                LOG(ERROR) << "Error: r2sResultIndex " << m_config.r2sResultIndex
+                           << " is out of range, result size=" << r2sResults.size();
                 m_hadError = true;
                 return false;
             }
@@ -393,7 +395,7 @@ namespace openpni::distributed::r2s
                 const auto perfEnd = std::chrono::steady_clock::now();
                 const auto timeMs = std::chrono::duration_cast<std::chrono::milliseconds>(perfEnd - perfStart).count();
 
-                std::cout << "Segment " << segmentId
+                LOG(INFO) << "Segment " << segmentId
                           << ": Processed " << view.count << " packets, generated "
                           << singlesSpan.size() << " singles";
 
@@ -402,10 +404,10 @@ namespace openpni::distributed::r2s
                     const double speedMbPerSec =
                         static_cast<double>(view.count * 1024ULL) / 1024.0 / 1024.0 /
                         (static_cast<double>(timeMs) / 1000.0);
-                    std::cout << ", speed=" << speedMbPerSec << " MB/s";
+                    LOG(INFO) << ", speed=" << speedMbPerSec << " MB/s";
                 }
 
-                std::cout << std::endl;
+                LOG(INFO) << "";
             }
 
             if (!callbackSuccess || !fileSuccess)
@@ -417,7 +419,7 @@ namespace openpni::distributed::r2s
         }
         catch (const std::exception &e)
         {
-            std::cerr << "Exception at segment " << segmentId << ": " << e.what() << std::endl;
+            LOG(ERROR) << "Exception at segment " << segmentId << ": " << e.what();
             m_hadError = true;
             return false;
         }
@@ -434,38 +436,36 @@ namespace openpni::distributed::r2s
 
         if (m_asyncWriter)
         {
-            std::cout << "Waiting for async writer to complete..." << std::endl;
+            LOG(INFO) << "Waiting for async writer to complete...";
             m_asyncWriter->flush();
             m_asyncWriter->stop();
-            std::cout << "Async writer completed, written: " << m_asyncWriter->getTotalWritten()
-                      << " singles" << std::endl;
+            LOG(INFO) << "Async writer completed, written: " << m_asyncWriter->getTotalWritten()
+                      << " singles";
         }
 
-        std::cout << "\n=== Processing Complete ===" << std::endl;
-        std::cout << "Total raw packets: " << m_totalRawPackets << std::endl;
-        std::cout << "Total singles: " << m_totalSingles << std::endl;
-        std::cout << "Singles/Packet ratio: "
-                  << (m_totalRawPackets > 0 ? static_cast<double>(m_totalSingles) / m_totalRawPackets : 0.0)
-                  << std::endl;
+        LOG(INFO) << "\n=== Processing Complete ===";
+        LOG(INFO) << "Total raw packets: " << m_totalRawPackets;
+        LOG(INFO) << "Total singles: " << m_totalSingles;
+        LOG(INFO) << "Singles/Packet ratio: "
+                  << (m_totalRawPackets > 0 ? static_cast<double>(m_totalSingles) / m_totalRawPackets : 0.0);
 
         if (m_config.saveData2SingleFile && m_hasStreamingCallback)
         {
-            std::cout << "Output file: " << m_outputFilePath
-                      << (m_config.asyncFileWrite ? " (async)" : " (sync)") << std::endl;
-            std::cout << "Data also streamed via callback" << std::endl;
+            LOG(INFO) << "Output file: " << m_outputFilePath
+                      << (m_config.asyncFileWrite ? " (async)" : " (sync)");
+            LOG(INFO) << "Data also streamed via callback";
         }
         else if (m_config.saveData2SingleFile)
         {
-            std::cout << "Output file: " << m_outputFilePath
-                      << (m_config.asyncFileWrite ? " (async)" : " (sync)") << std::endl;
+            LOG(INFO) << "Output file: " << m_outputFilePath
+                      << (m_config.asyncFileWrite ? " (async)" : " (sync)");
         }
         else
         {
-            std::cout << "Data streamed via callback" << std::endl;
+            LOG(INFO) << "Data streamed via callback";
         }
 
-        std::cout << "===========================\n"
-                  << std::endl;
+        LOG(INFO) << "===========================\n";
 
         cleanupGenerators();
         m_initialized = false;
@@ -482,25 +482,25 @@ namespace openpni::distributed::r2s
             {
                 m_channelsToProcess.push_back(i);
             }
-            std::cout << "Processing all channels" << std::endl;
+            LOG(INFO) << "Processing all channels";
         }
         else
         {
             m_channelsToProcess = m_config.channelIndices;
-            std::cout << "Processing selected channels: ";
+            LOG(INFO) << "Processing selected channels: ";
             for (auto ch : m_channelsToProcess)
             {
-                std::cout << ch << " ";
+                LOG(INFO) << ch << " ";
             }
-            std::cout << std::endl;
+            LOG(INFO) << "";
 
             const uint16_t validateRange = std::max<uint16_t>(m_config.channelNums, m_inputChannelNum);
             for (auto ch : m_channelsToProcess)
             {
                 if (ch >= validateRange)
                 {
-                    std::cerr << "Error: Channel index " << ch
-                              << " is out of range (0-" << (validateRange - 1) << ")" << std::endl;
+                    LOG(ERROR) << "Error: Channel index " << ch
+                               << " is out of range (0-" << (validateRange - 1) << ")";
                     return false;
                 }
             }
@@ -528,12 +528,12 @@ namespace openpni::distributed::r2s
 
         if (m_config.calibrationFiles.size() < requiredCalibrationCount)
         {
-            std::cerr << "Error: Not enough calibration files. Need at least " << requiredCalibrationCount
-                      << ", got " << m_config.calibrationFiles.size() << std::endl;
+            LOG(ERROR) << "Error: Not enough calibration files. Need at least " << requiredCalibrationCount
+                       << ", got " << m_config.calibrationFiles.size();
             return false;
         }
 
-        std::cout << "Loading " << m_channelsToProcess.size() << " channels' calibration data..." << std::endl;
+        LOG(INFO) << "Loading " << m_channelsToProcess.size() << " channels' calibration data...";
 
         if (m_config.channelIndices.empty())
         {
@@ -549,7 +549,7 @@ namespace openpni::distributed::r2s
                 }
                 catch (const std::exception &e)
                 {
-                    std::cerr << "Error creating generator for channel " << i << ": " << e.what() << std::endl;
+                    LOG(ERROR) << "Error creating generator for channel " << i << ": " << e.what();
                     cleanupGenerators();
                     return false;
                 }
@@ -570,8 +570,8 @@ namespace openpni::distributed::r2s
                 }
                 catch (const std::exception &e)
                 {
-                    std::cerr << "Error creating generator for channel " << m_config.channelIndices[i]
-                              << ": " << e.what() << std::endl;
+                    LOG(ERROR) << "Error creating generator for channel " << m_config.channelIndices[i]
+                               << ": " << e.what();
                     cleanupGenerators();
                     return false;
                 }
@@ -589,7 +589,7 @@ namespace openpni::distributed::r2s
 
         if (!m_config.saveData2SingleFile && !m_hasStreamingCallback)
         {
-            std::cerr << "Error: saveData2SingleFile is false and no callback is set" << std::endl;
+            LOG(ERROR) << "Error: saveData2SingleFile is false and no callback is set";
             return false;
         }
 
@@ -602,7 +602,7 @@ namespace openpni::distributed::r2s
             {
                 m_asyncWriter = std::make_unique<AsyncSingleFileWriter>(m_config.asyncWriteQueueSize);
                 m_asyncWriter->open(m_outputFilePath, totalCrystals);
-                std::cout << "Output file (async): " << m_outputFilePath << std::endl;
+                LOG(INFO) << "Output file (async): " << m_outputFilePath;
             }
             else
             {
@@ -612,19 +612,19 @@ namespace openpni::distributed::r2s
                 m_singleOutput->setBytes4Energy(openpni::io::v1::single::EnergyType::FLT32);
                 m_singleOutput->setTotalCrystalNum(totalCrystals);
                 m_singleOutput->open(m_outputFilePath);
-                std::cout << "Output file (sync): " << m_outputFilePath << std::endl;
+                LOG(INFO) << "Output file (sync): " << m_outputFilePath;
             }
 
-            std::cout << "Total crystals: " << totalCrystals << std::endl;
+            LOG(INFO) << "Total crystals: " << totalCrystals;
         }
 
         if (m_config.saveData2SingleFile && m_hasStreamingCallback)
         {
-            std::cout << "Dual mode: data will be saved to file AND sent via callback" << std::endl;
+            LOG(INFO) << "Dual mode: data will be saved to file AND sent via callback";
         }
         else if (m_hasStreamingCallback)
         {
-            std::cout << "Streaming mode: data will be sent via callback only" << std::endl;
+            LOG(INFO) << "Streaming mode: data will be sent via callback only";
         }
 
         return true;
@@ -637,7 +637,7 @@ namespace openpni::distributed::r2s
             const bool callbackSuccess = m_config.onSinglesSpanReady(singles, clockMs, durationMs);
             if (!callbackSuccess)
             {
-                std::cerr << "Callback onSinglesSpanReady returned false, stopping" << std::endl;
+                LOG(ERROR) << "Callback onSinglesSpanReady returned false, stopping";
             }
             return callbackSuccess;
         }
@@ -648,7 +648,7 @@ namespace openpni::distributed::r2s
             const bool callbackSuccess = m_config.onSinglesReady(std::move(globalSingles), clockMs, durationMs);
             if (!callbackSuccess)
             {
-                std::cerr << "Callback onSinglesReady returned false, stopping" << std::endl;
+                LOG(ERROR) << "Callback onSinglesReady returned false, stopping";
             }
             return callbackSuccess;
         }
@@ -672,7 +672,7 @@ namespace openpni::distributed::r2s
                 durationMs);
             if (!fileSuccess)
             {
-                std::cerr << "Failed to submit segment to async writer" << std::endl;
+                LOG(ERROR) << "Failed to submit segment to async writer";
             }
             return fileSuccess;
         }
@@ -685,7 +685,7 @@ namespace openpni::distributed::r2s
             durationMs);
         if (!fileSuccess)
         {
-            std::cerr << "Failed to append segment to single file" << std::endl;
+            LOG(ERROR) << "Failed to append segment to single file";
         }
         return fileSuccess;
     }
@@ -722,7 +722,7 @@ namespace openpni::distributed::r2s
     {
         if (m_started.exchange(true, std::memory_order_acq_rel))
         {
-            std::cerr << "[RawDataR2SBridge] already started" << std::endl;
+            LOG(ERROR) << "[RawDataR2SBridge] already started";
             return false;
         }
 
@@ -776,8 +776,8 @@ namespace openpni::distributed::r2s
             const uint64_t fullHits = m_enqueueFullHits.fetch_add(1, std::memory_order_relaxed) + 1;
             if (m_config.queueFullWarnEvery > 0 && fullHits % m_config.queueFullWarnEvery == 0)
             {
-                std::cerr << "[RawDataR2SBridge] queue is full, depth="
-                          << m_queue.size() << "/" << m_queue.capacity() << std::endl;
+                LOG(ERROR) << "[RawDataR2SBridge] queue is full, depth="
+                           << m_queue.size() << "/" << m_queue.capacity();
             }
 
             if (!m_config.blockWhenQueueFull)
@@ -865,8 +865,8 @@ namespace openpni::distributed::r2s
             auto channelNum = header.channelNum;
             auto segmentNum = header.segmentNum;
 
-            std::cout << "Channels: " << channelNum << std::endl;
-            std::cout << "Segments: " << segmentNum << std::endl;
+            LOG(INFO) << "Channels: " << channelNum;
+            LOG(INFO) << "Segments: " << segmentNum;
 
             R2SStreamProcessor processor(config);
             if (!processor.initialize(channelNum))
@@ -874,7 +874,7 @@ namespace openpni::distributed::r2s
                 return false;
             }
 
-            std::cout << "Processing " << segmentNum << " segments..." << std::endl;
+            LOG(INFO) << "Processing " << segmentNum << " segments...";
             for (uint64_t i = 0; i < segmentNum; i++)
             {
                 auto segment = mRawFileInput->readSegment(i, i + 1);
@@ -885,7 +885,7 @@ namespace openpni::distributed::r2s
 
                 if (!processor.processSegment(view))
                 {
-                    std::cerr << "R2S processing failed at segment " << i << std::endl;
+                    LOG(ERROR) << "R2S processing failed at segment " << i;
                     return false;
                 }
             }
@@ -894,7 +894,7 @@ namespace openpni::distributed::r2s
         }
         catch (const std::exception &e)
         {
-            std::cerr << "Error in processR2S: " << e.what() << std::endl;
+            LOG(ERROR) << "Error in processR2S: " << e.what();
             return false;
         }
     }

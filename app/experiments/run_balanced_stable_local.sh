@@ -7,11 +7,11 @@ cd "$ROOT_DIR"
 LOG_DIR="app/experiments/logs/balanced_stable_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOG_DIR"
 
-# glog compatibility: keep traditional redirected logs and also emit glog files.
-GLOG_DIR="$LOG_DIR/glog"
-mkdir -p "$GLOG_DIR"
-export GLOG_log_dir="$GLOG_DIR"
-export GLOG_alsologtostderr=1
+# glog compatibility: do not create extra glog files under experiment dir;
+# send glog output to stderr so existing redirection still captures it.
+unset GLOG_log_dir
+unset GLOG_alsologtostderr
+export GLOG_logtostderr=1
 export GLOG_stderrthreshold=0
 
 wait_for_log_pattern() {

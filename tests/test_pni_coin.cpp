@@ -30,7 +30,7 @@ namespace
 
     const std::string kSinglesFile = "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/singles.single";
     // const std::string kCoinOutputDir = "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/pniCoin";
-    const std::string kCoinOutputDir = "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/coin/streaming_coin_test_output";
+    const std::string kCoinOutputDir = "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/pniCoin/exp_balanced_stable";
     struct EventSample
     {
         uint32_t globalCrystalIndex1 = 0;

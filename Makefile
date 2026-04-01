@@ -491,10 +491,13 @@ test-acq-r2s-pipeline: $(TEST_ACQ_R2S_PIPELINE_TARGET)
 	@echo "========================================================"
 	@echo "✓ Acquisition -> R2S pipeline test completed"
 
+# 编译应用：采集-单事件转换子节点
 app-acq-r2s-node: $(APP_ACQ_R2S_NODE_TARGET)
 
+# 编译应用：符合主控节点
 app-coin-master: $(APP_COIN_MASTER_TARGET)
 
+# 编译应用：UDP 原始数据回放发包器
 app-udp-replayer: $(APP_UDP_REPLAYER_TARGET)
 
 .PHONY: all all-full test test-grpc test-streaming test-pni-r2c test-pni-coin test-local-grpc-coin test-local-grpc-r2s test-acq-control-smoke test-acq-control-init test-acq-datapath-udp test-acq-r2s-pipeline app-acq-r2s-node app-coin-master app-udp-replayer clean clean-proto help directories check-glog-deps verify-glog-compile

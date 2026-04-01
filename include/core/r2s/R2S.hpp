@@ -498,12 +498,12 @@ namespace openpni::distributed::r2s
 
         struct Stats
         {
-            uint64_t enqueuedSegments = 0;
-            uint64_t processedSegments = 0;
-            uint64_t droppedSegments = 0;
-            uint64_t enqueueFullHits = 0;
-            uint64_t queuePeakDepth = 0;
-            bool healthy = true;
+            uint64_t enqueuedSegments = 0;  // 成功入队的采集段数
+            uint64_t processedSegments = 0; // 成功处理的采集段数
+            uint64_t droppedSegments = 0;   // 因队列满而丢弃的采集段数
+            uint64_t enqueueFullHits = 0;   // 采集段入队时队列已满的次数
+            uint64_t queuePeakDepth = 0;    // 队列深度峰值
+            bool healthy = true;            // 是否健康（处理线程未发生错误）
         };
 
         explicit AsyncRawDataToR2SBridge(const R2SProcessConfig &r2sConfig);

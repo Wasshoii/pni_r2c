@@ -7,6 +7,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstdint>
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -258,19 +259,80 @@ int main(int argc, char **argv)
     }
 
     const auto t0 = std::chrono::steady_clock::now();
+    auto lastTick = std::chrono::steady_clock::now();
+    uint64_t lastSinglesReceived = 0;
+    uint64_t lastSinglesProcessed = 0;
+    uint64_t lastPromptPairs = 0;
+    uint64_t lastDelayPairs = 0;
+    uint64_t lastAcqRxPackets = 0;
 
     while (!g_stopRequested.load(std::memory_order_relaxed))
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(cfg.coinMaster.statusPrintIntervalMs));
 
         const auto &stats = coinNode.statistics();
-        std::cout << "[CoinMaster] connected=" << coinNode.connectedNodeCount() << "/" << coinNode.expectedNodeCount()
+        const uint64_t totalSinglesReceived = stats.totalSinglesReceived.load(std::memory_order_relaxed);
+        const uint64_t totalSinglesProcessed = stats.totalSinglesProcessed.load(std::memory_order_relaxed);
+        const uint64_t totalPromptPairs = stats.totalPromptPairs.load(std::memory_order_relaxed);
+        const uint64_t totalDelayPairs = stats.totalDelayPairs.load(std::memory_order_relaxed);
+        const auto memStatus = coinNode.aligner().getMemoryStatus();
+        const double memUsedMB = static_cast<double>(memStatus.usedBytes) / (1024.0 * 1024.0);
+        const double memMaxMB = static_cast<double>(memStatus.maxBytes) / (1024.0 * 1024.0);
+        const double memUsagePct = memStatus.usageRatio * 100.0;
+
+        const auto nowTick = std::chrono::steady_clock::now();
+        const double dtSec = std::max(
+            1e-6,
+            std::chrono::duration<double>(nowTick - lastTick).count());
+
+        double acqSpeedMpps = 0.0;      // 所有采集子节点当前瞬时包速率之和，单位 Mpps
+        double acqBandwidthMbps = 0.0;  // 所有采集子节点当前瞬时带宽之和，单位 Mbps
+        uint64_t acqTotalRxPackets = 0; // 所有采集子节点累计接收包数总和
+        if (acqMasterStarted)
+        {
+            for (const auto &node : acqMaster.SnapshotNodes())
+            {
+                acqSpeedMpps += node.lastStatus.current_speed_mpps();
+                acqBandwidthMbps += node.lastStatus.current_bandwidth_mbps();
+                acqTotalRxPackets += node.lastStatus.total_rx_packets();
+            }
+        }
+
+        const double recvRateMps = static_cast<double>(totalSinglesReceived - lastSinglesReceived) / dtSec / 1e6;
+        const double procRateMps = static_cast<double>(totalSinglesProcessed - lastSinglesProcessed) / dtSec / 1e6;
+        const double promptRateMps = static_cast<double>(totalPromptPairs - lastPromptPairs) / dtSec / 1e6;
+        const double delayRateMps = static_cast<double>(totalDelayPairs - lastDelayPairs) / dtSec / 1e6;
+        const double acqRxRateMpps = static_cast<double>(acqTotalRxPackets - lastAcqRxPackets) / dtSec / 1e6;
+
+        std::cout << "[CoinMaster status] connected=" << coinNode.connectedNodeCount() << "/" << coinNode.expectedNodeCount()
                   << " startIssued=" << (coinNode.startSignalIssued() ? "true" : "false")
-                  << " plannedStartMs=" << coinNode.plannedStartTimeMs()
-                  << " totalSinglesReceived=" << stats.totalSinglesReceived.load(std::memory_order_relaxed)
-                  << " promptPairs=" << stats.totalPromptPairs.load(std::memory_order_relaxed)
-                  << " delayPairs=" << stats.totalDelayPairs.load(std::memory_order_relaxed)
+                  << " totalSinglesReceived=" << totalSinglesReceived
+                  << " singlesProcessed=" << totalSinglesProcessed
+                  << " promptPairs=" << totalPromptPairs
+                  << " delayPairs=" << totalDelayPairs
+                  << std::fixed << std::setprecision(3)
                   << std::endl;
+        std::cout << "[CoinMaster Total_acq_msg] acqRxRateMpps=" << acqRxRateMpps
+                  << " acqSpeedMpps=" << acqSpeedMpps
+                  << " acqBandwidthMbps=" << acqBandwidthMbps
+                  << std::fixed << std::setprecision(3)
+                  << std::endl;
+        std::cout << "[CoinMaster Stream_coin] recvRateMSingles=" << recvRateMps
+                  << " procRateMSingles=" << procRateMps
+                  << " promptRateMPairs=" << promptRateMps
+                  << " delayRateMPairs=" << delayRateMps
+                  << " memUsedMB=(" << memUsedMB
+                  << " / " << memMaxMB << ")"
+                  << " memUsagePct=" << memUsagePct << "% "
+                  << std::fixed << std::setprecision(3)
+                  << std::endl;
+
+        lastTick = nowTick;
+        lastSinglesReceived = totalSinglesReceived;
+        lastSinglesProcessed = totalSinglesProcessed;
+        lastPromptPairs = totalPromptPairs;
+        lastDelayPairs = totalDelayPairs;
+        lastAcqRxPackets = acqTotalRxPackets;
 
         if (acqMasterStarted)
         {

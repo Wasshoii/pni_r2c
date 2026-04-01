@@ -239,9 +239,49 @@ int main(int argc, char **argv)
                                nodeRunOk.store(node.run(), std::memory_order_relaxed);
                                nodeDone.store(true, std::memory_order_relaxed); });
 
+    auto perfLastTick = std::chrono::steady_clock::now();
+    uint64_t perfLastEnqueuedSeg = 0;
+    uint64_t perfLastProcessedSeg = 0;
+    uint64_t perfLastDroppedSeg = 0;
+    uint64_t perfLastSentSingles = 0;
+    auto perfLastAcqStatus = perfLastTick;
+
     while (!g_stopRequested.load(std::memory_order_relaxed) && !nodeDone.load(std::memory_order_relaxed))
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now - perfLastAcqStatus >= std::chrono::milliseconds(cfg.acqNode.statusIntervalMs))
+        {
+            const double dtSec = std::max(
+                1e-6,
+                std::chrono::duration<double>(now - perfLastTick).count());
+
+            const auto bridgeStats = bridge.stats();
+            const uint64_t sentSingles = cfg.coinClient.enabled ? coinClient.getTotalSinglesSent() : 0;
+
+            const double enqueueSegRate = static_cast<double>(bridgeStats.enqueuedSegments - perfLastEnqueuedSeg) / dtSec;
+            const double processSegRate = static_cast<double>(bridgeStats.processedSegments - perfLastProcessedSeg) / dtSec;
+            const double dropSegRate = static_cast<double>(bridgeStats.droppedSegments - perfLastDroppedSeg) / dtSec;
+            const double sendSinglesRateM = static_cast<double>(sentSingles - perfLastSentSingles) / dtSec / 1e6;
+
+            std::cout << "[AcqR2SNode/Perf] enqueueSeg/s=" << std::fixed << std::setprecision(2) << enqueueSegRate
+                      << " processSeg/s=" << processSegRate
+                      << " dropSeg/s=" << dropSegRate
+                      << " queuePeak=" << bridgeStats.queuePeakDepth
+                      << " enqueueFullHits=" << bridgeStats.enqueueFullHits
+                      << " sentSingles=" << sentSingles
+                      << " sendRateMSingles=" << std::setprecision(4) << sendSinglesRateM
+                      << std::defaultfloat
+                      << std::endl;
+
+            perfLastTick = now;
+            perfLastEnqueuedSeg = bridgeStats.enqueuedSegments;
+            perfLastProcessedSeg = bridgeStats.processedSegments;
+            perfLastDroppedSeg = bridgeStats.droppedSegments;
+            perfLastSentSingles = sentSingles;
+            perfLastAcqStatus = now;
+        }
     }
 
     if (g_stopRequested.load(std::memory_order_relaxed))

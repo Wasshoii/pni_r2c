@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <pni/io/IO.hpp>
+#include <pni/io/v1/V1.hpp>
 // #include <pni/node/BDMBiDR2S.hpp>
 
 #include <pni/node/BDM2R2S.hpp>

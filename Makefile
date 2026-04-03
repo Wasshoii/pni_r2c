@@ -34,23 +34,27 @@ PNI_PKG_NAME ?= libpni
 PNI_PKG_CFLAGS = $(shell $(PKG_CONFIG) --cflags $(PNI_PKG_NAME) 2>/dev/null)
 PNI_PKG_CFLAGS_I = $(shell $(PKG_CONFIG) --cflags-only-I $(PNI_PKG_NAME) 2>/dev/null)
 PNI_PKG_LIBS = $(shell $(PKG_CONFIG) --libs $(PNI_PKG_NAME) 2>/dev/null)
+PNI_PROJECT_PATH ?= /media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/pni-standard-project
 
-ifeq ($(strip $(PNI_PKG_LIBS)),)
-# 回退模式：使用源码树中的 include/build 目录
-PNI_PROJECT_PATH ?= /media/ustc-pni/5282FE19AB6D5297/pni_grpc/pni-standard-project
-PNI_CFLAGS = -I$(PNI_PROJECT_PATH)/include
-PNI_NVCC_CFLAGS = $(PNI_CFLAGS)
-PNI_LIB_PATH = $(PNI_PROJECT_PATH)/build
-PNI_LIBS = -L$(PNI_LIB_PATH) -lpni -lpni_cu -Wl,-rpath,$(PNI_LIB_PATH)
-PNI_EXTRA_CXXFLAGS = $(CUDA_INCLUDE)
-PNI_EXTRA_LDFLAGS = $(CUDA_LIBS) -levent
-else
-# 系统安装模式：使用 pkg-config 提供的完整编译/链接参数
-PNI_CFLAGS = $(PNI_PKG_CFLAGS)
+# 优先使用系统安装的 libpni（pkg-config）；若不可用再回退到本地源码目录。
+ifneq ($(strip $(PNI_PKG_LIBS)),)
+# 系统安装模式：优先使用 libpni；过滤掉会污染 host 编译环境的 flag
+PNI_CFLAGS = $(filter-out -I$(CUDA_PATH)/include -include /usr/local/include/pni/PnI-Config.hpp,$(PNI_PKG_CFLAGS))
 PNI_NVCC_CFLAGS = $(PNI_PKG_CFLAGS_I)
 PNI_LIBS = $(PNI_PKG_LIBS)
-PNI_EXTRA_CXXFLAGS =
+# host 侧如需 cuda_runtime.h，使用 -isystem 降低对 libstdc++ 头解析的干扰
+PNI_EXTRA_CXXFLAGS = -isystem $(CUDA_PATH)/include
 PNI_EXTRA_LDFLAGS = -lcuda
+else ifneq ($(wildcard $(PNI_PROJECT_PATH)/include),)
+# 回退模式：使用本地 pni-standard-project
+PNI_CFLAGS = -I$(PNI_PROJECT_PATH)/include
+PNI_LIB_PATH = $(PNI_PROJECT_PATH)/build
+PNI_LIBS = -L$(PNI_LIB_PATH) -lpni -lpni_cu -Wl,-rpath,$(PNI_LIB_PATH)
+PNI_NVCC_CFLAGS = $(PNI_CFLAGS) $(CUDA_INCLUDE)
+PNI_EXTRA_CXXFLAGS = -isystem $(CUDA_PATH)/include
+PNI_EXTRA_LDFLAGS = $(CUDA_LIBS) -levent
+else
+$(error Neither pkg-config libpni nor local PNI project include path is available. Set PNI_PROJECT_PATH correctly.)
 endif
 
 # ==================== gRPC 配置 ====================
@@ -67,6 +71,7 @@ SYSTEM_LIB_HINT = -L$(SYSTEM_LIB_DIR)
 # Google logging library for structured logging with thread safety
 GLOG_CFLAGS = $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH_OVERRIDE) $(PKG_CONFIG) --cflags libglog gflags 2>/dev/null || echo "")
 GLOG_LIBS = $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH_OVERRIDE) $(PKG_CONFIG) --libs libglog gflags 2>/dev/null || echo "-lglog -lgflags")
+GLOG_CFLAGS += -I/usr/include
 
 # ==================== 汇总编译选项 ====================
 # 基础编译选项（不含 PNI/CUDA）
@@ -193,6 +198,11 @@ all-full: directories $(TEST_TARGET) $(TEST_GRPC_TARGET) $(TEST_STREAMING_TARGET
 # Create build directories
 directories:
 	@mkdir -p $(BUILD_DIR) $(BIN_DIR)
+	@rm -rf include_override/pni
+	@mkdir -p include_override/pni
+	@printf '%s\n' '#pragma once' '#include <pni/tools/CudaPtr.hpp>' > include_override/pni/CudaPtr.hpp
+	@if [ -d /usr/include/glog ]; then ln -sfn /usr/include/glog include_override/glog; fi
+	@if [ -d /usr/include/gflags ]; then ln -sfn /usr/include/gflags include_override/gflags; fi
 
 # 编译原始测试程序（模拟，无 PNI 依赖）
 $(TEST_TARGET): $(TEST_SRC) | directories
@@ -257,7 +267,7 @@ $(TEST_STREAMING_TARGET): $(TEST_STREAMING_SRC) $(PROTO_OBJS) $(CORE_STREAMING_O
 
 # 编译 CUDA 源文件（使用 g++-13 作为 host 编译器以支持 <format>）
 $(CUDA_SINGLES_PROCESS_OBJ): $(CUDA_SINGLES_PROCESS_SRC) | directories
-	$(NVCC) $(NVCCFLAGS) -ccbin g++-13 $(PNI_NVCC_CFLAGS) $(PNI_EXTRA_CXXFLAGS) -Iinclude -Iprotos -Isrc -c $(CUDA_SINGLES_PROCESS_SRC) -o $(CUDA_SINGLES_PROCESS_OBJ)
+	$(NVCC) $(NVCCFLAGS) -ccbin g++-13 -Iinclude_override $(PNI_NVCC_CFLAGS) $(PNI_EXTRA_CXXFLAGS) -Iinclude -Iprotos -Isrc -c $(CUDA_SINGLES_PROCESS_SRC) -o $(CUDA_SINGLES_PROCESS_OBJ)
 	@echo "✓ CUDA SinglesProcess compiled"
 
 # 编译 PNI R2C 测试程序（需要 PNI 库、CUDA 和 TBB）

@@ -1,0 +1,147 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "linux-release-tests-core",
+      "displayName": "Linux Release (tests/core: basic grpc)",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/tests/core",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "/usr/bin/g++-13",
+        "R2C_PKG_CONFIG_PATH": "/usr/lib/x86_64-linux-gnu/pkgconfig",
+        "R2C_BUILD_TEST_BASIC": "ON",
+        "R2C_BUILD_TEST_GRPC": "ON"
+      }
+    },
+    {
+      "name": "linux-release-tests-pni",
+      "displayName": "Linux Release (tests/pni: libpni+tbb+openmp)",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/tests/pni",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "/usr/bin/g++-13",
+        "R2C_PKG_CONFIG_PATH": "/usr/lib/x86_64-linux-gnu/pkgconfig",
+        "R2C_BUILD_TEST_BASIC": "OFF",
+        "R2C_BUILD_TEST_GRPC": "OFF",
+        "R2C_BUILD_TEST_STREAMING": "ON",
+        "R2C_BUILD_TEST_LOCAL_GRPC_COIN": "ON",
+        "R2C_BUILD_TEST_ACQ_CONTROL_INIT": "ON",
+        "R2C_BUILD_TEST_ACQ_DATAPATH_UDP": "ON"
+      }
+    },
+    {
+      "name": "linux-release-tests-cuda",
+      "displayName": "Linux Release (tests/cuda: nvcc+libpni+tbb+openmp)",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/tests/cuda",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "/usr/bin/g++-13",
+        "R2C_PKG_CONFIG_PATH": "/usr/lib/x86_64-linux-gnu/pkgconfig",
+        "R2C_BUILD_TEST_BASIC": "OFF",
+        "R2C_BUILD_TEST_GRPC": "OFF",
+        "R2C_BUILD_TEST_PNI_R2C": "ON",
+        "R2C_BUILD_TEST_LOCAL_GRPC_R2S": "ON",
+        "R2C_BUILD_TEST_PNI_COIN": "ON",
+        "R2C_BUILD_TEST_ACQ_R2S_PIPELINE": "ON"
+      }
+    },
+    {
+      "name": "linux-release-apps-basic",
+      "displayName": "Linux Release (apps/basic: libpni+tbb+openmp)",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/apps/basic",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "/usr/bin/g++-13",
+        "R2C_PKG_CONFIG_PATH": "/usr/lib/x86_64-linux-gnu/pkgconfig",
+        "R2C_BUILD_TEST_BASIC": "OFF",
+        "R2C_BUILD_TEST_GRPC": "OFF",
+        "R2C_BUILD_TEST_STREAMING": "OFF",
+        "R2C_BUILD_TEST_PNI_R2C": "OFF",
+        "R2C_BUILD_TEST_PNI_COIN": "OFF",
+        "R2C_BUILD_TEST_LOCAL_GRPC_R2S": "OFF",
+        "R2C_BUILD_TEST_LOCAL_GRPC_COIN": "OFF",
+        "R2C_BUILD_TEST_ACQ_CONTROL_INIT": "OFF",
+        "R2C_BUILD_TEST_ACQ_DATAPATH_UDP": "OFF",
+        "R2C_BUILD_TEST_ACQ_R2S_PIPELINE": "OFF",
+        "R2C_BUILD_APP_COIN_MASTER": "ON",
+        "R2C_BUILD_APP_UDP_RAW_REPLAYER": "ON"
+      }
+    },
+    {
+      "name": "linux-release-apps-cuda",
+      "displayName": "Linux Release (apps/cuda: nvcc+libpni+tbb+openmp)",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/apps/cuda",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "/usr/bin/g++-13",
+        "R2C_PKG_CONFIG_PATH": "/usr/lib/x86_64-linux-gnu/pkgconfig",
+        "R2C_BUILD_TEST_BASIC": "OFF",
+        "R2C_BUILD_TEST_GRPC": "OFF",
+        "R2C_BUILD_TEST_STREAMING": "OFF",
+        "R2C_BUILD_TEST_PNI_R2C": "OFF",
+        "R2C_BUILD_TEST_PNI_COIN": "OFF",
+        "R2C_BUILD_TEST_LOCAL_GRPC_R2S": "OFF",
+        "R2C_BUILD_TEST_LOCAL_GRPC_COIN": "OFF",
+        "R2C_BUILD_TEST_ACQ_CONTROL_INIT": "OFF",
+        "R2C_BUILD_TEST_ACQ_DATAPATH_UDP": "OFF",
+        "R2C_BUILD_TEST_ACQ_R2S_PIPELINE": "OFF",
+        "R2C_BUILD_APP_ACQ_R2S_NODE": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "build-tests-core",
+      "configurePreset": "linux-release-tests-core",
+      "targets": [
+        "test_distributed_clock_sync",
+        "test_distributed_clock_sync_grpc"
+      ]
+    },
+    {
+      "name": "build-tests-pni",
+      "configurePreset": "linux-release-tests-pni",
+      "targets": [
+        "test_streaming_coincidence",
+        "test_local_grpc_coin",
+        "test_acquisition_control_init",
+        "test_acquisition_datapath_udp"
+      ]
+    },
+    {
+      "name": "build-tests-cuda",
+      "configurePreset": "linux-release-tests-cuda",
+      "targets": [
+        "test_pni_r2c",
+        "test_local_grpc_r2s",
+        "test_pni_coin",
+        "test_acquisition_r2s_pipeline"
+      ]
+    },
+    {
+      "name": "build-apps-basic",
+      "configurePreset": "linux-release-apps-basic",
+      "targets": [
+        "app_coin_master",
+        "app_udp_raw_replayer"
+      ]
+    },
+    {
+      "name": "build-apps-cuda",
+      "configurePreset": "linux-release-apps-cuda",
+      "targets": [
+        "app_acq_r2s_node"
+      ]
+    }
+  ]
+}

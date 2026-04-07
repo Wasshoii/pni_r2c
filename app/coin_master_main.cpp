@@ -44,7 +44,7 @@ namespace
 
     void fillAcquisitionTask(acq::AcquisitionTask *task, const appcfg::AcqControlSection &c)
     {
-        task->set_algorithm_type(acq::ALGORITHM_TYPE_SOCKET);
+        task->set_algorithm_type(acq::ALGORITHM_TYPE_SOCKET); // 若需要使用DPDK，则改为ALGORITHM_TYPE_DPDK，并设置dpdk_options，后续计划改为可调配置
         task->set_storage_unit_size(c.storageUnitSize);
         task->set_min_packet_size(c.minPacketSize);
         task->set_max_buffer_size(c.maxBufferSize);

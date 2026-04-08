@@ -51,7 +51,7 @@ pkg-config --cflags --libs grpc++ protobuf
 which protoc
 ```
 
-## 快速开始
+## 快速开始（makefile计划后续移除，转为cmake）
 
 ```bash
 # 查看全部目标
@@ -64,58 +64,81 @@ make
 make all-full
 ```
 
-## 常用构建目标
-- `make`：构建基础测试程序（无 PNI/CUDA 依赖）。
-- `make all-full`：构建完整目标集（含 PNI/CUDA 相关程序）。
-- `make test`：运行基础模拟测试。
-- `make test-grpc`：运行 gRPC 时钟同步测试。
-- `make test-streaming`：运行流式符合测试。
-- `make test-pni-r2c`：运行 PNI R2C 测试。
-- `make test-local-grpc-r2s`：运行本地 gRPC R2S 测试。
-- `make test-local-grpc-coin`：运行本地 gRPC Coin 接收测试。
-- `make clean`：清理构建产物。
-- `make clean-proto`：清理 proto 生成文件。
+## CMake 迁移（tests/apps 分离架构）
 
-## Makefile 关键配置
+当前仓库 CMake 预设已按“目标类型（tests/apps）+ 依赖层（core/pni/cuda）”分离，避免应用与测试混编。
 
-### 1. PNI 依赖解析策略
-本项目采用“`pkg-config libpni` 优先，`PNI_PROJECT_PATH` 回退”的策略：
-- 默认：通过 `pkg-config --cflags/--libs libpni` 获取编译和链接参数。
-- 回退：当 `pkg-config` 不可用时，使用 `PNI_PROJECT_PATH` 下的 `include` 与 `build`。
-
-相关变量：
-- `PNI_PKG_NAME`（默认 `libpni`）
-- `PNI_PROJECT_PATH`（仅回退模式使用）
-
-### 2. gRPC/Protobuf 链接优先级
-为避免系统环境混装导致 `-lprotobuf` 误选到 `/usr/local/lib/libprotobuf.a`（进而触发 `absl` 未定义符号），Makefile 在链接阶段会优先加入系统库目录：
-- `SYSTEM_LIB_DIR`（默认 `/usr/lib/x86_64-linux-gnu`）
-
-如你的发行版路径不同，可覆盖：
+如需手动指定 protoc / grpc plugin（跨环境常用）：
 
 ```bash
-make all-full SYSTEM_LIB_DIR=/your/system/lib/dir
+cmake -S . -B build/cmake \
+-DCMAKE_BUILD_TYPE=Release \
+-DR2C_PROTOC_EXECUTABLE=$(command -v protoc) \
+-DR2C_GRPC_CPP_PLUGIN_EXECUTABLE=$(command -v grpc_cpp_plugin)
 ```
 
-### 3. CUDA 路径
-- `CUDA_PATH` 默认 `/usr/local/cuda`。
-- 如 CUDA 安装在其他位置，可覆盖：
+说明：
+- 默认优先使用 `/usr/bin/protoc` 与 `/usr/bin/grpc_cpp_plugin`（与 Makefile 行为一致）。
+- 默认 `R2C_PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig`（避免 protobuf/grpc 版本漂移）。
+- 预设默认使用 `/usr/bin/g++-13`（与 Makefile 对齐）。
+
+### Tests 预设（建议 CI 使用）
+
+1. Core Tests（仅基础 gRPC/Protobuf）
+- 目标：`test_distributed_clock_sync`、`test_distributed_clock_sync_grpc`
 
 ```bash
-make all-full CUDA_PATH=/opt/cuda
+cmake --preset linux-release-tests-core
+cmake --build --preset build-tests-core -j
+ctest --test-dir build/tests/core -L core --output-on-failure
 ```
 
-## 典型构建流程
+2. PNI Tests（libpni + tbb + openmp，无 CUDA）
+- 目标：`test_streaming_coincidence`、`test_local_grpc_coin`、`test_acquisition_control_init`、`test_acquisition_datapath_udp`
 
 ```bash
-# 1) 清理
-make clean
+cmake --preset linux-release-tests-pni
+cmake --build --preset build-tests-pni -j
+ctest --test-dir build/tests/pni -L pni -LE integration --output-on-failure
+```
 
-# 2) 必要时清理并重新生成 proto
-make clean-proto
+说明：`test_local_grpc_coin` 标记为 `integration`，如需运行请显式执行：
 
-# 3) 完整构建
-make all-full
+```bash
+ctest --test-dir build/tests/pni -R test_local_grpc_coin --output-on-failure
+```
+
+3. CUDA Tests（nvcc + libpni + tbb + openmp）
+- 目标：`test_pni_r2c`、`test_local_grpc_r2s`、`test_pni_coin`、`test_acquisition_r2s_pipeline`
+
+```bash
+cmake --preset linux-release-tests-cuda
+cmake --build --preset build-tests-cuda -j
+ctest --test-dir build/tests/cuda -L cuda -LE integration --output-on-failure
+```
+
+说明：`test_local_grpc_r2s` 标记为 `integration`，如需运行请显式执行：
+
+```bash
+ctest --test-dir build/tests/cuda -R test_local_grpc_r2s --output-on-failure
+```
+
+### Apps 预设（部署构建建议）
+
+1. Basic Apps（无 CUDA）
+- 目标：`app_coin_master`、`app_udp_raw_replayer`
+
+```bash
+cmake --preset linux-release-apps-basic
+cmake --build --preset build-apps-basic -j
+```
+
+2. CUDA Apps
+- 目标：`app_acq_r2s_node`
+
+```bash
+cmake --preset linux-release-apps-cuda
+cmake --build --preset build-apps-cuda -j
 ```
 
 ## 常见问题

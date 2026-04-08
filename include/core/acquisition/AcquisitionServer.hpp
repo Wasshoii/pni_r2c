@@ -19,6 +19,7 @@
 
 #include <pni/node/Acquisition.hpp>
 #include <pni/io/IO.hpp>
+#include <pni/io/v1/V1.hpp>
 #include "protos/acquisition.pb.h"
 
 namespace openpni::distributed::acquisition

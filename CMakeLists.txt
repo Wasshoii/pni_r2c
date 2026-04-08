@@ -167,6 +167,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
     )
     target_include_directories(r2c_core_streaming_objs
       PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
     )
@@ -579,6 +580,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
   )
   target_include_directories(r2c_core_r2s_objs
     PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
       "${CMAKE_CURRENT_SOURCE_DIR}/include"
       "${CMAKE_CURRENT_SOURCE_DIR}/src"
   )

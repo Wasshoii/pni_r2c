@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <pni/io/IO.hpp>
+#include <pni/io/v1/V1.hpp>     //注意使用io v1时需包含此头 
 
 namespace
 {

@@ -4,7 +4,6 @@
 #include <thrust/sort.h>
 #include <thrust/execution_policy.h>
 #include <thrust/device_ptr.h>
-#include <pni/CudaPtr.hpp>
 
 namespace openpni::distributed::r2s
 {

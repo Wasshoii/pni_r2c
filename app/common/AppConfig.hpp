@@ -61,6 +61,13 @@ namespace openpni::distributed::app
     struct RuntimeSection
     {
         uint32_t shutdownGraceMs = 1000;
+        bool enableCpuAffinity = false;
+        std::vector<uint16_t> cpuAffinityCores;
+        bool strictBindIpsOwnershipCheck = true;
+        bool strictNumaTopologyCheck = false;
+        bool requireBindIpsSingleNuma = true;
+        bool requireCpuAffinityOnNuma = false;
+        int32_t expectedNumaNode = -1;
     };
 
     struct AcqR2SNodeConfig
@@ -109,6 +116,30 @@ namespace openpni::distributed::app
 
     struct AcqControlSection
     {
+        enum class AcquisitionAlgorithm
+        {
+            Socket,
+            Dpdk
+        };
+
+        struct NodeOverride
+        {
+            enum class AlgorithmOverride
+            {
+                Inherit,
+                Socket,
+                Dpdk
+            };
+
+            std::string nodeId;
+            AlgorithmOverride acquisitionAlgorithm = AlgorithmOverride::Inherit;
+            uint32_t dpdkCopyThreadNum = 0;
+            uint32_t dpdkRxRingsPerPort = 0;
+            uint32_t dpdkMbufDoublePointerSizeMultiply = 0;
+            uint32_t dpdkMbufDoublePointerNumMultiply = 0;
+            std::vector<std::string> dpdkBindIps;
+        };
+
         struct DetectorSource
         {
             std::string detectorId;
@@ -121,6 +152,7 @@ namespace openpni::distributed::app
         bool autoDistributeWhenAllConnected = true;
         bool autoStartOnCoinStartSignal = true;
         uint32_t startDurationMs = 0;
+        AcquisitionAlgorithm acquisitionAlgorithm = AcquisitionAlgorithm::Socket;
 
         uint16_t sourcePortBase = 17100;
         uint16_t destinationPortBase = 18100;
@@ -140,6 +172,8 @@ namespace openpni::distributed::app
         uint32_t dpdkRxRingsPerPort = 1;
         uint32_t dpdkMbufDoublePointerSizeMultiply = 32;
         uint32_t dpdkMbufDoublePointerNumMultiply = 2;
+        std::vector<std::string> dpdkBindIps;
+        std::vector<NodeOverride> nodeOverrides;
     };
 
     struct CoinMasterConfig

@@ -33,6 +33,7 @@
     "autoDistributeWhenAllConnected": true,
     "autoStartOnCoinStartSignal": true,
     "startDurationMs": 0,
+    "acquisitionAlgorithm": "socket",
     "sourcePortBase": 17100,
     "destinationPortBase": 18100,
     "channelCount": 12,
@@ -62,6 +63,7 @@
     "dpdkCopyThreadNum": 8,
     "dpdkRxRingsPerPort": 1,
     "dpdkMbufDoublePointerSizeMultiply": 32,
-    "dpdkMbufDoublePointerNumMultiply": 2
+    "dpdkMbufDoublePointerNumMultiply": 2,
+    "dpdkBindIps": ["127.0.0.1"]
   }
 }

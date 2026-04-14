@@ -14,6 +14,8 @@
 
 #include <glog/logging.h>
 
+#include <sched.h>
+
 #include "app/common/AppConfig.hpp"
 #include "core/r2s/R2S.hpp"
 #include "grpcNode/acquisitionNode.hpp"
@@ -100,6 +102,53 @@ namespace
         return true;
     }
 
+    bool applyProcessCpuAffinity(const appcfg::RuntimeSection &runtime, std::string *errorMessage)
+    {
+        if (!runtime.enableCpuAffinity)
+        {
+            return true;
+        }
+
+        cpu_set_t cpuSet;
+        CPU_ZERO(&cpuSet);
+
+        for (uint16_t core : runtime.cpuAffinityCores)
+        {
+            if (core >= CPU_SETSIZE)
+            {
+                if (errorMessage)
+                {
+                    *errorMessage = "runtime.cpuAffinityCores contains core >= CPU_SETSIZE: " + std::to_string(core);
+                }
+                return false;
+            }
+            CPU_SET(core, &cpuSet);
+        }
+
+        if (::sched_setaffinity(0, sizeof(cpuSet), &cpuSet) != 0)
+        {
+            if (errorMessage)
+            {
+                *errorMessage = "sched_setaffinity failed";
+            }
+            return false;
+        }
+
+        std::ostringstream oss;
+        oss << "[AcqR2SNode] CPU affinity enabled: ";
+        for (size_t i = 0; i < runtime.cpuAffinityCores.size(); ++i)
+        {
+            if (i > 0)
+            {
+                oss << ",";
+            }
+            oss << runtime.cpuAffinityCores[i];
+        }
+        std::cout << oss.str() << std::endl;
+
+        return true;
+    }
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -123,6 +172,12 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    if (!applyProcessCpuAffinity(cfg.runtime, &err))
+    {
+        std::cerr << "[AcqR2SNode] runtime setup failed: " << err << std::endl;
+        return 2;
+    }
+
     std::cout << "===========================================" << std::endl;
     std::cout << "  App: Acquisition + R2S Node" << std::endl;
     std::cout << "===========================================" << std::endl;
@@ -138,6 +193,9 @@ int main(int argc, char **argv)
     std::cout << "coinClient.remapGlobal: " << (cfg.coinClient.remapLocalToGlobalChannels ? "true" : "false") << std::endl;
     std::cout << "coinClient.globalOffset: " << cfg.coinClient.globalChannelOffset << std::endl;
     std::cout << "coinClient.cpc        : " << cfg.coinClient.crystalsPerChannel << std::endl;
+    std::cout << "runtime.enableCpuAffinity: " << (cfg.runtime.enableCpuAffinity ? "true" : "false") << std::endl;
+    std::cout << "runtime.strictBindIpsOwnershipCheck: " << (cfg.runtime.strictBindIpsOwnershipCheck ? "true" : "false") << std::endl;
+    std::cout << "runtime.strictNumaTopologyCheck: " << (cfg.runtime.strictNumaTopologyCheck ? "true" : "false") << std::endl;
 
     if (dryRun)
     {
@@ -224,6 +282,12 @@ int main(int argc, char **argv)
     nodeOpt.sessionNamePrefix = cfg.acqNode.sessionNamePrefix;
     nodeOpt.statusIntervalMs = cfg.acqNode.statusIntervalMs;
     nodeOpt.enableRawFileWrite = cfg.acqNode.enableRawFileWrite;
+    nodeOpt.strictBindIpsOwnershipCheck = cfg.runtime.strictBindIpsOwnershipCheck;
+    nodeOpt.strictNumaTopologyCheck = cfg.runtime.strictNumaTopologyCheck;
+    nodeOpt.requireBindIpsSingleNuma = cfg.runtime.requireBindIpsSingleNuma;
+    nodeOpt.requireCpuAffinityOnNuma = cfg.runtime.requireCpuAffinityOnNuma;
+    nodeOpt.expectedNumaNode = cfg.runtime.expectedNumaNode;
+    nodeOpt.cpuAffinityCores.assign(cfg.runtime.cpuAffinityCores.begin(), cfg.runtime.cpuAffinityCores.end());
 
     grpcnode::AcquisitionGrpcNode node(nodeOpt);
     if (cfg.bridge.enabled)

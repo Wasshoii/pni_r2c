@@ -41,6 +41,13 @@
     "waitForStartRetryIntervalMs": 1000
   },
   "runtime": {
-    "shutdownGraceMs": 1000
+    "shutdownGraceMs": 1000,
+    "enableCpuAffinity": false,
+    "cpuAffinityCores": [0, 1, 2, 3],
+    "strictBindIpsOwnershipCheck": true,
+    "strictNumaTopologyCheck": false,
+    "requireBindIpsSingleNuma": true,
+    "requireCpuAffinityOnNuma": false,
+    "expectedNumaNode": -1
   }
 }

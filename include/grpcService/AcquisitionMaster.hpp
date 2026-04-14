@@ -76,6 +76,8 @@ namespace openpni::distributed::acquisition
     class AcquisitionMaster
     {
     public:
+        using ConfigureTaskOverrideFn = std::function<bool(const std::string &, AcquisitionTask *, std::string *)>;
+
         AcquisitionMaster();
         ~AcquisitionMaster();
 
@@ -93,6 +95,7 @@ namespace openpni::distributed::acquisition
         size_t SendStart(uint64_t plannedStartTimeMs, uint32_t durationMs = 0);
         size_t SendStop(const std::string &reason = "");
         size_t SendShutdown(const std::string &reason = "");
+        void SetConfigureTaskOverrideFn(ConfigureTaskOverrideFn fn);
 
         std::vector<AcquisitionControlServiceImpl::ConnectedNode> SnapshotNodes() const;
 
@@ -110,6 +113,7 @@ namespace openpni::distributed::acquisition
         std::shared_ptr<AcquisitionControlServiceImpl> service_;
         std::unique_ptr<grpc::Server> server_;
         AcquisitionTask global_task_;
+        ConfigureTaskOverrideFn configureTaskOverrideFn_;
     };
 
 } // namespace openpni::distributed::acquisition

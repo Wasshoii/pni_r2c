@@ -3,16 +3,26 @@
 #include <grpcpp/grpcpp.h>
 
 #include <algorithm>
+#include <arpa/inet.h>
 #include <atomic>
 #include <chrono>
+#include <cctype>
+#include <filesystem>
+#include <fstream>
+#include <ifaddrs.h>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 #include <glog/logging.h>
 
 #include <sys/sysinfo.h>
@@ -255,6 +265,239 @@ namespace openpni::distributed::grpcnode
                    std::to_string((ip >> 16) & 0xFF) + "." +
                    std::to_string((ip >> 8) & 0xFF) + "." +
                    std::to_string(ip & 0xFF);
+        }
+
+        struct LocalIpBinding
+        {
+            std::string interfaceName;
+            int numaNode = -1;
+        };
+
+        static bool readIntFromFile(const std::string &path, int *value)
+        {
+            std::ifstream ifs(path);
+            if (!ifs)
+            {
+                return false;
+            }
+            int v = -1;
+            if (!(ifs >> v))
+            {
+                return false;
+            }
+            *value = v;
+            return true;
+        }
+
+        static int queryInterfaceNumaNode(const std::string &ifname)
+        {
+            int numaNode = -1;
+            const std::string path = "/sys/class/net/" + ifname + "/device/numa_node";
+            if (!readIntFromFile(path, &numaNode))
+            {
+                return -1;
+            }
+            return numaNode;
+        }
+
+        static int queryCpuNumaNode(uint32_t cpuCore)
+        {
+            const std::filesystem::path cpuPath =
+                std::filesystem::path("/sys/devices/system/cpu") / ("cpu" + std::to_string(cpuCore));
+            std::error_code ec;
+            if (!std::filesystem::exists(cpuPath, ec))
+            {
+                return -1;
+            }
+
+            for (const auto &entry : std::filesystem::directory_iterator(cpuPath, ec))
+            {
+                if (ec)
+                {
+                    break;
+                }
+                const std::string name = entry.path().filename().string();
+                if (!name.starts_with("node"))
+                {
+                    continue;
+                }
+
+                bool digitsOnly = true;
+                for (size_t i = 4; i < name.size(); ++i)
+                {
+                    if (!std::isdigit(static_cast<unsigned char>(name[i])))
+                    {
+                        digitsOnly = false;
+                        break;
+                    }
+                }
+
+                if (digitsOnly && name.size() > 4)
+                {
+                    return std::stoi(name.substr(4));
+                }
+            }
+
+            return -1;
+        }
+
+        static std::unordered_map<std::string, LocalIpBinding> collectLocalIpv4Bindings()
+        {
+            std::unordered_map<std::string, LocalIpBinding> result;
+
+            struct ifaddrs *ifaddr = nullptr;
+            if (::getifaddrs(&ifaddr) != 0 || !ifaddr)
+            {
+                return result;
+            }
+
+            for (struct ifaddrs *ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next)
+            {
+                if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET)
+                {
+                    continue;
+                }
+                if (!ifa->ifa_name)
+                {
+                    continue;
+                }
+
+                const auto *sin = reinterpret_cast<sockaddr_in *>(ifa->ifa_addr);
+                char ipBuf[INET_ADDRSTRLEN] = {0};
+                if (!::inet_ntop(AF_INET, &(sin->sin_addr), ipBuf, sizeof(ipBuf)))
+                {
+                    continue;
+                }
+
+                LocalIpBinding binding;
+                binding.interfaceName = ifa->ifa_name;
+                binding.numaNode = queryInterfaceNumaNode(binding.interfaceName);
+                result[std::string(ipBuf)] = std::move(binding);
+            }
+
+            ::freeifaddrs(ifaddr);
+            return result;
+        }
+
+        bool validateDpdkBindIpsAndNuma(const acqproto::NodeAcquisitionConfig &config)
+        {
+            if (config.dpdk.bind_ips.empty())
+            {
+                setError("DPDK bind_ips is empty");
+                return false;
+            }
+
+            const auto localBindings = collectLocalIpv4Bindings();
+            std::vector<std::string> unmatchedIps;
+            std::set<int> bindIpNumaNodes;
+
+            for (const auto &bindIp : config.dpdk.bind_ips)
+            {
+                const auto it = localBindings.find(bindIp);
+                if (it == localBindings.end())
+                {
+                    unmatchedIps.push_back(bindIp);
+                    continue;
+                }
+                if (it->second.numaNode >= 0)
+                {
+                    bindIpNumaNodes.insert(it->second.numaNode);
+                }
+            }
+
+            if (!unmatchedIps.empty())
+            {
+                std::ostringstream oss;
+                oss << "DPDK bind_ips not found on local NICs: ";
+                for (size_t i = 0; i < unmatchedIps.size(); ++i)
+                {
+                    if (i > 0)
+                    {
+                        oss << ", ";
+                    }
+                    oss << unmatchedIps[i];
+                }
+
+                if (init_.strictBindIpsOwnershipCheck)
+                {
+                    setError(oss.str());
+                    return false;
+                }
+                LOG(WARNING) << "[AcquisitionNode/DPDK] " << oss.str();
+            }
+
+            if (!init_.strictNumaTopologyCheck)
+            {
+                return true;
+            }
+
+            if (init_.requireBindIpsSingleNuma && bindIpNumaNodes.size() > 1)
+            {
+                std::ostringstream oss;
+                oss << "DPDK bind_ips are spread across NUMA nodes: ";
+                bool first = true;
+                for (int node : bindIpNumaNodes)
+                {
+                    if (!first)
+                    {
+                        oss << ",";
+                    }
+                    first = false;
+                    oss << node;
+                }
+                setError(oss.str());
+                return false;
+            }
+
+            if (init_.expectedNumaNode >= 0)
+            {
+                for (int node : bindIpNumaNodes)
+                {
+                    if (node != init_.expectedNumaNode)
+                    {
+                        setError("DPDK bind_ips NUMA node does not match runtime.expectedNumaNode");
+                        return false;
+                    }
+                }
+            }
+
+            if (init_.requireCpuAffinityOnNuma && !init_.cpuAffinityCores.empty())
+            {
+                const std::optional<int> bindNuma =
+                    (bindIpNumaNodes.size() == 1) ? std::optional<int>(*bindIpNumaNodes.begin()) : std::nullopt;
+
+                for (uint32_t core : init_.cpuAffinityCores)
+                {
+                    const int coreNuma = queryCpuNumaNode(core);
+                    if (coreNuma < 0)
+                    {
+                        std::ostringstream oss;
+                        oss << "Cannot resolve NUMA node for CPU core " << core;
+                        setError(oss.str());
+                        return false;
+                    }
+
+                    if (init_.expectedNumaNode >= 0 && coreNuma != init_.expectedNumaNode)
+                    {
+                        std::ostringstream oss;
+                        oss << "CPU affinity core " << core << " is on NUMA " << coreNuma
+                            << ", expected " << init_.expectedNumaNode;
+                        setError(oss.str());
+                        return false;
+                    }
+
+                    if (bindNuma.has_value() && coreNuma != bindNuma.value())
+                    {
+                        std::ostringstream oss;
+                        oss << "CPU affinity core " << core << " NUMA=" << coreNuma
+                            << " does not match DPDK bind_ips NUMA=" << bindNuma.value();
+                        setError(oss.str());
+                        return false;
+                    }
+                }
+            }
+
+            return true;
         }
 
         void logConfigureDetails(const acqproto::AcquisitionTask &task, const acqproto::StorageConfig &storageConfig)
@@ -531,6 +774,11 @@ namespace openpni::distributed::grpcnode
             if (config.runtime_type != acqproto::NodeAcquisitionConfig::RuntimeType::Dpdk)
             {
                 return true;
+            }
+
+            if (!validateDpdkBindIpsAndNuma(config))
+            {
+                return false;
             }
 
 #if PNI_STANDARD_CONFIG_ENABLE_DPDK

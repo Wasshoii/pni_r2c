@@ -42,9 +42,63 @@ namespace
         return ntohl(addr.s_addr);
     }
 
-    void fillAcquisitionTask(acq::AcquisitionTask *task, const appcfg::AcqControlSection &c)
+    bool isValidIpv4(const std::string &ip)
     {
-        task->set_algorithm_type(acq::ALGORITHM_TYPE_SOCKET); // 若需要使用DPDK，则改为ALGORITHM_TYPE_DPDK，并设置dpdk_options，后续计划改为可调配置
+        in_addr addr{};
+        return ::inet_pton(AF_INET, ip.c_str(), &addr) == 1;
+    }
+
+    const appcfg::AcqControlSection::NodeOverride *findNodeOverride(
+        const appcfg::AcqControlSection &control,
+        const std::string &nodeId)
+    {
+        for (const auto &entry : control.nodeOverrides)
+        {
+            if (entry.nodeId == nodeId)
+            {
+                return &entry;
+            }
+        }
+        return nullptr;
+    }
+
+    bool fillAcquisitionTask(acq::AcquisitionTask *task, const appcfg::AcqControlSection &c, std::string *err)
+    {
+        switch (c.acquisitionAlgorithm)
+        {
+        case appcfg::AcqControlSection::AcquisitionAlgorithm::Dpdk:
+            task->set_algorithm_type(acq::ALGORITHM_TYPE_DPDK);
+            break;
+        case appcfg::AcqControlSection::AcquisitionAlgorithm::Socket:
+        default:
+            task->set_algorithm_type(acq::ALGORITHM_TYPE_SOCKET);
+            break;
+        }
+
+        if (c.acquisitionAlgorithm == appcfg::AcqControlSection::AcquisitionAlgorithm::Dpdk && c.dpdkBindIps.empty())
+        {
+            if (err)
+            {
+                *err = "acquisitionControl.dpdkBindIps must be configured when acquisitionAlgorithm=dpdk";
+            }
+            return false;
+        }
+
+        if (c.acquisitionAlgorithm == appcfg::AcqControlSection::AcquisitionAlgorithm::Dpdk)
+        {
+            for (const auto &ip : c.dpdkBindIps)
+            {
+                if (!isValidIpv4(ip))
+                {
+                    if (err)
+                    {
+                        *err = "acquisitionControl.dpdkBindIps contains invalid IPv4: " + ip;
+                    }
+                    return false;
+                }
+            }
+        }
+
         task->set_storage_unit_size(c.storageUnitSize);
         task->set_min_packet_size(c.minPacketSize);
         task->set_max_buffer_size(c.maxBufferSize);
@@ -86,6 +140,103 @@ namespace
         dpdk->set_rx_rings_per_port(c.dpdkRxRingsPerPort);
         dpdk->set_rte_mbuf_double_pointer_size_multiply(c.dpdkMbufDoublePointerSizeMultiply);
         dpdk->set_rte_mbuf_double_pointer_num_multiply(c.dpdkMbufDoublePointerNumMultiply);
+
+        dpdk->clear_bind_ips();
+        for (const auto &ip : c.dpdkBindIps)
+        {
+            dpdk->add_bind_ips(ip);
+        }
+
+        return true;
+    }
+
+    bool applyNodeOverrideToTask(
+        const std::string &nodeId,
+        const appcfg::AcqControlSection &control,
+        acq::AcquisitionTask *task,
+        std::string *err)
+    {
+        const auto *overrideCfg = findNodeOverride(control, nodeId);
+        if (!overrideCfg)
+        {
+            return true;
+        }
+
+        switch (overrideCfg->acquisitionAlgorithm)
+        {
+        case appcfg::AcqControlSection::NodeOverride::AlgorithmOverride::Socket:
+            task->set_algorithm_type(acq::ALGORITHM_TYPE_SOCKET);
+            break;
+        case appcfg::AcqControlSection::NodeOverride::AlgorithmOverride::Dpdk:
+            task->set_algorithm_type(acq::ALGORITHM_TYPE_DPDK);
+            break;
+        case appcfg::AcqControlSection::NodeOverride::AlgorithmOverride::Inherit:
+        default:
+            break;
+        }
+
+        const bool hasDpdkNumericOverride =
+            overrideCfg->dpdkCopyThreadNum > 0 ||
+            overrideCfg->dpdkRxRingsPerPort > 0 ||
+            overrideCfg->dpdkMbufDoublePointerSizeMultiply > 0 ||
+            overrideCfg->dpdkMbufDoublePointerNumMultiply > 0;
+        const bool hasDpdkIpOverride = !overrideCfg->dpdkBindIps.empty();
+
+        if (hasDpdkNumericOverride || hasDpdkIpOverride)
+        {
+            auto *dpdk = task->mutable_dpdk_options();
+            if (overrideCfg->dpdkCopyThreadNum > 0)
+            {
+                dpdk->set_copy_thread_num(overrideCfg->dpdkCopyThreadNum);
+            }
+            if (overrideCfg->dpdkRxRingsPerPort > 0)
+            {
+                dpdk->set_rx_rings_per_port(overrideCfg->dpdkRxRingsPerPort);
+            }
+            if (overrideCfg->dpdkMbufDoublePointerSizeMultiply > 0)
+            {
+                dpdk->set_rte_mbuf_double_pointer_size_multiply(overrideCfg->dpdkMbufDoublePointerSizeMultiply);
+            }
+            if (overrideCfg->dpdkMbufDoublePointerNumMultiply > 0)
+            {
+                dpdk->set_rte_mbuf_double_pointer_num_multiply(overrideCfg->dpdkMbufDoublePointerNumMultiply);
+            }
+            if (hasDpdkIpOverride)
+            {
+                dpdk->clear_bind_ips();
+                for (const auto &ip : overrideCfg->dpdkBindIps)
+                {
+                    dpdk->add_bind_ips(ip);
+                }
+            }
+        }
+
+        if (task->algorithm_type() == acq::ALGORITHM_TYPE_DPDK)
+        {
+            if (!task->has_dpdk_options() || task->dpdk_options().bind_ips_size() == 0)
+            {
+                if (err)
+                {
+                    *err = "node " + nodeId + " requires non-empty dpdk bind_ips";
+                }
+                return false;
+            }
+
+            const auto &dpdk = task->dpdk_options();
+            for (int i = 0; i < dpdk.bind_ips_size(); ++i)
+            {
+                if (!isValidIpv4(dpdk.bind_ips(i)))
+                {
+                    if (err)
+                    {
+                        *err = "node " + nodeId + " has invalid dpdk bind ip: " + dpdk.bind_ips(i);
+                    }
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     void printUsage(const char *prog)
@@ -170,6 +321,11 @@ int main(int argc, char **argv)
     std::cout << "coin.expectedNodeCount   : " << cfg.coinMaster.expectedNodeCount << std::endl;
     std::cout << "aligner.outputDir        : " << cfg.aligner.outputDir << std::endl;
     std::cout << "acqControl.enabled       : " << (cfg.acquisitionControl.enabled ? "true" : "false") << std::endl;
+    std::cout << "acqControl.algorithm     : "
+              << (cfg.acquisitionControl.acquisitionAlgorithm == appcfg::AcqControlSection::AcquisitionAlgorithm::Dpdk ? "dpdk" : "socket")
+              << std::endl;
+    std::cout << "acqControl.dpdkBindIps   : " << cfg.acquisitionControl.dpdkBindIps.size() << std::endl;
+    std::cout << "acqControl.nodeOverrides : " << cfg.acquisitionControl.nodeOverrides.size() << std::endl;
     std::cout << "acqControl.detectorSources: " << cfg.acquisitionControl.detectorSources.size() << std::endl;
 
     if (dryRun)
@@ -246,13 +402,27 @@ int main(int argc, char **argv)
     if (cfg.acquisitionControl.enabled)
     {
         acq::AcquisitionTask globalTask;
-        fillAcquisitionTask(&globalTask, cfg.acquisitionControl);
+        std::string taskError;
+        if (!fillAcquisitionTask(&globalTask, cfg.acquisitionControl, &taskError))
+        {
+            std::cerr << "[CoinMaster] invalid acquisition task config: " << taskError << std::endl;
+            coinNode.stop();
+            return 3;
+        }
 
         std::cout << "[CoinMaster] Acquisition mapping prepared: detector_sources="
-                  << globalTask.detector_sources_size() << std::endl;
+                  << globalTask.detector_sources_size()
+                  << " algorithm="
+                  << (globalTask.algorithm_type() == acq::ALGORITHM_TYPE_DPDK ? "DPDK" : "SOCKET")
+                  << std::endl;
 
         acqMaster.Initialize(globalTask);
         acqMaster.StartServer(cfg.acquisitionControl.masterAddress);
+        acqMaster.SetConfigureTaskOverrideFn(
+            [&cfg](const std::string &nodeId, acq::AcquisitionTask *task, std::string *overrideErr)
+            {
+                return applyNodeOverrideToTask(nodeId, cfg.acquisitionControl, task, overrideErr);
+            });
         acqMasterStarted = true;
 
         std::cout << "[CoinMaster] AcquisitionMaster started at " << cfg.acquisitionControl.masterAddress << std::endl;

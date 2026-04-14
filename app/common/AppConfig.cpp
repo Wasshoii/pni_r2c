@@ -9,6 +9,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 
 namespace openpni::distributed::app
 {
@@ -135,6 +136,31 @@ namespace openpni::distributed::app
             return true;
         }
 
+        template <typename Int>
+        bool readInt(const Struct &obj, const std::string &key, Int *out)
+        {
+            const Value *v = findField(obj, key);
+            if (!v)
+            {
+                return true;
+            }
+
+            double num = 0.0;
+            if (!numberFromValue(*v, &num) || std::floor(num) != num)
+            {
+                return false;
+            }
+
+            if (num < static_cast<double>(std::numeric_limits<Int>::min()) ||
+                num > static_cast<double>(std::numeric_limits<Int>::max()))
+            {
+                return false;
+            }
+
+            *out = static_cast<Int>(num);
+            return true;
+        }
+
         bool readFloat(const Struct &obj, const std::string &key, float *out)
         {
             const Value *v = findField(obj, key);
@@ -180,6 +206,38 @@ namespace openpni::distributed::app
             return true;
         }
 
+        bool readStringArray(const Struct &obj, const std::string &key, std::vector<std::string> *out)
+        {
+            const Value *v = findField(obj, key);
+            if (!v)
+            {
+                return true;
+            }
+            if (v->kind_case() != Value::kListValue)
+            {
+                return false;
+            }
+
+            std::vector<std::string> values;
+            values.reserve(static_cast<size_t>(v->list_value().values_size()));
+            for (const auto &item : v->list_value().values())
+            {
+                if (item.kind_case() != Value::kStringValue)
+                {
+                    return false;
+                }
+                const auto &s = item.string_value();
+                if (s.empty())
+                {
+                    return false;
+                }
+                values.push_back(s);
+            }
+
+            *out = std::move(values);
+            return true;
+        }
+
         bool loadRoot(const std::string &path, Struct *root, std::string *errorMessage)
         {
             std::string text;
@@ -192,6 +250,45 @@ namespace openpni::distributed::app
                 return false;
             }
             return true;
+        }
+
+        bool parseAcquisitionAlgorithm(
+            const std::string &algo,
+            AcqControlSection::AcquisitionAlgorithm *out)
+        {
+            if (algo == "socket" || algo == "SOCKET" || algo == "Socket")
+            {
+                *out = AcqControlSection::AcquisitionAlgorithm::Socket;
+                return true;
+            }
+            if (algo == "dpdk" || algo == "DPDK" || algo == "Dpdk")
+            {
+                *out = AcqControlSection::AcquisitionAlgorithm::Dpdk;
+                return true;
+            }
+            return false;
+        }
+
+        bool parseNodeAlgorithmOverride(
+            const std::string &algo,
+            AcqControlSection::NodeOverride::AlgorithmOverride *out)
+        {
+            if (algo.empty() || algo == "inherit" || algo == "INHERIT" || algo == "Inherit")
+            {
+                *out = AcqControlSection::NodeOverride::AlgorithmOverride::Inherit;
+                return true;
+            }
+            if (algo == "socket" || algo == "SOCKET" || algo == "Socket")
+            {
+                *out = AcqControlSection::NodeOverride::AlgorithmOverride::Socket;
+                return true;
+            }
+            if (algo == "dpdk" || algo == "DPDK" || algo == "Dpdk")
+            {
+                *out = AcqControlSection::NodeOverride::AlgorithmOverride::Dpdk;
+                return true;
+            }
+            return false;
         }
 
         bool fail(std::string *errorMessage, const std::string &message)
@@ -387,6 +484,43 @@ namespace openpni::distributed::app
                 {
                     return fail(err, "runtime.shutdownGraceMs must be non-negative integer");
                 }
+                if (!readBool(*sec, "enableCpuAffinity", &cfg->runtime.enableCpuAffinity))
+                {
+                    return fail(err, "runtime.enableCpuAffinity must be bool");
+                }
+                if (!readUInt16Array(*sec, "cpuAffinityCores", &cfg->runtime.cpuAffinityCores))
+                {
+                    return fail(err, "runtime.cpuAffinityCores must be integer array in [0,65535]");
+                }
+                if (!readBool(*sec, "strictBindIpsOwnershipCheck", &cfg->runtime.strictBindIpsOwnershipCheck))
+                {
+                    return fail(err, "runtime.strictBindIpsOwnershipCheck must be bool");
+                }
+                if (!readBool(*sec, "strictNumaTopologyCheck", &cfg->runtime.strictNumaTopologyCheck))
+                {
+                    return fail(err, "runtime.strictNumaTopologyCheck must be bool");
+                }
+                if (!readBool(*sec, "requireBindIpsSingleNuma", &cfg->runtime.requireBindIpsSingleNuma))
+                {
+                    return fail(err, "runtime.requireBindIpsSingleNuma must be bool");
+                }
+                if (!readBool(*sec, "requireCpuAffinityOnNuma", &cfg->runtime.requireCpuAffinityOnNuma))
+                {
+                    return fail(err, "runtime.requireCpuAffinityOnNuma must be bool");
+                }
+                if (!readInt(*sec, "expectedNumaNode", &cfg->runtime.expectedNumaNode))
+                {
+                    return fail(err, "runtime.expectedNumaNode must be integer");
+                }
+
+                if (cfg->runtime.enableCpuAffinity && cfg->runtime.cpuAffinityCores.empty())
+                {
+                    return fail(err, "runtime.cpuAffinityCores must not be empty when runtime.enableCpuAffinity=true");
+                }
+                if (cfg->runtime.expectedNumaNode < -1)
+                {
+                    return fail(err, "runtime.expectedNumaNode must be -1 or >=0");
+                }
             }
             return true;
         }
@@ -523,6 +657,20 @@ namespace openpni::distributed::app
                 {
                     return fail(err, "acquisitionControl.startDurationMs must be non-negative integer");
                 }
+
+                std::string algo;
+                if (!readString(*sec, "acquisitionAlgorithm", &algo))
+                {
+                    return fail(err, "acquisitionControl.acquisitionAlgorithm must be string");
+                }
+                if (!algo.empty())
+                {
+                    if (!parseAcquisitionAlgorithm(algo, &cfg->acquisitionControl.acquisitionAlgorithm))
+                    {
+                        return fail(err, "acquisitionControl.acquisitionAlgorithm must be one of [socket, dpdk]");
+                    }
+                }
+
                 if (!readUInt(*sec, "sourcePortBase", &cfg->acquisitionControl.sourcePortBase))
                 {
                     return fail(err, "acquisitionControl.sourcePortBase must be non-negative integer");
@@ -641,6 +789,77 @@ namespace openpni::distributed::app
                 if (!readUInt(*sec, "dpdkMbufDoublePointerNumMultiply", &cfg->acquisitionControl.dpdkMbufDoublePointerNumMultiply))
                 {
                     return fail(err, "acquisitionControl.dpdkMbufDoublePointerNumMultiply must be non-negative integer");
+                }
+                if (!readStringArray(*sec, "dpdkBindIps", &cfg->acquisitionControl.dpdkBindIps))
+                {
+                    return fail(err, "acquisitionControl.dpdkBindIps must be non-empty string array");
+                }
+
+                if (const Value *overridesValue = findField(*sec, "nodeOverrides"))
+                {
+                    if (overridesValue->kind_case() != Value::kListValue)
+                    {
+                        return fail(err, "acquisitionControl.nodeOverrides must be an array");
+                    }
+
+                    std::vector<AcqControlSection::NodeOverride> overrides;
+                    overrides.reserve(static_cast<size_t>(overridesValue->list_value().values_size()));
+                    std::unordered_set<std::string> usedNodeIds;
+
+                    for (const auto &item : overridesValue->list_value().values())
+                    {
+                        if (item.kind_case() != Value::kStructValue)
+                        {
+                            return fail(err, "acquisitionControl.nodeOverrides entries must be objects");
+                        }
+
+                        AcqControlSection::NodeOverride overrideCfg;
+                        const Struct &itemObj = item.struct_value();
+
+                        if (!readString(itemObj, "nodeId", &overrideCfg.nodeId) || overrideCfg.nodeId.empty())
+                        {
+                            return fail(err, "acquisitionControl.nodeOverrides[].nodeId must be non-empty string");
+                        }
+                        if (!usedNodeIds.insert(overrideCfg.nodeId).second)
+                        {
+                            return fail(err, "acquisitionControl.nodeOverrides contains duplicated nodeId: " + overrideCfg.nodeId);
+                        }
+
+                        std::string nodeAlgo;
+                        if (!readString(itemObj, "acquisitionAlgorithm", &nodeAlgo))
+                        {
+                            return fail(err, "acquisitionControl.nodeOverrides[].acquisitionAlgorithm must be string");
+                        }
+                        if (!parseNodeAlgorithmOverride(nodeAlgo, &overrideCfg.acquisitionAlgorithm))
+                        {
+                            return fail(err, "acquisitionControl.nodeOverrides[].acquisitionAlgorithm must be one of [inherit, socket, dpdk]");
+                        }
+
+                        if (!readUInt(itemObj, "dpdkCopyThreadNum", &overrideCfg.dpdkCopyThreadNum))
+                        {
+                            return fail(err, "acquisitionControl.nodeOverrides[].dpdkCopyThreadNum must be non-negative integer");
+                        }
+                        if (!readUInt(itemObj, "dpdkRxRingsPerPort", &overrideCfg.dpdkRxRingsPerPort))
+                        {
+                            return fail(err, "acquisitionControl.nodeOverrides[].dpdkRxRingsPerPort must be non-negative integer");
+                        }
+                        if (!readUInt(itemObj, "dpdkMbufDoublePointerSizeMultiply", &overrideCfg.dpdkMbufDoublePointerSizeMultiply))
+                        {
+                            return fail(err, "acquisitionControl.nodeOverrides[].dpdkMbufDoublePointerSizeMultiply must be non-negative integer");
+                        }
+                        if (!readUInt(itemObj, "dpdkMbufDoublePointerNumMultiply", &overrideCfg.dpdkMbufDoublePointerNumMultiply))
+                        {
+                            return fail(err, "acquisitionControl.nodeOverrides[].dpdkMbufDoublePointerNumMultiply must be non-negative integer");
+                        }
+                        if (!readStringArray(itemObj, "dpdkBindIps", &overrideCfg.dpdkBindIps))
+                        {
+                            return fail(err, "acquisitionControl.nodeOverrides[].dpdkBindIps must be non-empty string array");
+                        }
+
+                        overrides.push_back(std::move(overrideCfg));
+                    }
+
+                    cfg->acquisitionControl.nodeOverrides = std::move(overrides);
                 }
             }
             return true;

@@ -423,8 +423,20 @@ namespace openpni::distributed::acquisition
 
         for (size_t i = 0; i < nodeIds.size(); ++i)
         {
-            const std::string message = "assigned_channels=" + std::to_string(nodeTasks[i].channels_size());
-            if (service_->EnqueueCommand(nodeIds[i], MakeConfigureCommand(nodeTasks[i], message)))
+            AcquisitionTask task = nodeTasks[i];
+            if (configureTaskOverrideFn_)
+            {
+                std::string overrideError;
+                if (!configureTaskOverrideFn_(nodeIds[i], &task, &overrideError))
+                {
+                    LOG(ERROR) << "Skip CONFIGURE for node=" << nodeIds[i]
+                               << ", override failed: " << overrideError;
+                    continue;
+                }
+            }
+
+            const std::string message = "assigned_channels=" + std::to_string(task.channels_size());
+            if (service_->EnqueueCommand(nodeIds[i], MakeConfigureCommand(task, message)))
             {
                 ++configured;
             }
@@ -447,6 +459,11 @@ namespace openpni::distributed::acquisition
     size_t AcquisitionMaster::SendShutdown(const std::string &reason)
     {
         return service_->BroadcastCommand(MakeShutdownCommand(reason));
+    }
+
+    void AcquisitionMaster::SetConfigureTaskOverrideFn(ConfigureTaskOverrideFn fn)
+    {
+        configureTaskOverrideFn_ = std::move(fn);
     }
 
     std::vector<AcquisitionControlServiceImpl::ConnectedNode> AcquisitionMaster::SnapshotNodes() const

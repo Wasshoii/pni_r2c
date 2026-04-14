@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "protos/acquisition.pb.h"
 
@@ -36,6 +37,13 @@ namespace openpni::distributed::grpcnode
             bool enableRawFileWrite = true;
 
             uint32_t statusIntervalMs = 1000;
+
+            bool strictBindIpsOwnershipCheck = true;
+            bool strictNumaTopologyCheck = false;
+            bool requireBindIpsSingleNuma = true;
+            bool requireCpuAffinityOnNuma = false;
+            int32_t expectedNumaNode = -1;
+            std::vector<uint32_t> cpuAffinityCores;
         };
 
         explicit AcquisitionGrpcNode(InitOptions options);

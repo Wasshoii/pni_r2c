@@ -146,7 +146,7 @@ if [[ "${#STATE_FILES[@]}" -gt 0 ]]; then
       exit 1
     fi
     local_driver="${ARG_RESTORE_DRIVER:-${ORIG_DRIVER}}"
-    ROLLBACK_PAIRS+=("${PCI_ADDR}:${local_driver}")
+    ROLLBACK_PAIRS+=("${PCI_ADDR}|${local_driver}")
 
     if [[ -z "${RESTORE_HP_2M}" ]]; then
       RESTORE_HP_2M="${HP_2M_BEFORE:-}"
@@ -162,7 +162,7 @@ else
     exit 1
   fi
   for p in "${PCI_ADDRS[@]}"; do
-    ROLLBACK_PAIRS+=("${p}:${RESTORE_DRIVER}")
+    ROLLBACK_PAIRS+=("${p}|${RESTORE_DRIVER}")
   done
 fi
 
@@ -181,8 +181,8 @@ if [[ "${ASSUME_YES}" -ne 1 ]]; then
 fi
 
 for pair in "${ROLLBACK_PAIRS[@]}"; do
-  pci="${pair%%:*}"
-  drv="${pair#*:}"
+  pci="${pair%%|*}"
+  drv="${pair#*|}"
   as_root dpdk-devbind.py "--bind=${drv}" "${pci}"
 done
 

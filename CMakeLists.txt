@@ -49,7 +49,7 @@ endif()
 include(GNUInstallDirs)
 find_package(PkgConfig REQUIRED)
 
-set(R2C_PKG_CONFIG_PATH "/usr/lib/x86_64-linux-gnu/pkgconfig" CACHE STRING "pkg-config search path override; set empty to use environment default")
+set(R2C_PKG_CONFIG_PATH "/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig" CACHE STRING "pkg-config search path override; set empty to use environment default")
 if(NOT R2C_PKG_CONFIG_PATH STREQUAL "")
   set(ENV{PKG_CONFIG_PATH} "${R2C_PKG_CONFIG_PATH}")
 endif()
@@ -160,6 +160,7 @@ endif()
 
 if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_COIN_MASTER)
   pkg_check_modules(R2C_PNI REQUIRED IMPORTED_TARGET libpni)
+  pkg_check_modules(R2C_DPDK QUIET libdpdk)
 
   if(NOT TARGET r2c_core_streaming_objs)
     add_library(r2c_core_streaming_objs OBJECT
@@ -381,6 +382,15 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
           ${R2C_TBB_LIBRARY}
           dl
       )
+      if(R2C_DPDK_FOUND)
+        target_link_directories(app_coin_master PRIVATE ${R2C_DPDK_LIBRARY_DIRS})
+        target_link_options(app_coin_master PRIVATE -Wl,--no-as-needed)
+        target_link_libraries(app_coin_master
+          PRIVATE
+            PkgConfig::R2C_PNI
+            ${R2C_DPDK_LINK_LIBRARIES}
+        )
+      endif()
     endif()
   endif()
 endif()
@@ -539,6 +549,7 @@ endif()
 
 if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRPC_R2S OR R2C_BUILD_TEST_ACQ_R2S_PIPELINE OR R2C_BUILD_APP_ACQ_R2S_NODE)
   pkg_check_modules(R2C_PNI REQUIRED IMPORTED_TARGET libpni)
+  pkg_check_modules(R2C_DPDK QUIET libdpdk)
   find_library(R2C_TBB_LIBRARY NAMES tbb REQUIRED)
   find_package(OpenMP REQUIRED)
 
@@ -850,6 +861,15 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
         ${R2C_TBB_LIBRARY}
         dl
     )
+    if(R2C_DPDK_FOUND)
+      target_link_directories(app_acq_r2s_node PRIVATE ${R2C_DPDK_LIBRARY_DIRS})
+      target_link_options(app_acq_r2s_node PRIVATE -Wl,--no-as-needed)
+      target_link_libraries(app_acq_r2s_node
+        PRIVATE
+          PkgConfig::R2C_PNI
+          ${R2C_DPDK_LINK_LIBRARIES}
+      )
+    endif()
   endif()
 
   if(R2C_BUILD_TEST_ACQ_R2S_PIPELINE)

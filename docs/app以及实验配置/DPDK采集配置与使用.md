@@ -249,6 +249,115 @@ dpdk-testpmd --no-pci --no-huge -- --total-num-mbufs=2048 --nb-cores=1
 2. 再补 `apply`。
 3. 最后再考虑“全自动一键”，且仅用于本地控制台场景，不建议默认用于远程环境。
 
+### 6.1 当前脚本能力（已更新）
+
+当前仓库已提供：
+
+1. `dpdk_config/dpdk_precheck.sh`：只读检查工具链、HugePages、VFIO、网卡状态。
+2. `dpdk_config/dpdk_apply.sh`：执行 DPDK 配置与网卡绑定。
+3. `dpdk_config/dpdk_rollback.sh`：按状态文件回滚。
+4. `dpdk_config/run_dpdk_nodata_smoketest.sh`：无业务数据联调脚本。
+
+`dpdk_apply.sh` 新增/增强能力：
+
+1. 支持多网卡：可重复传 `--pci`。
+2. 管理网卡保护：默认拒绝绑定默认路由网卡（除非显式 `--force-management-nic`）。
+3. 失败自动回滚：执行中失败会回滚已绑定网卡，避免半配置状态。
+4. 状态快照增强：记录原驱动、HugePages、hugetlbfs 挂载状态、vfio no-iommu 参数。
+
+`dpdk_rollback.sh` 新增/增强能力：
+
+1. 支持多状态文件回滚：可重复传 `--state-file`。
+2. 支持 `--restore-system-state`：按状态文件恢复 HugePages、挂载状态、vfio 参数。
+3. 兼容手动模式：无状态文件时仍可用 `--pci + --restore-driver` 回滚。
+
+### 6.2 推荐执行流程（单节点）
+
+1. 预检查：
+
+```bash
+bash dpdk_config/dpdk_precheck.sh
+```
+
+2. 预演（不改系统）：
+
+```bash
+bash dpdk_config/dpdk_apply.sh \
+   --pci 0000:04:00.0 \
+   --hugepages-count 1024 \
+   --hugepages-size 2M \
+   --dry-run
+```
+
+3. 正式 apply：
+
+```bash
+bash dpdk_config/dpdk_apply.sh \
+   --pci 0000:04:00.0 \
+   --hugepages-count 1024 \
+   --hugepages-size 2M \
+   --yes
+```
+
+4. 运行无业务数据联调：
+
+```bash
+bash dpdk_config/run_dpdk_nodata_smoketest.sh
+```
+
+5. 使用后回滚（推荐状态文件模式）：
+
+```bash
+ls -1t dpdk_config/state/*.env | head -n 1
+bash dpdk_config/dpdk_rollback.sh \
+   --state-file dpdk_config/state/<latest>.env \
+   --restore-system-state \
+   --yes
+```
+
+说明：
+
+1. 如果临时不想恢复系统态，仅回滚驱动，可不加 `--restore-system-state`。
+2. 若无需状态文件模式，可手动回滚：
+
+```bash
+bash dpdk_config/dpdk_rollback.sh \
+   --pci 0000:04:00.0 \
+   --restore-driver r8169 \
+   --clear-hugepages \
+   --yes
+```
+
+### 6.3 推荐执行流程（单节点多网卡）
+
+```bash
+bash dpdk_config/dpdk_apply.sh \
+   --pci 0000:04:00.0 \
+   --pci 0000:05:00.0 \
+   --hugepages-count 1024 \
+   --yes
+
+bash dpdk_config/dpdk_rollback.sh \
+   --state-file dpdk_config/state/<nic0>.env \
+   --state-file dpdk_config/state/<nic1>.env \
+   --restore-system-state \
+   --yes
+```
+
+### 6.4 与 smoketest 联动的关键注意事项
+
+`run_dpdk_nodata_smoketest.sh` 默认会选“第一张具有全局 IPv4 的网卡”作为 `bind_ip`。
+
+这意味着：
+
+1. 若 DPDK 口已绑定 `vfio-pci`，而该口不在内核协议栈中，本机 Python UDP 注入流量可能走管理网卡而非 DPDK 口。
+2. 控制面可能表现正常（节点注册、下发任务成功），但数据面统计仍可能为 0。
+
+因此建议：
+
+1. 本机自测时，关注日志中是否出现“DPDK 线程已启动但吞吐为 0”的组合现象。
+2. 若要验证 DPDK 真收包，优先使用外部发包机向 DPDK 数据面链路发包。
+
 ## 7. 真实分布式场景的配置建议
 
 当前参数模型可运行，但在真实分布式场景建议进一步细化：

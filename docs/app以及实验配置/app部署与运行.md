@@ -53,6 +53,22 @@ make app-udp-replayer
 ./bin/app_acq_r2s_node --config app/config/examples/acq_r2s_node.example.json --dry-run
 ```
 
+## 关于DPDK
+   使用dpdk采集测试时，程序可能无法直接退出，可以使用如下指令停止程序
+```bash
+   # 查看是否还在跑
+pgrep -a -f 'build/apps/(basic/app_coin_master|cuda/app_acq_r2s_node)'
+
+# 优雅停止
+pkill -INT -f 'build/apps/(basic/app_coin_master|cuda/app_acq_r2s_node)'
+
+# 若还在，升级为 TERM
+pkill -TERM -f 'build/apps/(basic/app_coin_master|cuda/app_acq_r2s_node)'
+
+# 最后兜底强杀
+pkill -KILL -f 'build/apps/(basic/app_coin_master|cuda/app_acq_r2s_node)'
+```
+
 ## 关联文档
 
 1. 实验脚本与性能测试：`实验配置与脚本.md`

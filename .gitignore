@@ -32,4 +32,8 @@ protos/*.grpc.pb.h
 
 # Experims log flies
 app/experiments/logs/
+dpdk_config/logs/
+
+#dpdk state files
+dpdk_config/state/
 

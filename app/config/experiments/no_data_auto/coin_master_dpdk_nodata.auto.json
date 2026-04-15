@@ -1,0 +1,65 @@
+{
+  "coinMaster": {
+    "listenAddress": "0.0.0.0:50061",
+    "expectedNodeCount": 1,
+    "autoStartWhenAllRegistered": true,
+    "startLeadTimeMs": 800,
+    "waitForStartDefaultTimeoutMs": 30000,
+    "rejectStreamBeforeStart": true,
+    "statusPrintIntervalMs": 1000,
+    "runSeconds": 0
+  },
+  "aligner": {
+    "outputDir": "Data/result/Bdm2/pniCoin/exp_nodata_dpdk",
+    "channelNum": 48,
+    "crystalsPerChannel": 676,
+    "networkLatencyMarginPico": 5000000000,
+    "processingIntervalMs": 200,
+    "maxChunksPerNode": 100,
+    "maxTotalMemoryBytes": 2147483648,
+    "useMemoryPool": true,
+    "savePrompt": false,
+    "saveDelay": false,
+    "coinProtocol": {
+      "timeWindowPs": 2000,
+      "delayTimePs": 2000000,
+      "energyLowerEV": 350000.0,
+      "energyUpperEV": 650000.0
+    }
+  },
+  "acquisitionControl": {
+    "enabled": true,
+    "masterAddress": "127.0.0.1:50093",
+    "autoDistributeWhenAllConnected": true,
+    "autoStartOnCoinStartSignal": false,
+    "startDurationMs": 0,
+    "acquisitionAlgorithm": "dpdk",
+    "sourcePortBase": 17100,
+    "destinationPortBase": 18100,
+    "channelCount": 1,
+    "sourceIp": "192.168.4.126",
+    "detectorSources": [
+      {"detectorId": "d0", "sourceIp": "192.168.4.126", "sourcePort": 17100}
+    ],
+    "destinationIp": "192.168.4.126",
+    "sessionName": "nodata_dpdk_session",
+    "storageUnitSize": 2048,
+    "minPacketSize": 1,
+    "maxBufferSize": 4294967296,
+    "timeSwitchBufferMs": 200,
+    "reservedStorageGiB": 20,
+    "maxFileSizeMb": 256,
+    "dpdkCopyThreadNum": 4,
+    "dpdkRxRingsPerPort": 1,
+    "dpdkMbufDoublePointerSizeMultiply": 32,
+    "dpdkMbufDoublePointerNumMultiply": 2,
+    "dpdkBindIps": ["192.168.4.126"],
+    "nodeOverrides": [
+      {
+        "nodeId": "acq-r2s-node-0",
+        "acquisitionAlgorithm": "dpdk",
+        "dpdkBindIps": ["192.168.4.126"]
+      }
+    ]
+  }
+}

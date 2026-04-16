@@ -11,6 +11,7 @@
 1. 操作系统：Linux。
 2. 假设 DPDK 已安装（如未安装，先按 PNI 文档完成安装与基础验证）。
 3. 本文重点是“本项目如何接入 DPDK 采集路径”。
+4. 在使用dpdk之前，需在PnI-Config 中将 PNI_STANDARD_CONFIG_ENABLE_DPDK设置为1，重新编译安装
 
 ## 2. 先判断机器是否具备 DPDK 运行条件
 
@@ -357,6 +358,72 @@ bash dpdk_config/dpdk_rollback.sh \
 
 1. 本机自测时，关注日志中是否出现“DPDK 线程已启动但吞吐为 0”的组合现象。
 2. 若要验证 DPDK 真收包，优先使用外部发包机向 DPDK 数据面链路发包。
+
+### 6.5 DPDK 专用发包器（第一阶段实现）
+
+当前仓库已新增最小 DPDK 发包程序：
+
+1. 可执行目标：`app_dpdk_tx_replayer`
+2. 源码路径：`app/dpdk_tx_replayer_main.cpp`
+3. 构建开关：`R2C_BUILD_APP_DPDK_TX_REPLAYER=ON`
+
+功能范围（第一阶段）：
+
+1. 使用 DPDK 端口发送自定义 UDP 负载（固定 payload）。
+2. 支持按 channel 映射端口（`source-port-base/destination-port-base + channel`）。
+3. 支持限速（`--pps`）或满速发包（`--pps 0`）。
+4. 打印实时发送统计（发送包数、丢弃包数、平均 pps、平均 Mbps）。
+
+#### 6.5.1 构建方式
+
+```bash
+cmake -S . -B build/apps/basic \
+   -DR2C_PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig" \
+   -DR2C_BUILD_APP_DPDK_TX_REPLAYER=ON
+
+cmake --build build/apps/basic --target app_dpdk_tx_replayer
+```
+
+#### 6.5.2 参数说明（核心）
+
+1. `--port-id`：DPDK 发送端口 ID。
+2. `--dst-mac`：目标网卡 MAC（必填）。
+3. `--source-ip` / `--destination-ip`：写入 UDP 报文的 IPv4。
+4. `--source-port-base` / `--destination-port-base`：端口基址。
+5. `--channel-count` / `--channel-offset`：通道映射。
+6. `--payload-size`：UDP 负载长度。
+7. `--pps`：目标发包速率，`0` 表示尽可能满速。
+8. `--duration-sec`：持续发包时间。
+9. `--eal-args`：额外 EAL 参数字符串。
+
+查看完整参数：
+
+```bash
+build/apps/basic/app_dpdk_tx_replayer --help
+```
+
+#### 6.5.3 联调示例（单端口、单通道）
+
+```bash
+build/apps/basic/app_dpdk_tx_replayer \
+   --port-id 0 \
+   --dst-mac aa:bb:cc:dd:ee:ff \
+   --source-ip 192.168.10.11 \
+   --destination-ip 192.168.10.12 \
+   --source-port-base 17100 \
+   --destination-port-base 18100 \
+   --channel-count 1 \
+   --payload-size 512 \
+   --pps 500000 \
+   --duration-sec 30
+```
+
+#### 6.5.4 使用注意事项
+
+1. `--dst-mac` 必须是接收侧链路可达的目标 MAC，否则链路层会丢包。
+2. 若接收端按 `destinationPortBase + channel` 收包，请保持通道与端口映射一致。
+3. 建议优先在“发包机/采集机分离”的双机环境测极限；单机更适合功能验证与快速回归。
+4. 第一阶段发包器是固定 payload，后续可扩展为 raw 回放/协议字段可配。
 
 ## 7. 真实分布式场景的配置建议
 

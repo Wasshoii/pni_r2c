@@ -25,6 +25,7 @@ option(R2C_BUILD_TEST_ACQ_R2S_PIPELINE "Build acquisition to R2S pipeline test (
 # - basic (libpni + tbb + openmp, no CUDA)
 option(R2C_BUILD_APP_COIN_MASTER "Build app coin master executable (requires libpni, tbb)" OFF)
 option(R2C_BUILD_APP_UDP_RAW_REPLAYER "Build app udp raw replayer executable (requires libpni)" OFF)
+option(R2C_BUILD_APP_DPDK_TX_REPLAYER "Build app DPDK tx replayer executable (requires libdpdk)" OFF)
 
 # - cuda (nvcc + libpni + tbb + openmp)
 option(R2C_BUILD_APP_ACQ_R2S_NODE "Build app acquisition+r2s node executable (requires libpni, nvcc, tbb)" OFF)
@@ -929,6 +930,31 @@ if(R2C_BUILD_APP_UDP_RAW_REPLAYER)
       PkgConfig::R2C_GRPC
       PkgConfig::R2C_GLOG
       OpenMP::OpenMP_CXX
+      dl
+  )
+endif()
+
+if(R2C_BUILD_APP_DPDK_TX_REPLAYER)
+  pkg_check_modules(R2C_DPDK REQUIRED IMPORTED_TARGET libdpdk)
+
+  add_executable(app_dpdk_tx_replayer
+    app/dpdk_tx_replayer_main.cpp
+  )
+  target_include_directories(app_dpdk_tx_replayer
+    PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/include"
+      "${CMAKE_CURRENT_SOURCE_DIR}/src"
+  )
+  target_compile_options(app_dpdk_tx_replayer
+    PRIVATE
+      -Wall
+      -Wextra
+      -O3
+      -march=native
+  )
+  target_link_libraries(app_dpdk_tx_replayer
+    PRIVATE
+      PkgConfig::R2C_DPDK
       dl
   )
 endif()

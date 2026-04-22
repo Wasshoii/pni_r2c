@@ -579,20 +579,20 @@ namespace openpni::distributed::streaming
 
         if (m_config.savePrompt)
         {
-            m_promptWriter = std::make_unique<openpni::io::v1::listmode::ListmodeFileOutput>();
-            m_promptWriter->setBytes4CrystalIndex(openpni::io::v1::single::CrystalIndexType::UINT32);
-            m_promptWriter->setBytes4TimeValue1_2(openpni::io::v1::listmode::TimeValue1_2Type::INT16);
-            m_promptWriter->setTotalCrystalNum(totalCrystals);
-            m_promptWriter->open(m_config.outputDir + "/prompt.lmf");
+            openpni::distributed::coreio::ListmodeWriterOptions opts;
+            opts.backend = openpni::distributed::coreio::IOBackendContext::Get().listmodeWriter;
+            opts.totalCrystals = totalCrystals;
+            m_promptWriter = std::make_unique<openpni::distributed::coreio::ListmodeFileWriter>(std::move(opts));
+            m_promptWriter->Open(m_config.outputDir + "/prompt.lmf");
         }
 
         if (m_config.saveDelay)
         {
-            m_delayWriter = std::make_unique<openpni::io::v1::listmode::ListmodeFileOutput>();
-            m_delayWriter->setBytes4CrystalIndex(openpni::io::v1::single::CrystalIndexType::UINT32);
-            m_delayWriter->setBytes4TimeValue1_2(openpni::io::v1::listmode::TimeValue1_2Type::INT16);
-            m_delayWriter->setTotalCrystalNum(totalCrystals);
-            m_delayWriter->open(m_config.outputDir + "/delay.lmf");
+            openpni::distributed::coreio::ListmodeWriterOptions opts;
+            opts.backend = openpni::distributed::coreio::IOBackendContext::Get().listmodeWriter;
+            opts.totalCrystals = totalCrystals;
+            m_delayWriter = std::make_unique<openpni::distributed::coreio::ListmodeFileWriter>(std::move(opts));
+            m_delayWriter->Open(m_config.outputDir + "/delay.lmf");
         }
     }
 
@@ -744,7 +744,7 @@ namespace openpni::distributed::streaming
     }
 
     void StreamingTimeAligner::saveCoincidenceResult(
-        openpni::io::v1::listmode::ListmodeFileOutput &output,
+        openpni::distributed::coreio::ListmodeFileWriter &output,
         std::span<Listmode const> coins)
     {
         if (coins.empty())
@@ -768,7 +768,10 @@ namespace openpni::distributed::streaming
         }
 
         std::lock_guard<std::mutex> lock(m_outputMutex);
-        output.appendSegment(listmodeData.data(), listmodeData.size(), 0, 0);
+        output.AppendSegment(
+            std::span<const openpni::v1::basic::Listmode_t>(listmodeData.data(), listmodeData.size()),
+            0,
+            0);
     }
 
     void StreamingTimeAligner::flushRemaining()

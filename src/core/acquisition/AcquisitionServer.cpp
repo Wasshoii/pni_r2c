@@ -165,8 +165,7 @@ namespace openpni::distributed::acquisition
         // 写入数据
         if (writer_)
         {
-            // appendSegment 返回 bool 表示是否成功（如磁盘满则返回 false）
-            if (writer_->appendSegment(data))
+            if (writer_->AppendSegment(data))
             {
                 current_size_ += chunk_size;
                 return true;
@@ -198,14 +197,15 @@ namespace openpni::distributed::acquisition
         std::string filename = std::format("raw_{}_{:04d}.raw", timestamp, file_seq_++);
         current_path_ = (session_dir_ / filename).string();
 
-        writer_ = std::make_unique<openpni::io::v1::RawFileOutput>();
-        // 设置保留空间，避免撑爆磁盘
-        writer_->setReservedBytes(config_.total_reserved_gib * 1024ull * 1024ull * 1024ull);
-        writer_->setChannelNum(config_.channel_num);
+        openpni::distributed::coreio::RawDataWriterOptions options;
+        options.backend = openpni::distributed::coreio::IOBackendContext::Get().rawdataWriter;
+        options.io.reservedBytes = config_.total_reserved_gib * 1024ull * 1024ull * 1024ull;
+        options.channelNum = config_.channel_num;
+        writer_ = std::make_unique<openpni::distributed::coreio::RawDataFileWriter>(std::move(options));
 
         try
         {
-            writer_->open(current_path_);
+            writer_->Open(current_path_);
             current_size_ = 0;
         }
         catch (const std::exception &e)

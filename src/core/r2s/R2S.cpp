@@ -82,7 +82,7 @@ namespace openpni::distributed::r2s
     }
 
     bool appendSinglesToSingleFile(
-        openpni::io::v1::single::SingleFileOutput &outputFile,
+        openpni::distributed::coreio::SinglesFileWriter &outputFile,
         std::span<Single const> singles,
         uint32_t crystalsPerChannel,
         uint64_t clock_ms,
@@ -96,8 +96,10 @@ namespace openpni::distributed::r2s
         try
         {
             auto globalSingles = convertLocalToGlobalSingles(singles, crystalsPerChannel);
-            return outputFile.appendSegment(globalSingles.data(), globalSingles.size(),
-                                            clock_ms, duration_ms);
+            return outputFile.AppendSegment(
+                std::span<const openpni::v1::basic::GlobalSingle_t>(globalSingles.data(), globalSingles.size()),
+                clock_ms,
+                duration_ms);
         }
         catch (const std::exception &e)
         {
@@ -106,18 +108,27 @@ namespace openpni::distributed::r2s
         }
     }
 
-    openpni::interface::SingleGenerator *createSingleGenerator(
+    openpni::interface::ISingleGenerator *createSingleGenerator(
         DetectorType type,
         uint16_t channelIndex,
         const std::string &calibrationFile)
     {
-        openpni::interface::SingleGenerator *generator = nullptr;
+        openpni::interface::ISingleGenerator *generator = nullptr;
 
         switch (type)
         {
         case DetectorType::BDM2:
             generator = new openpni::BDM2R2S();
             break;
+        case DetectorType::BDM50100:
+        {
+            auto *g50100 = new openpni::device::bdm50100_v2::BDM50100R2S();
+            openpni::device::bdm50100_v2::BDM50100R2SParams params{};
+            params.__deviceId = 0;
+            g50100->setParams(params);
+            generator = g50100;
+            break;
+        }
         default:
             throw std::runtime_error("Unknown detector type");
         }
@@ -140,12 +151,10 @@ namespace openpni::distributed::r2s
 
     bool AsyncSingleFileWriter::open(const std::string &filePath, uint32_t totalCrystals)
     {
-        m_output = std::make_unique<openpni::io::v1::single::SingleFileOutput>();
-        m_output->setBytes4CrystalIndex(openpni::io::v1::single::CrystalIndexType::UINT32);
-        m_output->setBytes4TimeValue(openpni::io::v1::single::TimeValueType::UINT64);
-        m_output->setBytes4Energy(openpni::io::v1::single::EnergyType::FLT32);
-        m_output->setTotalCrystalNum(totalCrystals);
-        m_output->open(filePath);
+        openpni::distributed::coreio::SingleWriterOptions opts;
+        opts.backend = openpni::distributed::coreio::IOBackendContext::Get().singlesWriter;
+        m_output = std::make_unique<openpni::distributed::coreio::SinglesFileWriter>(std::move(opts));
+        m_output->Open(filePath, totalCrystals);
 
         m_running = true;
         m_writerThread = std::thread([this]
@@ -229,9 +238,8 @@ namespace openpni::distributed::r2s
 
             if (!task.singles.empty())
             {
-                bool success = m_output->appendSegment(
-                    task.singles.data(),
-                    task.singles.size(),
+                bool success = m_output->AppendSegment(
+                    std::span<const openpni::v1::basic::GlobalSingle_t>(task.singles.data(), task.singles.size()),
                     task.clock_ms,
                     task.duration_ms);
 
@@ -273,8 +281,25 @@ namespace openpni::distributed::r2s
 
         try
         {
+            const auto detectorTypeName = [this]() -> const char *
+            {
+                switch (m_config.detectorType)
+                {
+                case DetectorType::BDM2:
+                    return "BDM2";
+                case DetectorType::BDM50100:
+                    return "BDM50100";
+                case DetectorType::BDM100100:
+                    return "BDM100100";
+                case DetectorType::BDMBiD:
+                    return "BDMBiD";
+                default:
+                    return "Unknown";
+                }
+            };
+
             LOG(INFO) << "Starting R2S processing...";
-            LOG(INFO) << "Detector: " << (m_config.detectorType == DetectorType::BDM2 ? "BDM2" : "BDMBiD");
+            LOG(INFO) << "Detector: " << detectorTypeName();
             if (m_inputChannelNum > 0)
             {
                 LOG(INFO) << "Input channels: " << m_inputChannelNum;
@@ -606,12 +631,10 @@ namespace openpni::distributed::r2s
             }
             else
             {
-                m_singleOutput = std::make_unique<openpni::io::v1::single::SingleFileOutput>();
-                m_singleOutput->setBytes4CrystalIndex(openpni::io::v1::single::CrystalIndexType::UINT32);
-                m_singleOutput->setBytes4TimeValue(openpni::io::v1::single::TimeValueType::UINT64);
-                m_singleOutput->setBytes4Energy(openpni::io::v1::single::EnergyType::FLT32);
-                m_singleOutput->setTotalCrystalNum(totalCrystals);
-                m_singleOutput->open(m_outputFilePath);
+                openpni::distributed::coreio::SingleWriterOptions opts;
+                opts.backend = openpni::distributed::coreio::IOBackendContext::Get().singlesWriter;
+                m_singleOutput = std::make_unique<openpni::distributed::coreio::SinglesFileWriter>(std::move(opts));
+                m_singleOutput->Open(m_outputFilePath, totalCrystals);
                 LOG(INFO) << "Output file (sync): " << m_outputFilePath;
             }
 
@@ -858,12 +881,13 @@ namespace openpni::distributed::r2s
     {
         try
         {
-            auto mRawFileInput = std::make_unique<openpni::io::v1::RawFileInput>();
-            mRawFileInput->open(config.rawdataPath);
+            openpni::distributed::coreio::RawDataFileReader rawFileInput(
+                openpni::distributed::coreio::IOBackendContext::Get().rawdataReader);
+            rawFileInput.Open(config.rawdataPath);
 
-            auto header = mRawFileInput->header();
-            auto channelNum = header.channelNum;
-            auto segmentNum = header.segmentNum;
+            const auto &info = rawFileInput.Info();
+            auto channelNum = info.channelNum;
+            auto segmentNum = info.segmentNum;
 
             LOG(INFO) << "Channels: " << channelNum;
             LOG(INFO) << "Segments: " << segmentNum;
@@ -877,11 +901,8 @@ namespace openpni::distributed::r2s
             LOG(INFO) << "Processing " << segmentNum << " segments...";
             for (uint64_t i = 0; i < segmentNum; i++)
             {
-                auto segment = mRawFileInput->readSegment(i, i + 1);
-                auto segHeader = mRawFileInput->segmentHeader(i);
-                auto view = segment.view(header, segHeader);
-                view.clock_ms = segHeader.clock;
-                view.duration_ms = segHeader.duration;
+                auto segment = rawFileInput.ReadSegment(static_cast<uint32_t>(i), static_cast<uint32_t>(i + 1));
+                auto view = segment.View();
 
                 if (!processor.processSegment(view))
                 {
@@ -915,6 +936,26 @@ namespace openpni::distributed::r2s
         config.r2sResultIndex = 0;
         config.outputFileName = outputFileName;
         config.channelNums = 48;
+        config.channelIndices = channelIndices;
+        return config;
+    }
+
+    R2SProcessConfig createBDM50100Config(
+        const std::string &rawdataPath,
+        const std::string &resultPath,
+        const std::vector<std::string> &calibrationFiles,
+        std::string outputFileName,
+        const std::vector<uint16_t> &channelIndices)
+    {
+        R2SProcessConfig config;
+        config.rawdataPath = rawdataPath;
+        config.resultPath = resultPath;
+        config.calibrationFiles = calibrationFiles;
+        config.detectorType = DetectorType::BDM50100;
+        config.crystalsPerChannel = 6 * 6 * 8;
+        config.r2sResultIndex = 2;
+        config.outputFileName = outputFileName;
+        config.channelNums = static_cast<uint16_t>(calibrationFiles.empty() ? 0 : calibrationFiles.size());
         config.channelIndices = channelIndices;
         return config;
     }

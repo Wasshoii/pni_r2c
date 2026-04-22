@@ -18,8 +18,7 @@
 #include <stdexcept>
 
 #include <pni/node/Acquisition.hpp>
-#include <pni/io/IO.hpp>
-#include <pni/io/v1/V1.hpp>
+#include "core/io/IOAdapter.hpp"
 #include "protos/acquisition.pb.h"
 
 namespace openpni::distributed::acquisition
@@ -100,7 +99,7 @@ namespace openpni::distributed::acquisition
 
         StorageConfig config_;
         fs::path session_dir_;
-        std::unique_ptr<openpni::io::v1::RawFileOutput> writer_;
+        std::unique_ptr<openpni::distributed::coreio::RawDataFileWriter> writer_;
         size_t current_size_;
         int file_seq_;
         std::string current_path_;

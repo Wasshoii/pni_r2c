@@ -4,7 +4,7 @@
 
 #include <cstdint>
 #include <pni/io/IO.hpp>
-#include <pni/io/v1/V1.hpp>
+#include "core/io/IOAdapter.hpp"
 #include <pni/node/Coincidence.hpp>
 #include <pni/tools/Parallel.hpp>
 #include <pni/CudaPtr.hpp>
@@ -190,7 +190,7 @@ namespace openpni::distributed::streaming
         void processingLoop();
         void processCoincidence(const std::vector<GlobalSingle> &singles);
         void saveCoincidenceResult(
-            openpni::io::v1::listmode::ListmodeFileOutput &output,
+            openpni::distributed::coreio::ListmodeFileWriter &output,
             std::span<Listmode const> coins);
         void flushRemaining();
 
@@ -203,8 +203,8 @@ namespace openpni::distributed::streaming
         openpni::tools::UniPtr<Single> m_singleBuffer{"StreamingTimeAligner_singles"};
         openpni::tools::UniPtr<Listmode> m_coinBuffer{"StreamingTimeAligner_coins"};
 
-        std::unique_ptr<openpni::io::v1::listmode::ListmodeFileOutput> m_promptWriter;
-        std::unique_ptr<openpni::io::v1::listmode::ListmodeFileOutput> m_delayWriter;
+        std::unique_ptr<openpni::distributed::coreio::ListmodeFileWriter> m_promptWriter;
+        std::unique_ptr<openpni::distributed::coreio::ListmodeFileWriter> m_delayWriter;
         std::mutex m_outputMutex;
 
         std::thread m_processorThread;

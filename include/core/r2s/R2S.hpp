@@ -4,10 +4,12 @@
 
 #include <cstdint>
 #include <pni/io/IO.hpp>
-#include <pni/io/v1/V1.hpp>
+#include <pni/io/v1/PetDataType_v1.h>
+#include "core/io/IOAdapter.hpp"
 // #include <pni/node/BDMBiDR2S.hpp>
 
 #include <pni/node/BDM2R2S.hpp>
+#include <pni/detector/bdm50100/BDM50100R2S.hpp>
 #include <pni/node/ConvergedR2S.hpp>
 #include <pni/node/Coincidence.hpp>
 #include "tools/SinglesProcess.hpp"
@@ -86,6 +88,8 @@ namespace openpni::distributed::r2s
     {
         BDM2,
         BDMBiD, // 已在pni-core中移除
+        BDM50100,
+        BDM100100,
         Unknown
     };
 
@@ -99,7 +103,7 @@ namespace openpni::distributed::r2s
         std::vector<std::string> calibrationFiles; // 校准文件列表
         DetectorType detectorType;                 // 探测器类型
         uint32_t crystalsPerChannel;               // 每个通道的晶体数
-        uint32_t r2sResultIndex;                   // R2S结果数组中的目标索引 (BDM2=0, BDMBiD=1)
+        uint32_t r2sResultIndex;                   // R2S结果数组中的目标索引（由 ConvergedR2S 注册顺序决定）
         std::string outputFileName;                // 输出文件名
         u_int16_t channelNums;                     // 通道总数
         std::vector<uint16_t> channelIndices;      // 要处理的通道索引列表（空则处理所有通道）
@@ -170,12 +174,12 @@ namespace openpni::distributed::r2s
         /**
          * @brief 获取底层输出文件对象（用于同步写入模式）
          */
-        openpni::io::v1::single::SingleFileOutput *getOutput() { return m_output.get(); }
+        openpni::distributed::coreio::SinglesFileWriter *getOutput() { return m_output.get(); }
 
     private:
         void writerLoop();
 
-        std::unique_ptr<openpni::io::v1::single::SingleFileOutput> m_output;
+        std::unique_ptr<openpni::distributed::coreio::SinglesFileWriter> m_output;
         std::thread m_writerThread;
         std::queue<AsyncWriteTask> m_queue;
         std::mutex m_mutex;
@@ -199,7 +203,7 @@ namespace openpni::distributed::r2s
      * @brief 追加单事件数据到 Single 文件（标准格式）
      */
     bool appendSinglesToSingleFile(
-        openpni::io::v1::single::SingleFileOutput &outputFile,
+        openpni::distributed::coreio::SinglesFileWriter &outputFile,
         std::span<Single const> singles,
         uint32_t crystalsPerChannel,
         uint64_t clock_ms,
@@ -208,7 +212,7 @@ namespace openpni::distributed::r2s
     /**
      * @brief 创建指定类型的 SingleGenerator
      */
-    openpni::interface::SingleGenerator *createSingleGenerator(
+    openpni::interface::ISingleGenerator *createSingleGenerator(
         DetectorType type,
         uint16_t channelIndex,
         const std::string &calibrationFile);
@@ -465,10 +469,10 @@ namespace openpni::distributed::r2s
         bool m_hadError = false;
 
         std::vector<uint16_t> m_channelsToProcess;
-        std::vector<openpni::interface::SingleGenerator *> m_generatorsVector;
+        std::vector<openpni::interface::ISingleGenerator *> m_generatorsVector;
         openpni::ConvergedR2S m_r2s;
 
-        std::unique_ptr<openpni::io::v1::single::SingleFileOutput> m_singleOutput;
+        std::unique_ptr<openpni::distributed::coreio::SinglesFileWriter> m_singleOutput;
         std::unique_ptr<AsyncSingleFileWriter> m_asyncWriter;
         std::string m_outputFilePath;
 
@@ -557,6 +561,16 @@ namespace openpni::distributed::r2s
      * @brief 创建 BDM2 处理配置
      */
     R2SProcessConfig createBDM2Config(
+        const std::string &rawdataPath,
+        const std::string &resultPath,
+        const std::vector<std::string> &calibrationFiles,
+        std::string outputFileName = "singles",
+        const std::vector<uint16_t> &channelIndices = {});
+
+    /**
+     * @brief 创建 BDM50100 处理配置
+     */
+    R2SProcessConfig createBDM50100Config(
         const std::string &rawdataPath,
         const std::string &resultPath,
         const std::vector<std::string> &calibrationFiles,

@@ -36,19 +36,42 @@ namespace
         g_stopRequested.store(true, std::memory_order_relaxed);
     }
 
-    std::vector<std::string> buildCalibrationFiles(const std::string &calibrationDir)
+    std::vector<std::string> buildCalibrationFiles(const std::string &calibrationPath)
     {
         std::vector<std::string> files;
         files.reserve(48);
+
+        const fs::path path(calibrationPath);
+        if (fs::is_regular_file(path))
+        {
+            for (int i = 0; i < 48; ++i)
+            {
+                files.push_back(path.string());
+            }
+            return files;
+        }
 
         for (int i = 0; i < 48; ++i)
         {
             std::ostringstream oss;
             oss << "channel_" << std::setw(2) << std::setfill('0') << i << ".data";
-            files.push_back((fs::path(calibrationDir) / oss.str()).string());
+            files.push_back((path / oss.str()).string());
         }
 
         return files;
+    }
+
+    r2s::DetectorType parseDetectorType(const std::string &value)
+    {
+        if (value == "BDM2")
+        {
+            return r2s::DetectorType::BDM2;
+        }
+        if (value == "BDM50100")
+        {
+            return r2s::DetectorType::BDM50100;
+        }
+        return r2s::DetectorType::Unknown;
     }
 
     void printUsage(const char *prog)
@@ -227,12 +250,31 @@ int main(int argc, char **argv)
 
     streaming::CoincidenceClient coinClient(coinClientConfig);
 
-    auto r2sConfig = r2s::createBDM2Config(
-        "",
-        cfg.r2s.resultDir,
-        calibrationFiles,
-        cfg.acqNode.nodeId,
-        cfg.r2s.channelIndices);
+    const auto detectorType = parseDetectorType(cfg.coinClient.detectorType);
+    r2s::R2SProcessConfig r2sConfig;
+    switch (detectorType)
+    {
+    case r2s::DetectorType::BDM2:
+        r2sConfig = r2s::createBDM2Config(
+            "",
+            cfg.r2s.resultDir,
+            calibrationFiles,
+            cfg.acqNode.nodeId,
+            cfg.r2s.channelIndices);
+        break;
+    case r2s::DetectorType::BDM50100:
+        r2sConfig = r2s::createBDM50100Config(
+            "",
+            cfg.r2s.resultDir,
+            calibrationFiles,
+            cfg.acqNode.nodeId,
+            cfg.r2s.channelIndices);
+        break;
+    default:
+        std::cerr << "[AcqR2SNode] unsupported detectorType for R2S: " << cfg.coinClient.detectorType << std::endl;
+        return 2;
+    }
+
     r2sConfig.sortDataByTime = cfg.r2s.sortDataByTime;
     r2sConfig.saveData2SingleFile = cfg.r2s.saveData2SingleFile;
     r2sConfig.asyncFileWrite = cfg.r2s.asyncFileWrite;

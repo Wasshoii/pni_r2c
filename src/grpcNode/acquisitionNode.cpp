@@ -1,39 +1,93 @@
 #include "grpcNode/acquisitionNode.hpp"
 
+#include "core/acquisition/AcquisitionServer.hpp"
+
+#include "protos/acquisition.grpc.pb.h"
+
 #include <grpcpp/grpcpp.h>
+#include <grpcpp/support/sync_stream.h>
+
+#include <glog/logging.h>
 
 #include <algorithm>
 #include <arpa/inet.h>
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <ifaddrs.h>
 #include <iostream>
 #include <memory>
 #include <mutex>
-#include <net/if.h>
-#include <netinet/in.h>
 #include <optional>
 #include <set>
 #include <sstream>
-#include <stdexcept>
+#include <sys/sysinfo.h>
 #include <thread>
 #include <unordered_map>
-#include <utility>
-#include <vector>
-#include <glog/logging.h>
-
-#include <sys/sysinfo.h>
-#include <unistd.h>
-
-#include "core/acquisition/AcquisitionServer.hpp"
-#include "protos/acquisition.grpc.pb.h"
 
 namespace openpni::distributed::grpcnode
 {
     namespace acqproto = openpni::distributed::acquisition;
+
+    namespace
+    {
+        std::vector<std::string> splitList(const std::string &value)
+        {
+            std::vector<std::string> items;
+            std::string current;
+            for (char ch : value)
+            {
+                if (ch == ',' || ch == ';')
+                {
+                    if (!current.empty())
+                    {
+                        items.push_back(current);
+                        current.clear();
+                    }
+                    continue;
+                }
+                current.push_back(ch);
+            }
+            if (!current.empty())
+            {
+                items.push_back(current);
+            }
+            return items;
+        }
+
+        std::optional<acqproto::StorageConfig::ShardStrategy> parseShardStrategy(const std::string &value)
+        {
+            if (value.empty())
+            {
+                return std::nullopt;
+            }
+            if (value == "HashByChannel" || value == "hashbychannel" || value == "HASHBYCHANNEL")
+            {
+                return acqproto::StorageConfig::ShardStrategy::HashByChannel;
+            }
+            if (value == "FreeSpaceAware" || value == "freespaceaware" || value == "FREESPACEAWARE")
+            {
+                return acqproto::StorageConfig::ShardStrategy::FreeSpaceAware;
+            }
+            if (value == "RoundRobin" || value == "roundrobin" || value == "ROUNDROBIN")
+            {
+                return acqproto::StorageConfig::ShardStrategy::RoundRobin;
+            }
+            return std::nullopt;
+        }
+
+        template <typename T>
+        void applyEnvIfEmpty(const char *name, T &target)
+        {
+            if (const char *value = std::getenv(name); value && value[0] != '\0')
+            {
+                target = value;
+            }
+        }
+    }
 
     class AcquisitionGrpcNode::Impl
     {
@@ -53,9 +107,7 @@ namespace openpni::distributed::grpcnode
         class NodeRuntimeImpl final : public INodeRuntime
         {
         public:
-            NodeRuntimeImpl(
-                openpni::AcquisitionInfo acqInfo,
-                acqproto::StorageConfig storageConfig)
+            NodeRuntimeImpl(openpni::AcquisitionInfo acqInfo, acqproto::StorageConfig storageConfig)
                 : m_node(std::make_unique<acqproto::DistributedAcquisitionNode<AlgoType>>(std::move(acqInfo), std::move(storageConfig)))
             {
             }
@@ -630,6 +682,42 @@ namespace openpni::distributed::grpcnode
             storageConfig.total_reserved_gib =
                 task.reserved_storage_gib() > 0 ? task.reserved_storage_gib() : init_.reservedStorageGiB;
             storageConfig.enable_raw_file_write = init_.enableRawFileWrite;
+            storageConfig.output_roots = init_.outputRoots;
+            storageConfig.manifest_filename = init_.manifestFilename;
+            storageConfig.async_queue_depth = init_.asyncQueueDepth;
+            storageConfig.writer_threads_per_shard = init_.writerThreadsPerShard;
+            storageConfig.use_spill_to_disk = init_.useSpillToDisk;
+            storageConfig.fail_on_queue_full = init_.failOnQueueFull;
+            storageConfig.fsync_each_segment = init_.fsyncEachSegment;
+
+            if (const auto parsed = parseShardStrategy(init_.shardStrategy); parsed.has_value())
+            {
+                storageConfig.shard_strategy = parsed.value();
+            }
+
+            if (storageConfig.output_roots.empty())
+            {
+                if (const char *roots = std::getenv("PNI_R2C_RAW_OUTPUT_ROOTS"); roots && roots[0] != '\0')
+                {
+                    storageConfig.output_roots = splitList(roots);
+                }
+            }
+
+            applyEnvIfEmpty("PNI_R2C_RAW_MANIFEST_FILENAME", storageConfig.manifest_filename);
+
+            if (const char *strategy = std::getenv("PNI_R2C_RAW_SHARD_STRATEGY"); strategy && strategy[0] != '\0')
+            {
+                const auto parsed = parseShardStrategy(strategy);
+                if (parsed.has_value())
+                {
+                    storageConfig.shard_strategy = parsed.value();
+                }
+            }
+
+            if (const char *queueDepth = std::getenv("PNI_R2C_RAW_ASYNC_QUEUE_DEPTH"); queueDepth && queueDepth[0] != '\0')
+            {
+                storageConfig.async_queue_depth = static_cast<size_t>(std::strtoull(queueDepth, nullptr, 10));
+            }
 
             logConfigureDetails(task, storageConfig);
 

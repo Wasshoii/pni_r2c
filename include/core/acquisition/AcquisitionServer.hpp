@@ -19,6 +19,7 @@
 
 #include <pni/node/Acquisition.hpp>
 #include "core/io/IOAdapter.hpp"
+#include "core/io/RawFileOutputFactory.hpp"
 #include "protos/acquisition.pb.h"
 
 namespace openpni::distributed::acquisition
@@ -35,6 +36,21 @@ namespace openpni::distributed::acquisition
         uint64_t total_reserved_gib = 20;  // 磁盘保留空间 (GiB)
         uint16_t channel_num = 0;          // 通道数（自动填充）
         bool enable_raw_file_write = true; // 是否写 raw 文件，false 时仅通过内存回调输出
+        // Sharding options: 如果 output_roots 非空，将启用分盘写入（每个 entry 为一个 SSD 根目录）
+        std::vector<std::string> output_roots; // 多盘根目录列表，优先于 output_root
+        enum class ShardStrategy
+        {
+            RoundRobin,
+            HashByChannel,
+            FreeSpaceAware
+        } shard_strategy = ShardStrategy::RoundRobin;
+
+        size_t writer_threads_per_shard = 1;
+        size_t async_queue_depth = 1024; // 每节点总队列深度
+        bool use_spill_to_disk = false;  // 队列满时是否临时溢写到本地 journal
+        bool fail_on_queue_full = true;  // 队列满时是否阻塞/报错（强一致）
+        bool fsync_each_segment = true;  // 是否在段写入后强制 fsync
+        std::string manifest_filename = "session_manifest.jsonl";
     };
 
     // 采集节点配置，用于生成 AcquisitionInfo
@@ -78,8 +94,19 @@ namespace openpni::distributed::acquisition
     // 辅助函数：创建 AcquisitionInfo
     openpni::AcquisitionInfo MakeAcquisitionInfo(const NodeAcquisitionConfig &config);
 
-    // 滚动文件写入器
-    class RollingRawFileOutput
+    // 抽象写入器接口
+    class IRawFileOutput
+    {
+    public:
+        using FileReadyCallback = std::function<void(const std::string &)>;
+        virtual ~IRawFileOutput() = default;
+        virtual void SetFileReadyCallback(FileReadyCallback cb) = 0;
+        virtual bool Write(const openpni::RawDataView &data) = 0;
+        virtual void Stop() = 0;
+    };
+
+    // 滚动文件写入器（向后兼容，继承自 IRawFileOutput）
+    class RollingRawFileOutput : public IRawFileOutput
     {
     public:
         // 回调函数：当一个文件写满并关闭时调用，参数为文件绝对路径
@@ -88,9 +115,9 @@ namespace openpni::distributed::acquisition
         explicit RollingRawFileOutput(const StorageConfig &config);
         ~RollingRawFileOutput();
 
-        void SetFileReadyCallback(FileReadyCallback cb);
-        bool Write(const openpni::RawDataView &data);
-        void Stop();
+        void SetFileReadyCallback(FileReadyCallback cb) override;
+        bool Write(const openpni::RawDataView &data) override;
+        void Stop() override;
 
     private:
         void Rotate();
@@ -131,7 +158,7 @@ namespace openpni::distributed::acquisition
         }
 
         // 设置文件完成回调（连接到 R2S 转换模块）
-        void SetFileCompleteCallback(RollingRawFileOutput::FileReadyCallback cb)
+        void SetFileCompleteCallback(IRawFileOutput::FileReadyCallback cb)
         {
             file_ready_callback_ = cb;
         }
@@ -169,7 +196,7 @@ namespace openpni::distributed::acquisition
             // 初始化 writer（可选）
             if (storage_config_.enable_raw_file_write)
             {
-                writer_ = std::make_unique<RollingRawFileOutput>(storage_config_);
+                writer_ = openpni::distributed::coreio::CreateRawFileOutput(storage_config_);
                 if (file_ready_callback_)
                 {
                     writer_->SetFileReadyCallback(file_ready_callback_);
@@ -424,8 +451,8 @@ namespace openpni::distributed::acquisition
 
         AcquisitionInfo acq_info_;
         StorageConfig storage_config_;
-        std::unique_ptr<RollingRawFileOutput> writer_;
-        RollingRawFileOutput::FileReadyCallback file_ready_callback_;
+        std::unique_ptr<IRawFileOutput> writer_;
+        IRawFileOutput::FileReadyCallback file_ready_callback_;
         RawDataReadyCallback raw_data_ready_callback_;
         StatusReportCallback status_report_callback_;
 

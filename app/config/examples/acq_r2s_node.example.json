@@ -4,9 +4,22 @@
     "nodeId": "acq-r2s-node-1",
     "nodeAddress": "127.0.0.1",
     "outputRoot": "Data/raw_data",
+    "outputRoots": [
+      "Data/raw_data_disk1",
+      "Data/raw_data_disk2"
+    ],
+    "shardStrategy": "RoundRobin",
+    "manifestFilename": "session_manifest.jsonl",
     "sessionNamePrefix": "acq_r2s_node",
+    "maxFileSizeMb": 1024,
+    "reservedStorageGiB": 20,
     "statusIntervalMs": 500,
-    "enableRawFileWrite": false
+    "enableRawFileWrite": false,
+    "asyncQueueDepth": 1024,
+    "writerThreadsPerShard": 1,
+    "useSpillToDisk": true,
+    "failOnQueueFull": false,
+    "fsyncEachSegment": true
   },
   "r2s": {
     "calibrationDir": "Data/bdm2/calibration",

@@ -24,8 +24,8 @@ option(R2C_BUILD_TEST_ACQ_R2S_PIPELINE "Build acquisition to R2S pipeline test (
 # Build options: Apps
 # - basic (libpni + tbb + openmp, no CUDA)
 option(R2C_BUILD_APP_COIN_MASTER "Build app coin master executable (requires libpni, tbb)" OFF)
-option(R2C_BUILD_APP_UDP_RAW_REPLAYER "Build app udp raw replayer executable (requires libpni)" OFF)
-option(R2C_BUILD_APP_DPDK_TX_REPLAYER "Build app DPDK tx replayer executable (requires libdpdk)" OFF)
+option(R2C_BUILD_TOOL_UDP_RAW_REPLAYER "Build tool udp raw replayer executable (requires libpni)" OFF)
+option(R2C_BUILD_TOOL_DPDK_TX_REPLAYER "Build tool DPDK tx replayer executable (requires libdpdk)" OFF)
 
 # - cuda (nvcc + libpni + tbb + openmp)
 option(R2C_BUILD_APP_ACQ_R2S_NODE "Build app acquisition+r2s node executable (requires libpni, nvcc, tbb)" OFF)
@@ -72,6 +72,9 @@ endif()
 
 message(STATUS "Using protoc: ${R2C_PROTOC_EXECUTABLE}")
 message(STATUS "Using grpc_cpp_plugin: ${R2C_GRPC_CPP_PLUGIN_EXECUTABLE}")
+
+set(R2C_BIN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/bin")
+file(MAKE_DIRECTORY "${R2C_BIN_DIR}/app" "${R2C_BIN_DIR}/test" "${R2C_BIN_DIR}/tools")
 
 set(R2C_PROTO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/protos")
 set(R2C_PROTO_FILES
@@ -464,6 +467,8 @@ if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_ACQ_DATAPATH_UDP OR R2C_BUI
   if(NOT TARGET r2c_core_acq_objs)
     add_library(r2c_core_acq_objs OBJECT
       src/core/acquisition/AcquisitionServer.cpp
+      src/core/io/RawFileOutputFactory.cpp
+      src/core/io/ShardedRawFileOutput.cpp
     )
     target_include_directories(r2c_core_acq_objs
       PRIVATE
@@ -671,6 +676,8 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
   if(NOT TARGET r2c_core_acq_objs)
     add_library(r2c_core_acq_objs OBJECT
       src/core/acquisition/AcquisitionServer.cpp
+      src/core/io/RawFileOutputFactory.cpp
+      src/core/io/ShardedRawFileOutput.cpp
     )
     target_include_directories(r2c_core_acq_objs
       PRIVATE
@@ -904,19 +911,19 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
   endif()
 endif()
 
-if(R2C_BUILD_APP_UDP_RAW_REPLAYER)
+if(R2C_BUILD_TOOL_UDP_RAW_REPLAYER)
   pkg_check_modules(R2C_PNI REQUIRED IMPORTED_TARGET libpni)
   find_package(OpenMP REQUIRED)
 
-  add_executable(app_udp_raw_replayer
-    app/udp_raw_replayer_main.cpp
+  add_executable(tool_udp_raw_replayer
+    src/tools/udp_raw_replayer_main.cpp
   )
-  target_include_directories(app_udp_raw_replayer
+  target_include_directories(tool_udp_raw_replayer
     PRIVATE
       "${CMAKE_CURRENT_SOURCE_DIR}/include"
       "${CMAKE_CURRENT_SOURCE_DIR}/src"
   )
-  target_compile_options(app_udp_raw_replayer
+  target_compile_options(tool_udp_raw_replayer
     PRIVATE
       -Wall
       -Wextra
@@ -924,7 +931,7 @@ if(R2C_BUILD_APP_UDP_RAW_REPLAYER)
       -march=native
       -fopenmp
   )
-  target_link_libraries(app_udp_raw_replayer
+  target_link_libraries(tool_udp_raw_replayer
     PRIVATE
       PkgConfig::R2C_PNI
       PkgConfig::R2C_GRPC
@@ -934,30 +941,85 @@ if(R2C_BUILD_APP_UDP_RAW_REPLAYER)
   )
 endif()
 
-if(R2C_BUILD_APP_DPDK_TX_REPLAYER)
-  pkg_check_modules(R2C_DPDK REQUIRED IMPORTED_TARGET libdpdk)
+if(R2C_BUILD_TOOL_SHARDED_RAW_MERGE)
+  pkg_check_modules(R2C_PNI REQUIRED IMPORTED_TARGET libpni)
 
-  add_executable(app_dpdk_tx_replayer
-    app/dpdk_tx_replayer_main.cpp
+  add_executable(tool_sharded_raw_merge
+    src/tools/sharded_raw_merge_main.cpp
+    src/core/io/ShardedRawFileOutput.cpp
   )
-  target_include_directories(app_dpdk_tx_replayer
+  add_dependencies(tool_sharded_raw_merge r2c_proto_objs)
+  target_include_directories(tool_sharded_raw_merge
     PRIVATE
+      "${CMAKE_CURRENT_BINARY_DIR}/generated"
+      "${R2C_PROTO_GEN_DIR}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
       "${CMAKE_CURRENT_SOURCE_DIR}/include"
       "${CMAKE_CURRENT_SOURCE_DIR}/src"
   )
-  target_compile_options(app_dpdk_tx_replayer
+  target_compile_options(tool_sharded_raw_merge
     PRIVATE
       -Wall
       -Wextra
       -O3
       -march=native
   )
-  target_link_libraries(app_dpdk_tx_replayer
+  target_link_libraries(tool_sharded_raw_merge
+    PRIVATE
+      PkgConfig::R2C_PNI
+      dl
+  )
+endif()
+
+if(R2C_BUILD_TOOL_DPDK_TX_REPLAYER)
+  pkg_check_modules(R2C_DPDK REQUIRED IMPORTED_TARGET libdpdk)
+
+  add_executable(tool_dpdk_tx_replayer
+    src/tools/dpdk_tx_replayer_main.cpp
+  )
+  target_include_directories(tool_dpdk_tx_replayer
+    PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/include"
+      "${CMAKE_CURRENT_SOURCE_DIR}/src"
+  )
+  target_compile_options(tool_dpdk_tx_replayer
+    PRIVATE
+      -Wall
+      -Wextra
+      -O3
+      -march=native
+  )
+  target_link_libraries(tool_dpdk_tx_replayer
     PRIVATE
       PkgConfig::R2C_DPDK
       dl
   )
 endif()
+
+# Output directories
+function(r2c_set_output_dir target_name output_subdir)
+  if(TARGET ${target_name})
+    set_property(TARGET ${target_name} PROPERTY RUNTIME_OUTPUT_DIRECTORY "${R2C_BIN_DIR}/${output_subdir}")
+  endif()
+endfunction()
+
+r2c_set_output_dir(app_acq_r2s_node app)
+r2c_set_output_dir(app_coin_master app)
+
+r2c_set_output_dir(tool_sharded_raw_merge tools)
+r2c_set_output_dir(tool_udp_raw_replayer tools)
+r2c_set_output_dir(tool_dpdk_tx_replayer tools)
+
+r2c_set_output_dir(test_distributed_clock_sync test)
+r2c_set_output_dir(test_distributed_clock_sync_grpc test)
+r2c_set_output_dir(test_streaming_coincidence test)
+r2c_set_output_dir(test_local_grpc_coin test)
+r2c_set_output_dir(test_acquisition_control_init test)
+r2c_set_output_dir(test_acquisition_datapath_udp test)
+r2c_set_output_dir(test_pni_r2c test)
+r2c_set_output_dir(test_pni_coin test)
+r2c_set_output_dir(test_local_grpc_r2s test)
+r2c_set_output_dir(test_acquisition_r2s_pipeline test)
 
 # CTest registration: only register targets that are enabled and built.
 function(r2c_register_test target_name tier_label)

@@ -12,13 +12,21 @@ RawData 采集 -> R2S 单事件转换 -> 流式符合计算 -> 结果输出
 - 单元/集成测试与端到端测试
 
 ## 2. 快速开始
-### 2.1 构建帮助
+### 2.1 构建与测试
+构建统一使用 CMake + build.sh，Makefile 仅保留测试运行入口。
+
 ```bash
-make help
+# 一键构建 app/test/tools
+./build.sh --all
+
+# 仅构建测试
+./build.sh --tests
 ```
 
-### 2.2 常用命令
 ```bash
+# 查看测试入口
+make help
+
 # 基础测试
 make test
 make test-grpc
@@ -29,13 +37,11 @@ make test-local-grpc-coin
 make test-acq-control-init
 make test-acq-datapath-udp
 make test-acq-r2s-pipeline
-
-# 清理
-make clean
-make clean-proto
 ```
 
-### 2.3 依赖
+更详细的构建说明见 docs/BUILD_AND_SETUP.md。
+
+### 2.2 依赖
 - 基础：g++, grpc, protobuf
 - 完整：OpenPnI, CUDA Toolkit, TBB
 
@@ -103,7 +109,7 @@ make clean-proto
   - 状态机切换
   - 超时/异常分支
   - 端到端最小可运行路径
-- 提交前至少执行受影响目标的 `make` 命令。
+- 提交前至少执行受影响目标的构建与测试（`./build.sh --tests` + 对应 `make test-*`）。
 
 ## 5. 文档说明
 - 本 README 只保留项目总览与开发约定。

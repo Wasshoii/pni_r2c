@@ -31,10 +31,18 @@ namespace openpni::distributed::grpcnode
             std::string nodeAddress = "127.0.0.1";
 
             std::string outputRoot = "Data/raw_data";
+            std::vector<std::string> outputRoots;
+            std::string shardStrategy = "RoundRobin";
+            std::string manifestFilename = "session_manifest.jsonl";
             std::string sessionNamePrefix = "acq_session";
             size_t maxFileSizeMb = 1024;
             uint64_t reservedStorageGiB = 20;
             bool enableRawFileWrite = true;
+            size_t asyncQueueDepth = 1024;
+            size_t writerThreadsPerShard = 1;
+            bool useSpillToDisk = true;
+            bool failOnQueueFull = false;
+            bool fsyncEachSegment = true;
 
             uint32_t statusIntervalMs = 1000;
 

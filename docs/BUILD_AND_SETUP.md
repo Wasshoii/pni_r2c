@@ -51,20 +51,18 @@ pkg-config --cflags --libs grpc++ protobuf
 which protoc
 ```
 
-## 快速开始（makefile计划后续移除，转为cmake）
+## 快速开始（CMake 为唯一构建方式）
+若无其他测试需求，建议使用 build.sh 作为唯一的构建方式，若想要单独编译某些可执行程序，请参考下一章节
 
 ```bash
-# 查看全部目标
-make help
+# 一键构建 app/test/tools
+./build.sh --all
 
-# 基础构建（不依赖 PNI/CUDA）
-make
-
-# 完整构建（含 PNI/CUDA 相关目标）
-make all-full
+# 仅构建测试
+./build.sh --tests
 ```
 
-## CMake 迁移（tests/apps 分离架构）
+## CMake 单独编译（tests/apps 分离架构）
 
 当前仓库 CMake 预设已按“目标类型（tests/apps）+ 依赖层（core/pni/cuda）”分离，避免应用与测试混编。
 
@@ -126,7 +124,7 @@ ctest --test-dir build/tests/cuda -R test_local_grpc_r2s --output-on-failure
 ### Apps 预设（部署构建建议）
 
 1. Basic Apps（无 CUDA）
-- 目标：`app_coin_master`、`app_udp_raw_replayer`
+- 目标：`app_coin_master`、`app_udp_raw_replayer`、`tool_sharded_raw_merge`
 
 ```bash
 cmake --preset linux-release-apps-basic
@@ -134,12 +132,44 @@ cmake --build --preset build-apps-basic -j
 ```
 
 2. CUDA Apps
-- 目标：`app_acq_r2s_node`
+- 目标：`app_acq_r2s_node`、`tool_sharded_raw_merge`
 
 ```bash
 cmake --preset linux-release-apps-cuda
 cmake --build --preset build-apps-cuda -j
 ```
+
+3. 单独构建分盘合并工具
+
+```bash
+cmake -S . -B build/tools -DCMAKE_BUILD_TYPE=Release \
+	-DR2C_PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig \
+	-DR2C_BUILD_TOOL_SHARDED_RAW_MERGE=ON
+cmake --build build/tools -j --target tool_sharded_raw_merge
+```
+
+## 测试运行（Makefile 仅用于运行测试）
+
+Makefile 不再负责编译，仅保留测试运行入口。
+
+```bash
+# 查看测试入口
+make help
+
+# 运行 core 测试
+make test
+make test-grpc
+
+# 运行 PNI/CUDA 测试（非 integration）
+make all-full
+
+# 单项测试（示例）
+make test-streaming
+make test-pni-r2c
+make test-acq-control-init
+```
+
+说明：以上 make 命令会转发到 tests/Makefile，运行前请确保已执行 `./build.sh --tests` 完成构建。
 
 ## 常见问题
 

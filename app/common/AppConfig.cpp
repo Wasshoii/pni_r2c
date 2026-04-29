@@ -320,9 +320,29 @@ namespace openpni::distributed::app
                 {
                     return fail(err, "acqNode.outputRoot must be string");
                 }
+                if (!readStringArray(*sec, "outputRoots", &cfg->acqNode.outputRoots))
+                {
+                    return fail(err, "acqNode.outputRoots must be string array");
+                }
+                if (!readString(*sec, "shardStrategy", &cfg->acqNode.shardStrategy))
+                {
+                    return fail(err, "acqNode.shardStrategy must be string");
+                }
+                if (!readString(*sec, "manifestFilename", &cfg->acqNode.manifestFilename))
+                {
+                    return fail(err, "acqNode.manifestFilename must be string");
+                }
                 if (!readString(*sec, "sessionNamePrefix", &cfg->acqNode.sessionNamePrefix))
                 {
                     return fail(err, "acqNode.sessionNamePrefix must be string");
+                }
+                if (!readUInt(*sec, "maxFileSizeMb", &cfg->acqNode.maxFileSizeMb))
+                {
+                    return fail(err, "acqNode.maxFileSizeMb must be non-negative integer");
+                }
+                if (!readUInt(*sec, "reservedStorageGiB", &cfg->acqNode.reservedStorageGiB))
+                {
+                    return fail(err, "acqNode.reservedStorageGiB must be non-negative integer");
                 }
                 if (!readUInt(*sec, "statusIntervalMs", &cfg->acqNode.statusIntervalMs))
                 {
@@ -331,6 +351,26 @@ namespace openpni::distributed::app
                 if (!readBool(*sec, "enableRawFileWrite", &cfg->acqNode.enableRawFileWrite))
                 {
                     return fail(err, "acqNode.enableRawFileWrite must be bool");
+                }
+                if (!readUInt(*sec, "asyncQueueDepth", &cfg->acqNode.asyncQueueDepth))
+                {
+                    return fail(err, "acqNode.asyncQueueDepth must be non-negative integer");
+                }
+                if (!readUInt(*sec, "writerThreadsPerShard", &cfg->acqNode.writerThreadsPerShard))
+                {
+                    return fail(err, "acqNode.writerThreadsPerShard must be non-negative integer");
+                }
+                if (!readBool(*sec, "useSpillToDisk", &cfg->acqNode.useSpillToDisk))
+                {
+                    return fail(err, "acqNode.useSpillToDisk must be bool");
+                }
+                if (!readBool(*sec, "failOnQueueFull", &cfg->acqNode.failOnQueueFull))
+                {
+                    return fail(err, "acqNode.failOnQueueFull must be bool");
+                }
+                if (!readBool(*sec, "fsyncEachSegment", &cfg->acqNode.fsyncEachSegment))
+                {
+                    return fail(err, "acqNode.fsyncEachSegment must be bool");
                 }
             }
             return true;

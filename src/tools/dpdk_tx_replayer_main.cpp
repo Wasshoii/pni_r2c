@@ -399,172 +399,171 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    const uint16_t nbPorts = rte_eth_dev_count_avail();
-    if (opts.portId >= nbPorts)
+    const uint16_t portId = opts.portId;
+    if (portId >= rte_eth_dev_count_avail())
     {
-        std::cerr << "Invalid --port-id " << opts.portId << ", available ports=" << nbPorts << std::endl;
+        std::cerr << "Invalid port id: " << portId << std::endl;
         return 2;
     }
 
-    std::cout << "===========================================\n";
-    std::cout << "  App: DPDK TX UDP Replayer\n";
-    std::cout << "===========================================\n";
-    std::cout << "portId              : " << opts.portId << "\n";
-    std::cout << "sourceIp            : " << opts.sourceIp << "\n";
-    std::cout << "destinationIp       : " << opts.destinationIp << "\n";
-    std::cout << "destinationMac      : " << opts.destinationMac << "\n";
-    std::cout << "sourcePortBase      : " << opts.sourcePortBase << "\n";
-    std::cout << "destinationPortBase : " << opts.destinationPortBase << "\n";
-    std::cout << "channelCount        : " << opts.channelCount << "\n";
-    std::cout << "channelOffset       : " << opts.channelOffset << "\n";
-    std::cout << "payloadSize         : " << opts.payloadSize << "\n";
-    std::cout << "burstSize           : " << opts.burstSize << "\n";
-    std::cout << "pps                 : " << opts.pps << (opts.pps == 0 ? " (max)" : "") << "\n";
-    std::cout << "durationSec         : " << opts.durationSec << "\n";
+    if (rte_eth_dev_socket_id(portId) < 0)
+    {
+        std::cerr << "Invalid socket id for port: " << portId << std::endl;
+        return 2;
+    }
 
-    rte_mempool *mp = rte_pktmbuf_pool_create(
-        "dpdk_tx_replayer_pool",
+    rte_mempool *mbufPool = rte_pktmbuf_pool_create(
+        "tx_pool",
         opts.mbufCount,
         256,
         0,
         RTE_MBUF_DEFAULT_BUF_SIZE,
         rte_socket_id());
-    if (mp == nullptr)
+
+    if (mbufPool == nullptr)
     {
-        std::cerr << "rte_pktmbuf_pool_create failed" << std::endl;
-        return 3;
+        std::cerr << "Failed to create mbuf pool" << std::endl;
+        return 2;
     }
 
     rte_eth_conf portConf{};
-    const int confRc = rte_eth_dev_configure(opts.portId, 0, 1, &portConf);
-    if (confRc < 0)
+    portConf.txmode.mq_mode = RTE_ETH_MQ_TX_NONE;
+
+    if (rte_eth_dev_configure(portId, 0, 1, &portConf) < 0)
     {
-        std::cerr << "rte_eth_dev_configure failed: " << confRc << std::endl;
-        return 3;
+        std::cerr << "rte_eth_dev_configure failed" << std::endl;
+        return 2;
     }
 
-    const int txqRc = rte_eth_tx_queue_setup(opts.portId, 0, 1024, rte_eth_dev_socket_id(opts.portId), nullptr);
-    if (txqRc < 0)
+    if (rte_eth_tx_queue_setup(portId, 0, 1024, rte_eth_dev_socket_id(portId), nullptr) < 0)
     {
-        std::cerr << "rte_eth_tx_queue_setup failed: " << txqRc << std::endl;
-        return 3;
+        std::cerr << "rte_eth_tx_queue_setup failed" << std::endl;
+        return 2;
     }
 
-    const int startRc = rte_eth_dev_start(opts.portId);
-    if (startRc < 0)
+    if (rte_eth_dev_start(portId) < 0)
     {
-        std::cerr << "rte_eth_dev_start failed: " << startRc << std::endl;
-        return 3;
+        std::cerr << "rte_eth_dev_start failed" << std::endl;
+        return 2;
     }
-
-    rte_eth_promiscuous_enable(opts.portId);
 
     rte_ether_addr srcMac{};
-    rte_eth_macaddr_get(opts.portId, &srcMac);
+    if (rte_eth_macaddr_get(portId, &srcMac) != 0)
+    {
+        std::cerr << "rte_eth_macaddr_get failed" << std::endl;
+        return 2;
+    }
+
+    std::cout << "===========================================\n";
+    std::cout << "  Tool: DPDK TX Replayer\n";
+    std::cout << "===========================================\n";
+    std::cout << "portId             : " << portId << "\n";
+    std::cout << "sourceIp           : " << opts.sourceIp << "\n";
+    std::cout << "destinationIp      : " << opts.destinationIp << "\n";
+    std::cout << "destinationMac     : " << opts.destinationMac << "\n";
+    std::cout << "sourcePortBase     : " << opts.sourcePortBase << "\n";
+    std::cout << "destinationPortBase: " << opts.destinationPortBase << "\n";
+    std::cout << "channelCount       : " << opts.channelCount << "\n";
+    std::cout << "channelOffset      : " << opts.channelOffset << "\n";
+    std::cout << "payloadSize        : " << opts.payloadSize << "\n";
+    std::cout << "burstSize          : " << opts.burstSize << "\n";
+    std::cout << "mbufCount          : " << opts.mbufCount << "\n";
+    std::cout << "durationSec        : " << opts.durationSec << "\n";
+    std::cout << "reportIntervalMs   : " << opts.reportIntervalMs << "\n";
+    std::cout << "pps                : " << opts.pps << "\n";
 
     std::signal(SIGINT, onSignal);
     std::signal(SIGTERM, onSignal);
 
-    const auto t0 = std::chrono::steady_clock::now();
-    auto tLast = t0;
-    uint64_t sentPkts = 0;
-    uint64_t sentBytes = 0;
-    uint64_t droppedPkts = 0;
-    uint64_t chSeq = 0;
+    const uint32_t totalChannels = opts.channelCount;
+    const uint16_t portSrcBase = opts.sourcePortBase;
+    const uint16_t portDstBase = opts.destinationPortBase;
+
+    auto start = std::chrono::steady_clock::now();
+    auto lastReport = start;
+
+    uint64_t totalSent = 0;
+    uint64_t totalBytes = 0;
+    uint64_t lastTotalSent = 0;
 
     while (!g_stop.load())
     {
-        const auto now = std::chrono::steady_clock::now();
-        const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - t0).count();
-        if (elapsed >= opts.durationSec)
+        auto now = std::chrono::steady_clock::now();
+        const auto elapsedSec = std::chrono::duration_cast<std::chrono::seconds>(now - start).count();
+        if (opts.durationSec > 0 && static_cast<uint32_t>(elapsedSec) >= opts.durationSec)
         {
             break;
         }
 
-        if (opts.pps > 0)
-        {
-            const double elapsedSec = std::chrono::duration<double>(now - t0).count();
-            const uint64_t shouldSend = static_cast<uint64_t>(elapsedSec * static_cast<double>(opts.pps));
-            if (sentPkts >= shouldSend)
-            {
-                std::this_thread::sleep_for(std::chrono::microseconds(50));
-                continue;
-            }
-        }
-
-        std::vector<rte_mbuf *> burst;
-        burst.reserve(opts.burstSize);
-
+        std::vector<rte_mbuf *> burst(opts.burstSize, nullptr);
+        uint16_t ready = 0;
         for (uint16_t i = 0; i < opts.burstSize; ++i)
         {
-            rte_mbuf *m = rte_pktmbuf_alloc(mp);
-            if (m == nullptr)
+            burst[i] = rte_pktmbuf_alloc(mbufPool);
+            if (!burst[i])
             {
-                droppedPkts += 1;
-                continue;
+                break;
             }
 
-            const uint16_t ch = static_cast<uint16_t>((chSeq % opts.channelCount) + opts.channelOffset);
-            const uint16_t srcPort = static_cast<uint16_t>(opts.sourcePortBase + ch);
-            const uint16_t dstPort = static_cast<uint16_t>(opts.destinationPortBase + ch);
-            const uint8_t fillByte = static_cast<uint8_t>(ch & 0xFF);
+            const uint16_t ch = static_cast<uint16_t>((totalSent + i) % totalChannels);
+            const uint16_t srcPort = static_cast<uint16_t>(portSrcBase + ch);
+            const uint16_t dstPort = static_cast<uint16_t>(portDstBase + ch);
+            const uint8_t fillByte = static_cast<uint8_t>((ch + opts.channelOffset) & 0xFFu);
 
-            if (!buildPacket(m, srcMac, dstMac, srcIp, dstIp, srcPort, dstPort, opts.payloadSize, fillByte))
-            {
-                rte_pktmbuf_free(m);
-                droppedPkts += 1;
-                continue;
-            }
-
-            burst.push_back(m);
-            chSeq += 1;
-        }
-
-        if (!burst.empty())
-        {
-            const uint16_t n = static_cast<uint16_t>(burst.size());
-            const uint16_t tx = rte_eth_tx_burst(opts.portId, 0, burst.data(), n);
-
-            for (uint16_t i = tx; i < n; ++i)
+            if (!buildPacket(burst[i], srcMac, dstMac, srcIp, dstIp, srcPort, dstPort, opts.payloadSize, fillByte))
             {
                 rte_pktmbuf_free(burst[i]);
-                droppedPkts += 1;
+                burst[i] = nullptr;
+                break;
             }
-
-            sentPkts += tx;
-            sentBytes += static_cast<uint64_t>(tx) * static_cast<uint64_t>(opts.payloadSize + sizeof(rte_udp_hdr));
+            ready += 1;
         }
 
-        const auto sinceLastMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - tLast).count();
-        if (sinceLastMs >= opts.reportIntervalMs)
+        if (ready == 0)
         {
-            const double sec = std::chrono::duration<double>(now - t0).count();
-            const double ppsNow = (sec > 0.0) ? (static_cast<double>(sentPkts) / sec) : 0.0;
-            const double mbpsNow = (sec > 0.0) ? ((static_cast<double>(sentBytes) * 8.0) / sec / 1e6) : 0.0;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
 
-            std::cout << "[DpdkTx] elapsed_s=" << sec
-                      << " sent_pkts=" << sentPkts
-                      << " dropped_pkts=" << droppedPkts
-                      << " avg_pps=" << ppsNow
-                      << " avg_mbps(l4)=" << mbpsNow
+        const uint16_t sent = rte_eth_tx_burst(portId, 0, burst.data(), ready);
+        for (uint16_t i = sent; i < ready; ++i)
+        {
+            rte_pktmbuf_free(burst[i]);
+        }
+
+        totalSent += sent;
+        totalBytes += static_cast<uint64_t>(sent) * opts.payloadSize;
+
+        if (opts.pps > 0)
+        {
+            const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastReport).count();
+            const uint64_t expected = (opts.pps * static_cast<uint64_t>(elapsedMs)) / 1000ull;
+            const uint64_t actual = totalSent - lastTotalSent;
+            if (actual > expected)
+            {
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+        }
+
+        if (opts.reportIntervalMs > 0 && now - lastReport >= std::chrono::milliseconds(opts.reportIntervalMs))
+        {
+            const double dt = std::chrono::duration<double>(now - lastReport).count();
+            const double pps = (totalSent - lastTotalSent) / dt;
+            std::cout << "[DPDK-TX] sent=" << totalSent
+                      << " pps=" << pps
+                      << " bytes=" << totalBytes
                       << std::endl;
-            tLast = now;
+            lastReport = now;
+            lastTotalSent = totalSent;
         }
     }
 
-    const double totalSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    const double avgPps = (totalSec > 0.0) ? (static_cast<double>(sentPkts) / totalSec) : 0.0;
-    const double avgMbps = (totalSec > 0.0) ? ((static_cast<double>(sentBytes) * 8.0) / totalSec / 1e6) : 0.0;
+    rte_eth_dev_stop(portId);
+    rte_eth_dev_close(portId);
 
-    std::cout << "[DpdkTx] finished elapsed_s=" << totalSec
-              << " sent_pkts=" << sentPkts
-              << " dropped_pkts=" << droppedPkts
-              << " avg_pps=" << avgPps
-              << " avg_mbps(l4)=" << avgMbps
+    std::cout << "[DPDK-TX] done, totalSent=" << totalSent
+              << " totalBytes=" << totalBytes
               << std::endl;
 
-    rte_eth_dev_stop(opts.portId);
-    rte_eth_dev_close(opts.portId);
-    rte_eal_cleanup();
     return 0;
 }

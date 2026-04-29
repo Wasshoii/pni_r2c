@@ -400,38 +400,22 @@ int main(int argc, char **argv)
 
     RawFileUdpReplayer replayer(opts);
 
-    uint64_t totalPackets = 0;
-    uint64_t totalBytes = 0;
-    uint64_t totalSkipped = 0;
-    uint64_t totalSegments = 0;
-
+    ReplayResult result;
     for (uint32_t i = 0; i < opts.repeat; ++i)
     {
-        ReplayResult r = replayer.replayOnce();
-        std::cout << "[UdpReplayer] round=" << (i + 1)
-                  << " success=" << (r.success ? "true" : "false")
-                  << " segments=" << r.replayedSegments
-                  << " packets=" << r.sentPackets
-                  << " bytes=" << r.sentBytes
-                  << " skipped=" << r.skippedPackets
-                  << std::endl;
-
-        if (!r.success)
+        result = replayer.replayOnce();
+        if (!result.success)
         {
-            return 2;
+            break;
         }
-
-        totalPackets += r.sentPackets;
-        totalBytes += r.sentBytes;
-        totalSkipped += r.skippedPackets;
-        totalSegments += r.replayedSegments;
     }
 
-    std::cout << "[UdpReplayer] total segments=" << totalSegments
-              << " packets=" << totalPackets
-              << " bytes=" << totalBytes
-              << " skipped=" << totalSkipped
+    std::cout << "[UdpReplayer] success=" << (result.success ? "true" : "false")
+              << " sentPackets=" << result.sentPackets
+              << " sentBytes=" << result.sentBytes
+              << " skippedPackets=" << result.skippedPackets
+              << " replayedSegments=" << result.replayedSegments
               << std::endl;
 
-    return 0;
+    return result.success ? 0 : 2;
 }

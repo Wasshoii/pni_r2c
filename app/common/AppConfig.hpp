@@ -12,9 +12,19 @@ namespace openpni::distributed::app
         std::string nodeId = "acq-r2s-node-0";
         std::string nodeAddress = "127.0.0.1";
         std::string outputRoot = "Data/raw_data";
+        std::vector<std::string> outputRoots;
+        std::string shardStrategy = "RoundRobin";
+        std::string manifestFilename = "session_manifest.jsonl";
         std::string sessionNamePrefix = "acq_r2s_node";
+        size_t maxFileSizeMb = 1024;
+        uint64_t reservedStorageGiB = 20;
         uint32_t statusIntervalMs = 500;
         bool enableRawFileWrite = false;
+        size_t asyncQueueDepth = 1024;
+        size_t writerThreadsPerShard = 1;
+        bool useSpillToDisk = true;
+        bool failOnQueueFull = false;
+        bool fsyncEachSegment = true;
     };
 
     struct R2SSection

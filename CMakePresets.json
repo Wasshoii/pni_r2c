@@ -72,8 +72,7 @@
         "R2C_BUILD_TEST_ACQ_CONTROL_INIT": "OFF",
         "R2C_BUILD_TEST_ACQ_DATAPATH_UDP": "OFF",
         "R2C_BUILD_TEST_ACQ_R2S_PIPELINE": "OFF",
-        "R2C_BUILD_APP_COIN_MASTER": "ON",
-        "R2C_BUILD_APP_UDP_RAW_REPLAYER": "ON"
+        "R2C_BUILD_APP_COIN_MASTER": "ON"
       }
     },
     {
@@ -96,6 +95,32 @@
         "R2C_BUILD_TEST_ACQ_DATAPATH_UDP": "OFF",
         "R2C_BUILD_TEST_ACQ_R2S_PIPELINE": "OFF",
         "R2C_BUILD_APP_ACQ_R2S_NODE": "ON"
+      }
+    },
+    {
+      "name": "linux-release-tools",
+      "displayName": "Linux Release (tools: libpni/dpdk utilities)",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/tools",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "/usr/bin/g++-13",
+        "R2C_PKG_CONFIG_PATH": "/usr/lib/x86_64-linux-gnu/pkgconfig",
+        "R2C_BUILD_TEST_BASIC": "OFF",
+        "R2C_BUILD_TEST_GRPC": "OFF",
+        "R2C_BUILD_TEST_STREAMING": "OFF",
+        "R2C_BUILD_TEST_PNI_R2C": "OFF",
+        "R2C_BUILD_TEST_PNI_COIN": "OFF",
+        "R2C_BUILD_TEST_LOCAL_GRPC_R2S": "OFF",
+        "R2C_BUILD_TEST_LOCAL_GRPC_COIN": "OFF",
+        "R2C_BUILD_TEST_ACQ_CONTROL_INIT": "OFF",
+        "R2C_BUILD_TEST_ACQ_DATAPATH_UDP": "OFF",
+        "R2C_BUILD_TEST_ACQ_R2S_PIPELINE": "OFF",
+        "R2C_BUILD_APP_COIN_MASTER": "OFF",
+        "R2C_BUILD_APP_ACQ_R2S_NODE": "OFF",
+        "R2C_BUILD_TOOL_SHARDED_RAW_MERGE": "ON",
+        "R2C_BUILD_TOOL_UDP_RAW_REPLAYER": "ON",
+        "R2C_BUILD_TOOL_DPDK_TX_REPLAYER": "ON"
       }
     }
   ],
@@ -132,8 +157,7 @@
       "name": "build-apps-basic",
       "configurePreset": "linux-release-apps-basic",
       "targets": [
-        "app_coin_master",
-        "app_udp_raw_replayer"
+        "app_coin_master"
       ]
     },
     {
@@ -141,6 +165,15 @@
       "configurePreset": "linux-release-apps-cuda",
       "targets": [
         "app_acq_r2s_node"
+      ]
+    },
+    {
+      "name": "build-tools",
+      "configurePreset": "linux-release-tools",
+      "targets": [
+        "tool_sharded_raw_merge",
+        "tool_udp_raw_replayer",
+        "tool_dpdk_tx_replayer"
       ]
     }
   ]

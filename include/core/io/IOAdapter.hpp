@@ -146,7 +146,7 @@ namespace coreio
         {
         }
 
-        ::openpni::RawDataView View()
+        ::openpni::RawDataView View() const
         {
             if (latestSegment_)
             {

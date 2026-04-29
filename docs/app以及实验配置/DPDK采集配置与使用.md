@@ -11,7 +11,7 @@
 1. 操作系统：Linux。
 2. 假设 DPDK 已安装（如未安装，先按 PNI 文档完成安装与基础验证）。
 3. 本文重点是“本项目如何接入 DPDK 采集路径”。
-4. 在使用dpdk之前，需在PnI-Config 中将 PNI_STANDARD_CONFIG_ENABLE_DPDK设置为1，重新编译安装
+4. 若pni-core中的DPDK未启用，请确认DPDK已安装，并重新编译安装pni
 
 ## 2. 先判断机器是否具备 DPDK 运行条件
 

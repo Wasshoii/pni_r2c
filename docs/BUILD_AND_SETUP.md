@@ -5,10 +5,10 @@
 
 OpenPnI 本体的环境准备、`config.py` 配置和 `build.py` 安装流程请参考 OpenPnI 文档（`pni-standard-project/docs/项目介绍/编译与构建.md`）。
 
-## 前置条件（本项目增量）
+## 前置条件
 - 已完成 OpenPnI 安装，并且 `pkg-config` 可发现 `libpni`。
 - 已安装本项目需要的 gRPC/Protobuf 开发包。
-- 当前仓库根目录为 `r2c/`。
+- 当前仓库根目录为 `pni_r2c/`。
 
 ### Ubuntu 24.04：安装 gRPC/Protobuf 开发包
 
@@ -39,10 +39,6 @@ pkg-config --cflags --libs grpc++ protobuf
 pkg-config --modversion libglog
 ```
 
-说明：
-- 本项目 `Makefile` 默认使用 `PKG_CONFIG_PATH_OVERRIDE=/usr/lib/x86_64-linux-gnu/pkgconfig` 获取 gRPC/Protobuf 配置。
-- 如你使用非标准库路径，可在构建时覆盖：`make all-full SYSTEM_LIB_DIR=/your/system/lib/dir`。
-
 建议先做一次环境自检：
 
 ```bash
@@ -51,18 +47,25 @@ pkg-config --cflags --libs grpc++ protobuf
 which protoc
 ```
 
-## 快速开始（CMake 为唯一构建方式）
+## 快速开始
 若无其他测试需求，建议使用 build.sh 作为唯一的构建方式，若想要单独编译某些可执行程序，请参考下一章节
 
 ```bash
 # 一键构建 app/test/tools
 ./build.sh --all
 
+# 仅构建app
+./build.sh --apps
+
 # 仅构建测试
 ./build.sh --tests
-```
 
-## CMake 单独编译（tests/apps 分离架构）
+# 仅构建工具
+./build.sh --tools
+```
+构建完成后，可执行的二进制文件会输出到`bin/`目录下
+
+## CMake 编译 (建议仅在需要单独编译时使用)
 
 当前仓库 CMake 预设已按“目标类型（tests/apps）+ 依赖层（core/pni/cuda）”分离，避免应用与测试混编。
 
@@ -195,5 +198,4 @@ make all-full
 ### 3) NVCC 标准支持问题
 OpenPnI 相关代码是 C++23 + CUDA 混合链路，`nvcc` 侧应保持 C++20（Makefile 已按此配置）。
 
-## 说明
-`make all-full` 只保证“编译与链接”通过。部分测试目标在运行阶段仍可能因数据文件内容、路径或格式不匹配而失败，这属于运行时数据问题，不属于构建问题。
+

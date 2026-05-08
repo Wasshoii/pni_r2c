@@ -245,6 +245,78 @@ void test_bdm2_callback()
               << std::endl;
 }
 
+void test_50100_930_callback()
+{
+    std::cout << "\n========== Testing 50100 R2S Callback Mode ==========\n"
+              << std::endl;
+
+    std::string resPath = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res";
+   auto calibrationFilePaths = r2s::collectCalibrationFiles(
+    "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/cali",
+    { ".bin"},
+    true);
+    // 统计变量
+    uint64_t totalSinglesReceived = 0;
+    uint64_t totalCallbacks = 0;
+
+  
+    std::string singleRawdataPath =
+        std::string("/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/") +
+        "converted_rawData.bin";
+
+    auto config = r2s::createBDM50100Config(singleRawdataPath, resPath, calibrationFilePaths, "singles_50100_test", {});
+
+    config.saveData2SingleFile = true;
+    config.asyncFileWrite = true;
+
+    // 设置回调函数 - 模拟接收数据（实际使用时会通过 gRPC 发送）
+    config.onSinglesReady = [&totalSinglesReceived, &totalCallbacks](
+                                std::vector<r2s::GlobalSingle> &&singles,
+                                uint64_t clock_ms,
+                                uint32_t duration_ms) -> bool
+    {
+        totalCallbacks++;
+        totalSinglesReceived += singles.size();
+
+        // 每50次回调输出一次状态
+        if (totalCallbacks % 50 == 0 || totalCallbacks == 1)
+        {
+            std::cout << "[Callback #" << totalCallbacks << "] "
+                      << "Received " << singles.size() << " singles, "
+                      << "clock=" << clock_ms << "ms, "
+                      << "duration=" << duration_ms << "ms" << std::endl;
+
+            // 输出前几个单事件的详细信息
+            if (!singles.empty())
+            {
+                std::cout << "  First single: crystalIdx=" << singles[0].globalCrystalIndex
+                          << ", energy=" << singles[0].energy
+                          << ", time_pico=" << singles[0].timeValue_pico << std::endl;
+            }
+        }
+
+        // 返回 true 继续处理，返回 false 停止
+        return true;
+    };
+
+    std::cout << "Starting R2S processing with callback mode..." << std::endl;
+    std::cout << "Raw data file: " << singleRawdataPath << std::endl;
+
+    auto start = std::chrono::steady_clock::now();
+    bool success = r2s::processR2S(config);
+    auto end = std::chrono::steady_clock::now();
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+    std::cout << "\n========== Callback Mode Test Results ==========" << std::endl;
+    std::cout << "Success: " << (success ? "Yes" : "No") << std::endl;
+    std::cout << "Total callbacks: " << totalCallbacks << std::endl;
+    std::cout << "Total singles received: " << totalSinglesReceived << std::endl;
+    std::cout << "Processing time: " << elapsed_ms << " ms" << std::endl;
+    std::cout << "Throughput: " << (elapsed_ms > 0 ? (double)totalSinglesReceived / elapsed_ms * 1000 : 0) << " singles/s" << std::endl;
+    std::cout << "================================================\n"
+              << std::endl;
+}
+
 int main()
 {
     std::cout << "======================================" << std::endl;
@@ -252,13 +324,19 @@ int main()
     std::cout << "======================================\n"
               << std::endl;
 
-    // 测试1: 保存文件模式
-    std::cout << "[Test 1] Testing file save mode..." << std::endl;
-    test_bdm2_saveflie();
+    // // 测试1: 保存文件模式
+    // std::cout << "[Test 1] Testing file save mode..." << std::endl;
+    // test_bdm2_saveflie();
 
     // // 测试2: 回调模式
     // std::cout << "[Test 2] Testing callback mode..." << std::endl;
     // test_bdm2_callback();
+
+    // convert_50100_rawdata_with_pos_to_standard(std::string("/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/rawData.bin"),
+    // std::string("/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/pos.bin"),
+    //                                            std::string("/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/converted_rawData.bin"));
+    std::cout << "[Test 3] Testing 50100 callback mode..." << std::endl;
+    test_50100_930_callback();
 
     std::cout << "\n======================================" << std::endl;
     std::cout << "     All tests completed!" << std::endl;

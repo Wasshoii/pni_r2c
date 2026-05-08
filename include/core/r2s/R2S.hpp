@@ -30,6 +30,7 @@
 #include <atomic>
 #include <utility>
 #include <vector>
+#include <filesystem>
 
 namespace openpni::distributed::r2s
 {
@@ -71,6 +72,19 @@ namespace openpni::distributed::r2s
      * 因此需要在回调内完成 host 拷贝并持有数据所有权。
      */
     std::vector<Single> materializeSinglesOnHost(std::span<Single const> singles);
+
+    /**
+     * @brief 读取目录下的校正文件路径列表
+     *
+     * @param directory 目录路径
+     * @param extensions 过滤后缀列表（为空表示不过滤，例如 {".data", ".bin"}）
+     * @param sortByName 是否按文件名排序
+     * @return std::vector<std::string> 目录下的校正文件完整路径
+     */
+    std::vector<std::string> collectCalibrationFiles(
+        const std::string &directory,
+        const std::vector<std::string> &extensions = {},
+        bool sortByName = true);
 
     auto timer(auto func, auto time)
     {

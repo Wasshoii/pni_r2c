@@ -174,6 +174,17 @@ make test-acq-control-init
 
 说明：以上 make 命令会转发到 tests/Makefile，运行前请确保已执行 `./build.sh --tests` 完成构建。
 
+## IO 配置
+若需要使用pni新版io接口，请在编译前运行：
+```bash
+export PNI_R2C_IO_BACKEND=latest
+```
+
+若需要切换回旧版（v1版），请运行：
+```bash
+export PNI_R2C_IO_BACKEND=v1
+```
+
 ## 常见问题
 
 ### 1) `undefined reference to absl::...`（链接阶段）

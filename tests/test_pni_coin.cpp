@@ -23,14 +23,15 @@ using openpni::distributed::coin::merge_single_files;
 
 namespace
 {
-    constexpr uint16_t kBdm2ChannelNum = 48;
-    constexpr uint32_t kBdm2CrystalsPerChannel = 169 * 4;
-    constexpr uint16_t kAnalyzeChannelNum = 12;
+    constexpr uint16_t kBdm50100ChannelNum = 48 * 3;
+    constexpr uint32_t kBdm50100CrystalsPerChannel = 6 * 6 * 8;
+    constexpr uint16_t kAnalyzeChannelNum = kBdm50100ChannelNum;
     constexpr int16_t kTimeWindowPs = 2000;
+    constexpr float kEnergyLower_eV = 350000.0f;
+    constexpr float kEnergyUpper_eV = 650000.0f;
 
-    const std::string kSinglesFile = "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/singles.single";
-    // const std::string kCoinOutputDir = "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/pniCoin";
-    const std::string kCoinOutputDir = "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/pniCoin/exp_balanced_stable";
+    const std::string kSinglesFile = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/singles_50100_test.single";
+    const std::string kCoinOutputDir = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/coin_50100_full";
     struct EventSample
     {
         uint32_t globalCrystalIndex1 = 0;
@@ -56,21 +57,133 @@ namespace
         std::vector<EventSample> samples;
     };
 
+    struct EnergyStats
+    {
+        uint64_t total = 0;
+        uint64_t inWindow_eV = 0;
+        uint64_t inWindow_keV = 0;
+        float minRaw = std::numeric_limits<float>::max();
+        float maxRaw = std::numeric_limits<float>::lowest();
+        float minScaled = std::numeric_limits<float>::max();
+        float maxScaled = std::numeric_limits<float>::lowest();
+    };
+
+    struct CoinRunStats
+    {
+        uint64_t inputSingles = 0;
+        uint64_t energySelectedSingles = 0;
+    };
+
     inline uint16_t globalCrystalToChannel(uint32_t crystal)
     {
-        return static_cast<uint16_t>(crystal / kBdm2CrystalsPerChannel);
+        return static_cast<uint16_t>(crystal / kBdm50100CrystalsPerChannel);
     }
 
     uint16_t channelSeparation(uint32_t crystal1, uint32_t crystal2)
     {
-        uint16_t ch1 = static_cast<uint16_t>(crystal1 / kBdm2CrystalsPerChannel);
-        uint16_t ch2 = static_cast<uint16_t>(crystal2 / kBdm2CrystalsPerChannel);
+        uint16_t ch1 = static_cast<uint16_t>(crystal1 / kBdm50100CrystalsPerChannel);
+        uint16_t ch2 = static_cast<uint16_t>(crystal2 / kBdm50100CrystalsPerChannel);
         uint16_t diff = (ch1 > ch2) ? (ch1 - ch2) : (ch2 - ch1);
-        uint16_t wrap = static_cast<uint16_t>(kBdm2ChannelNum - diff);
+        uint16_t wrap = static_cast<uint16_t>(kBdm50100ChannelNum - diff);
         return std::min(diff, wrap);
     }
 
-    bool computeCoincidenceByMergeAndCoin()
+    EnergyStats analyzeSinglesEnergy(const std::string &singlePath)
+    {
+        EnergyStats stats;
+        openpni::io::v1::single::SingleFileInput input;
+        input.open(singlePath);
+
+        const auto header = input.header();
+        std::cout << "\n[Energy] " << singlePath << std::endl;
+        std::cout << "  bytes4Energy=" << static_cast<int>(header.bytes4Energy)
+                  << ", bytes4CrystalIndex=" << static_cast<int>(header.bytes4CrystalIndex)
+                  << ", bytes4TimeValue=" << static_cast<int>(header.bytes4TimeValue) << std::endl;
+
+        for (uint32_t segIdx = 0; segIdx < header.segmentNum; ++segIdx)
+        {
+            const auto segHeader = input.segmentHeader(segIdx);
+            const auto segBytes = input.readSegment(segIdx);
+            const uint64_t count = segHeader.count;
+            stats.total += count;
+
+            if (header.bytes4Energy == 4)
+            {
+                auto ptr = reinterpret_cast<const float *>(segBytes.energyBytes.get());
+                for (uint64_t i = 0; i < count; ++i)
+                {
+                    const float raw = ptr[i];
+                    const float scaled = raw;
+                    stats.minRaw = std::min(stats.minRaw, raw);
+                    stats.maxRaw = std::max(stats.maxRaw, raw);
+                    stats.minScaled = std::min(stats.minScaled, scaled);
+                    stats.maxScaled = std::max(stats.maxScaled, scaled);
+                    if (scaled >= kEnergyLower_eV && scaled <= kEnergyUpper_eV)
+                        stats.inWindow_eV++;
+                    if (scaled >= kEnergyLower_eV / 1000.0f && scaled <= kEnergyUpper_eV / 1000.0f)
+                        stats.inWindow_keV++;
+                }
+            }
+            else if (header.bytes4Energy == 2)
+            {
+                auto ptr = reinterpret_cast<const uint16_t *>(segBytes.energyBytes.get());
+                for (uint64_t i = 0; i < count; ++i)
+                {
+                    const float raw = static_cast<float>(ptr[i]);
+                    const float scaled = raw * 0.01f;
+                    stats.minRaw = std::min(stats.minRaw, raw);
+                    stats.maxRaw = std::max(stats.maxRaw, raw);
+                    stats.minScaled = std::min(stats.minScaled, scaled);
+                    stats.maxScaled = std::max(stats.maxScaled, scaled);
+                    if (scaled >= kEnergyLower_eV && scaled <= kEnergyUpper_eV)
+                        stats.inWindow_eV++;
+                    if (scaled >= kEnergyLower_eV / 1000.0f && scaled <= kEnergyUpper_eV / 1000.0f)
+                        stats.inWindow_keV++;
+                }
+            }
+            else if (header.bytes4Energy == 1)
+            {
+                auto ptr = reinterpret_cast<const uint8_t *>(segBytes.energyBytes.get());
+                for (uint64_t i = 0; i < count; ++i)
+                {
+                    const float raw = static_cast<float>(ptr[i]);
+                    const float scaled = raw * 4.0f;
+                    stats.minRaw = std::min(stats.minRaw, raw);
+                    stats.maxRaw = std::max(stats.maxRaw, raw);
+                    stats.minScaled = std::min(stats.minScaled, scaled);
+                    stats.maxScaled = std::max(stats.maxScaled, scaled);
+                    if (scaled >= kEnergyLower_eV && scaled <= kEnergyUpper_eV)
+                        stats.inWindow_eV++;
+                    if (scaled >= kEnergyLower_eV / 1000.0f && scaled <= kEnergyUpper_eV / 1000.0f)
+                        stats.inWindow_keV++;
+                }
+            }
+            else
+            {
+                const float raw = 0.0f;
+                const float scaled = 511.0f;
+                stats.minRaw = std::min(stats.minRaw, raw);
+                stats.maxRaw = std::max(stats.maxRaw, raw);
+                stats.minScaled = std::min(stats.minScaled, scaled);
+                stats.maxScaled = std::max(stats.maxScaled, scaled);
+            }
+        }
+
+        std::cout << "  raw range: [" << stats.minRaw << ", " << stats.maxRaw << "]" << std::endl;
+        std::cout << "  scaled range: [" << stats.minScaled << ", " << stats.maxScaled << "]" << std::endl;
+        if (stats.total > 0)
+        {
+            const double ratioEv = 100.0 * static_cast<double>(stats.inWindow_eV) / static_cast<double>(stats.total);
+            const double ratioKev = 100.0 * static_cast<double>(stats.inWindow_keV) / static_cast<double>(stats.total);
+            std::cout << "  in window " << kEnergyLower_eV << "~" << kEnergyUpper_eV << " eV: "
+                      << stats.inWindow_eV << " (" << ratioEv << "%)" << std::endl;
+            std::cout << "  in window " << kEnergyLower_eV / 1000.0f << "~" << kEnergyUpper_eV / 1000.0f
+                      << " keV: " << stats.inWindow_keV << " (" << ratioKev << "%)" << std::endl;
+        }
+        return stats;
+    }
+
+    bool computeCoincidenceByMergeAndCoin(CoinRunStats *statsOut)
     {
         if (!fs::exists(kSinglesFile))
         {
@@ -78,17 +191,39 @@ namespace
             return false;
         }
 
+        const auto energyStats = analyzeSinglesEnergy(kSinglesFile);
+        if (statsOut)
+        {
+            statsOut->inputSingles = energyStats.total;
+            statsOut->energySelectedSingles = energyStats.inWindow_eV;
+        }
+
         fs::create_directories(kCoinOutputDir);
 
         CoincidenceProcessConfig cfg;
         cfg.enable = true;
-        cfg.channelNum = kBdm2ChannelNum;
-        cfg.crystalsPerChannel = kBdm2CrystalsPerChannel;
+        cfg.channelNum = kBdm50100ChannelNum;
+        cfg.crystalsPerChannel = kBdm50100CrystalsPerChannel;
         cfg.outputDir = kCoinOutputDir;
         cfg.protocol.timeWindow_ps = 2000;
         cfg.protocol.delayTime_ps = 2000000;
-        cfg.protocol.energyLower_eV = 350000.0f;
-        cfg.protocol.energyUpper_eV = 650000.0f;
+        cfg.protocol.energyLower_eV = kEnergyLower_eV;
+        cfg.protocol.energyUpper_eV = kEnergyUpper_eV;
+
+        bool useKevWindow = false;
+        if (energyStats.total > 0 && energyStats.inWindow_eV == 0 && energyStats.inWindow_keV > 0)
+        {
+            cfg.protocol.energyLower_eV = kEnergyLower_eV / 1000.0f;
+            cfg.protocol.energyUpper_eV = kEnergyUpper_eV / 1000.0f;
+            std::cout << "[Energy] Auto-switch window to keV scale: "
+                      << cfg.protocol.energyLower_eV << "~" << cfg.protocol.energyUpper_eV << std::endl;
+            useKevWindow = true;
+        }
+
+        if (statsOut)
+        {
+            statsOut->energySelectedSingles = useKevWindow ? energyStats.inWindow_keV : energyStats.inWindow_eV;
+        }
 
         const std::vector<std::string> singleFiles = {kSinglesFile};
         const std::string mergedOutputPlaceholder = kCoinOutputDir + "/merged_placeholder.single";
@@ -128,7 +263,7 @@ namespace
     {
         LmfStats stats;
         stats.path = lmfPath;
-        stats.channelSepHist.assign(kBdm2ChannelNum / 2 + 1, 0);
+        stats.channelSepHist.assign(kBdm50100ChannelNum / 2 + 1, 0);
         stats.channelPairHist12x12.assign(kAnalyzeChannelNum * kAnalyzeChannelNum, 0);
         stats.samples.reserve(12);
 
@@ -204,7 +339,8 @@ namespace
 
     void printChannelPairDistribution12(const LmfStats &stats, const std::string &name)
     {
-        std::cout << "\n  " << name << " 通道对分布（0-11通道，i<=j）:" << std::endl;
+        std::cout << "\n  " << name << " 通道对分布（0-" << (kAnalyzeChannelNum - 1)
+              << "通道，i<=j）:" << std::endl;
         std::cout << "  in-range events=" << stats.inAnalyzeChannelRangeCount
                   << ", out-of-range events=" << stats.outOfAnalyzeChannelRangeCount << std::endl;
 
@@ -307,7 +443,7 @@ namespace
                   << std::endl;
         printTopBins(delayStats.channelSepHist, "delay");
 
-        const uint64_t promptOpp = promptStats.channelSepHist[kBdm2ChannelNum / 2];
+        const uint64_t promptOpp = promptStats.channelSepHist[kBdm50100ChannelNum / 2];
         const double promptOppRatio = promptStats.totalEvents > 0
                                           ? static_cast<double>(promptOpp) / static_cast<double>(promptStats.totalEvents)
                                           : 0.0;
@@ -351,12 +487,13 @@ int main()
     std::cout << "      PNI Coin Standalone Test" << std::endl;
     std::cout << "======================================" << std::endl;
 
-    // const bool coinOk = computeCoincidenceByMergeAndCoin();
-    // if (!coinOk)
-    // {
-    //     std::cerr << "\n[FAIL] 符合计算失败，终止后续分析。" << std::endl;
-    //     return 1;
-    // }
+    CoinRunStats runStats;
+    const bool coinOk = computeCoincidenceByMergeAndCoin(&runStats);
+    if (!coinOk)
+    {
+        std::cerr << "\n[FAIL] 符合计算失败，终止后续分析。" << std::endl;
+        return 1;
+    }
 
     const std::string promptPath = kCoinOutputDir + "/prompt.lmf";
     const std::string delayPath = kCoinOutputDir + "/delay.lmf";
@@ -370,8 +507,26 @@ int main()
     const auto promptStats = analyzeLmf(promptPath);
     const auto delayStats = analyzeLmf(delayPath);
 
-    printSampleCompare(promptStats, delayStats);
-    analyzeDistribution(promptStats, delayStats);
+    if (runStats.inputSingles > 0)
+    {
+        const double energyRatio = 100.0 * static_cast<double>(runStats.energySelectedSingles) /
+                                   static_cast<double>(runStats.inputSingles);
+        const double promptRatio = 100.0 * static_cast<double>(promptStats.totalEvents) /
+                                   static_cast<double>(runStats.energySelectedSingles);
+        const double delayRatio = 100.0 * static_cast<double>(delayStats.totalEvents) /
+                                  static_cast<double>(runStats.energySelectedSingles);
+
+        std::cout << std::fixed << std::setprecision(6);
+        std::cout << "\n=== Coincidence Summary ===" << std::endl;
+        std::cout << "Energy selected singles num / input singles num: " << energyRatio << "%" << std::endl;
+        std::cout << "Prompt coins num: " << promptStats.totalEvents << std::endl;
+        std::cout << "Prompt coins rate: " << promptRatio << "%" << std::endl;
+        std::cout << "Delay coins num: " << delayStats.totalEvents << std::endl;
+        std::cout << "Delay coins rate: " << delayRatio << "%" << std::endl;
+    }
+
+    //printSampleCompare(promptStats, delayStats);
+    //analyzeDistribution(promptStats, delayStats);
 
     std::cout << "\n[PASS] pniCoin 测试流程完成。" << std::endl;
     return 0;

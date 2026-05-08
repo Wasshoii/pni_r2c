@@ -6,6 +6,9 @@
 #include <string>
 #include <pni/tools/Parallel.hpp>
 #include <pni/core/CommonDataType.hpp>
+#include <pni/process/Acquisition.hpp>
+#include <pni/detector/BDM50100.hpp>
+//#include <pni/bdm_system/BDM50100Array.hpp>
 
 namespace fs = std::filesystem;
 
@@ -418,6 +421,253 @@ struct RawDataFileInfo
                   << std::endl;
     }
 };
+
+struct PacketPositionInfo {
+  uint64_t offset;
+  uint16_t length;
+  uint16_t channel;
+};
+/**
+ * @brief 将 50100 原始 UDP 包文件 + pos.bin 转换为标准 RawData 文件
+ *
+ * @param rawDataPath 输入 rawData.bin 路径（连续 1286 字节 UDP 包）
+ * @param posPath 输入 pos.bin 路径（PacketPositionInfo 数组）
+ * @param outputRawDataPath 输出 rawdata 文件路径
+ * @param packetsPerSegment 每段写入的包数量
+ * @param channelNumOverride 可选的通道数覆盖值（0 表示自动推断）
+ * @param channelTypeName 通道类型名称（写入文件头）
+ * @param forceReplace 输出文件存在时是否覆盖
+ * @param reservedBytes 预留磁盘空间（必须大于0，否则不会写入）
+ * @return bool 成功返回 true，失败返回 false
+ */
+bool convert_50100_rawdata_with_pos_to_standard(const std::string &rawDataPath,
+                                                const std::string &posPath,
+                                                const std::string &outputRawDataPath,
+                                                uint32_t packetsPerSegment = 10000,
+                                                uint16_t channelNumOverride = 0,
+                                                const std::string &channelTypeName = "BDM50100",
+                                                bool forceReplace = false,
+                                                uint64_t reservedBytes = 1ull * 1024 * 1024)
+{
+    using openpni::device::bdm50100::UDP_PACKET_SIZE;
+
+    try
+    {
+        if (packetsPerSegment == 0)
+        {
+            std::cerr << "Invalid packetsPerSegment: 0" << std::endl;
+            return false;
+        }
+
+        // 1) 读取 pos.bin
+        std::ifstream posFile(posPath, std::ios::binary);
+        if (!posFile)
+        {
+            std::cerr << "Failed to open pos file: " << posPath << std::endl;
+            return false;
+        }
+        posFile.seekg(0, std::ios::end);
+        const std::streamsize posBytes = posFile.tellg();
+        posFile.seekg(0, std::ios::beg);
+
+        if (posBytes <= 0 || posBytes % sizeof(PacketPositionInfo) != 0)
+        {
+            std::cerr << "Invalid pos file size: " << posBytes << std::endl;
+            return false;
+        }
+
+        const uint64_t posCount = static_cast<uint64_t>(posBytes / sizeof(PacketPositionInfo));
+        std::vector<PacketPositionInfo> positions(posCount);
+        posFile.read(reinterpret_cast<char *>(positions.data()), posBytes);
+        if (!posFile)
+        {
+            std::cerr << "Failed to read pos file: " << posPath << std::endl;
+            return false;
+        }
+
+        // 2) 打开 rawdata.bin
+        std::ifstream rawFile(rawDataPath, std::ios::binary);
+        if (!rawFile)
+        {
+            std::cerr << "Failed to open raw data file: " << rawDataPath << std::endl;
+            return false;
+        }
+        rawFile.seekg(0, std::ios::end);
+        const uint64_t rawBytes = static_cast<uint64_t>(rawFile.tellg());
+        rawFile.seekg(0, std::ios::beg);
+
+        // 3) 推断通道数
+        uint16_t maxChannel = 0;
+        bool hasValidChannel = false;
+        for (const auto &pos : positions)
+        {
+            if (pos.channel == UINT16_MAX)
+            {
+                continue;
+            }
+            hasValidChannel = true;
+            if (pos.channel > maxChannel)
+            {
+                maxChannel = pos.channel;
+            }
+        }
+        const uint16_t channelNum = channelNumOverride > 0
+                                        ? channelNumOverride
+                                        : static_cast<uint16_t>(hasValidChannel ? (maxChannel + 1) : 0);
+
+        if (channelNum == 0)
+        {
+            std::cerr << "Cannot infer channelNum from pos file." << std::endl;
+            return false;
+        }
+
+        // 4) 初始化输出文件
+        fs::path outputPath(outputRawDataPath);
+        if (outputPath.has_parent_path() && !fs::exists(outputPath.parent_path()))
+        {
+            fs::create_directories(outputPath.parent_path());
+        }
+        if (fs::exists(outputPath) && !forceReplace)
+        {
+            std::cerr << "Output file already exists: " << outputRawDataPath << std::endl;
+            return false;
+        }
+
+        openpni::io::rawdata::RawDataFileHeader header;
+        header.SetChannelNum(channelNum);
+        for (uint16_t i = 0; i < channelNum; ++i)
+        {
+            header.SetNameOfChannel(i, channelTypeName);
+        }
+
+        openpni::io::IOOptions options;
+        if (reservedBytes == 0)
+        {
+            reservedBytes = 1;
+        }
+        options.SetReservedBytes(static_cast<std::size_t>(reservedBytes));
+        options.SetCreatePathIfNotExist(true);
+        options.SetEnableOverrideExistingFile(forceReplace);
+        options.SetIOQueueSize(2);
+
+        openpni::io::RawFileOutput output(std::move(header), std::move(options));
+        output.Open(outputRawDataPath);
+
+        // 5) 自动判断 offset 单位（字节偏移 vs 包序号）
+        auto estimate_mode = [&](bool offsetIsIndex) {
+            uint64_t invalid = 0;
+            const uint64_t sampleCount = std::min<uint64_t>(positions.size(), 1000);
+            for (uint64_t i = 0; i < sampleCount; ++i)
+            {
+                const auto &pos = positions[i];
+                if (pos.channel == UINT16_MAX)
+                {
+                    continue;
+                }
+                const uint64_t baseOffset = offsetIsIndex ? pos.offset * UDP_PACKET_SIZE : pos.offset;
+                if (baseOffset + UDP_PACKET_SIZE > rawBytes)
+                {
+                    invalid++;
+                }
+            }
+            return invalid;
+        };
+
+        bool offsetIsIndex = false;
+        const uint64_t invalidDirect = estimate_mode(false);
+        const uint64_t invalidIndex = estimate_mode(true);
+        if (invalidIndex < invalidDirect)
+        {
+            offsetIsIndex = true;
+        }
+
+        // 6) 分段写入
+        uint64_t totalWritten = 0;
+        uint64_t skippedPackets = 0;
+        uint64_t skippedInvalidChannel = 0;
+        uint64_t skippedOutOfRange = 0;
+        for (uint64_t base = 0; base < posCount; base += packetsPerSegment)
+        {
+            const uint64_t end = std::min<uint64_t>(posCount, base + packetsPerSegment);
+            std::vector<uint8_t> data;
+            std::vector<uint16_t> length;
+            std::vector<uint64_t> offset;
+            std::vector<uint16_t> channel;
+
+            data.reserve((end - base) * UDP_PACKET_SIZE);
+            length.reserve(end - base);
+            offset.reserve(end - base);
+            channel.reserve(end - base);
+
+            uint64_t currentOffset = 0;
+            for (uint64_t i = base; i < end; ++i)
+            {
+                const auto &pos = positions[i];
+                if (pos.channel == UINT16_MAX)
+                {
+                    skippedPackets++;
+                    skippedInvalidChannel++;
+                    continue;
+                }
+                const uint64_t packetOffset = offsetIsIndex ? pos.offset * UDP_PACKET_SIZE : pos.offset;
+                if (packetOffset + UDP_PACKET_SIZE > rawBytes)
+                {
+                    skippedPackets++;
+                    skippedOutOfRange++;
+                    continue;
+                }
+
+                data.resize(currentOffset + UDP_PACKET_SIZE);
+                rawFile.seekg(static_cast<std::streamoff>(packetOffset), std::ios::beg);
+                rawFile.read(reinterpret_cast<char *>(data.data() + currentOffset), UDP_PACKET_SIZE);
+                if (!rawFile)
+                {
+                    std::cerr << "Failed to read raw data at offset " << pos.offset << std::endl;
+                    return false;
+                }
+
+                length.push_back(static_cast<uint16_t>(UDP_PACKET_SIZE));
+                offset.push_back(currentOffset);
+                channel.push_back(pos.channel);
+                currentOffset += UDP_PACKET_SIZE;
+            }
+
+            if (channel.empty())
+            {
+                continue;
+            }
+
+            openpni::RawDataView view;
+            view.data = data.data();
+            view.length = length.data();
+            view.offset = offset.data();
+            view.channel = channel.data();
+            view.count = channel.size();
+            view.clock_ms = 0;
+            view.duration_ms = 0;
+            view.channelNum = channelNum;
+
+            output.AppendSegment(view);
+            totalWritten += view.count;
+        }
+
+        std::cout << "Conversion done. packets=" << posCount
+              << ", written=" << totalWritten
+              << ", skipped=" << skippedPackets
+              << ", skippedInvalidChannel=" << skippedInvalidChannel
+              << ", skippedOutOfRange=" << skippedOutOfRange
+              << ", channelNum=" << channelNum
+              << ", offsetMode=" << (offsetIsIndex ? "index" : "bytes")
+              << std::endl;
+
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Exception in convert_50100_rawdata_with_pos_to_standard: " << e.what() << std::endl;
+        return false;
+    }
+}
 
 /**
  * @brief 获取 RawData 文件的详细信息

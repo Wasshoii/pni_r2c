@@ -4,6 +4,40 @@
 
 namespace openpni::distributed::r2s
 {
+    namespace
+    {
+        bool hasExtension(const std::filesystem::path &path, const std::vector<std::string> &extensions)
+        {
+            if (extensions.empty())
+            {
+                return true;
+            }
+
+            const std::string ext = path.extension().string();
+            for (const auto &rawExt : extensions)
+            {
+                if (rawExt.empty())
+                {
+                    continue;
+                }
+
+                if (rawExt[0] == '.')
+                {
+                    if (ext == rawExt)
+                    {
+                        return true;
+                    }
+                }
+                else if (ext == std::string(".") + rawExt)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
     bool isDevicePointer(const void *ptr)
     {
         cudaPointerAttributes attr;
@@ -43,6 +77,61 @@ namespace openpni::distributed::r2s
 
         std::copy(singles.begin(), singles.end(), hostSingles.begin());
         return hostSingles;
+    }
+
+    std::vector<std::string> collectCalibrationFiles(
+        const std::string &directory,
+        const std::vector<std::string> &extensions,
+        bool sortByName)
+    {
+        std::vector<std::string> files;
+
+        if (directory.empty())
+        {
+            return files;
+        }
+
+        std::error_code ec;
+        const std::filesystem::path dirPath(directory);
+        if (!std::filesystem::exists(dirPath, ec) || !std::filesystem::is_directory(dirPath, ec))
+        {
+            LOG(ERROR) << "Calibration directory not found: " << directory;
+            return files;
+        }
+
+        for (const auto &entry : std::filesystem::directory_iterator(dirPath, ec))
+        {
+            if (ec)
+            {
+                LOG(ERROR) << "Failed to iterate calibration directory: " << directory
+                           << ", error=" << ec.message();
+                break;
+            }
+
+            if (!entry.is_regular_file(ec))
+            {
+                continue;
+            }
+
+            const auto &path = entry.path();
+            if (!hasExtension(path, extensions))
+            {
+                continue;
+            }
+
+            files.push_back(path.string());
+        }
+
+        if (sortByName)
+        {
+            std::sort(files.begin(), files.end(), [](const std::string &a, const std::string &b)
+                      {
+                          return std::filesystem::path(a).filename().string() <
+                                 std::filesystem::path(b).filename().string();
+                      });
+        }
+
+        return files;
     }
 
     std::vector<GlobalSingle> convertLocalToGlobalSingles(
@@ -124,6 +213,8 @@ namespace openpni::distributed::r2s
         {
             auto *g50100 = new openpni::device::bdm50100_v2::BDM50100R2S();
             openpni::device::bdm50100_v2::BDM50100R2SParams params{};
+            params.matchXTalkEnabled = true;
+            params.crossTalkEnabled = true;
             params.__deviceId = 0;
             g50100->setParams(params);
             generator = g50100;
@@ -955,7 +1046,7 @@ namespace openpni::distributed::r2s
         config.crystalsPerChannel = 6 * 6 * 8;
         config.r2sResultIndex = 2;
         config.outputFileName = outputFileName;
-        config.channelNums = static_cast<uint16_t>(calibrationFiles.empty() ? 0 : calibrationFiles.size());
+        config.channelNums = 48 * 3;
         config.channelIndices = channelIndices;
         return config;
     }

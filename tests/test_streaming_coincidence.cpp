@@ -13,117 +13,45 @@
 
 #include "core/streaming/StreamingCoincidence.hpp"
 #include <pni/io/IO.hpp>
+#include <pni/io/ListmodeIO.hpp>
+#include <algorithm>
 #include <iostream>
 #include <random>
 #include <chrono>
 #include <iomanip>
 #include <functional>
 #include <filesystem>
+#include <limits>
+#include <stdexcept>
 
 using namespace openpni::distributed::streaming;
 namespace fs = std::filesystem;
 
+constexpr float kEnergyLower_eV = 350000.0f;
+constexpr float kEnergyUpper_eV = 650000.0f;
+
 // ==================== 文件读取工具函数 ====================
 
 /**
- * @brief 从 SingleSegmentBytes 解析数据到 GlobalSingle_t 数组
- *
- * @param segBytes 段数据字节
- * @param fileHeader 文件头信息
- * @param count 事件数量
- * @param destBuffer 目标缓冲区
+ * @brief 从 Listmode 段解析为 Single 数组
  */
-void parseSingleSegmentBytesToBuffer(
-    const openpni::io::v1::single::SingleSegmentBytes &segBytes,
-    const openpni::io::v1::single::SingleFileHeader &fileHeader,
-    uint64_t count,
-    openpni::v1::basic::GlobalSingle_t *destBuffer)
+std::vector<Single> readSinglesFromSegment(openpni::io::listmode::ListmodeFileSegment &segment)
 {
-    // Lambda Selection for Crystal Index
-    std::function<uint32_t(uint64_t)> getCrystalIndex;
-    if (fileHeader.bytes4CrystalIndex == 2)
+    const auto data = segment.GetHAnyData();
+    if (!data.local_crystal_index1 || !data.channel_index1 || !data.absolute_timestamp1)
     {
-        auto ptr = reinterpret_cast<const uint16_t *>(segBytes.crystalIndexBytes.get());
-        getCrystalIndex = [ptr](uint64_t i)
-        { return ptr[i]; };
-    }
-    else if (fileHeader.bytes4CrystalIndex == 4)
-    {
-        auto ptr = reinterpret_cast<const uint32_t *>(segBytes.crystalIndexBytes.get());
-        getCrystalIndex = [ptr](uint64_t i)
-        { return ptr[i]; };
-    }
-    else // 3 bytes
-    {
-        auto ptr = reinterpret_cast<const uint8_t *>(segBytes.crystalIndexBytes.get());
-        getCrystalIndex = [ptr](uint64_t i)
-        {
-            const uint8_t *p = ptr + i * 3;
-            return p[0] | (p[1] << 8) | (p[2] << 16);
-        };
+        throw std::runtime_error("Single segment missing required fields");
     }
 
-    // Lambda Selection for Time Value
-    std::function<uint64_t(uint64_t)> getTimeValue;
-    if (fileHeader.bytes4TimeValue == 8)
+    std::vector<Single> singles(data.count);
+    for (std::size_t i = 0; i < data.count; ++i)
     {
-        auto ptr = reinterpret_cast<const uint64_t *>(segBytes.timeValueBytes.get());
-        getTimeValue = [ptr](uint64_t i)
-        { return ptr[i]; };
+        singles[i].channelIndex = data.channel_index1[i];
+        singles[i].crystalIndex = data.local_crystal_index1[i];
+        singles[i].timevalue_pico = data.absolute_timestamp1[i];
+        singles[i].energy = data.energy1 ? data.energy1[i] : 0.0f;
     }
-    else if (fileHeader.bytes4TimeValue == 4)
-    {
-        auto ptr = reinterpret_cast<const uint32_t *>(segBytes.timeValueBytes.get());
-        getTimeValue = [ptr](uint64_t i)
-        { return ptr[i]; };
-    }
-    else
-    {
-        int bytes = fileHeader.bytes4TimeValue;
-        auto ptr = reinterpret_cast<const uint8_t *>(segBytes.timeValueBytes.get());
-        getTimeValue = [ptr, bytes](uint64_t i)
-        {
-            const uint8_t *p = ptr + i * bytes;
-            uint64_t val = 0;
-            for (int k = 0; k < bytes; k++)
-                val |= (static_cast<uint64_t>(p[k]) << (k * 8));
-            return val;
-        };
-    }
-
-    // Lambda Selection for Energy
-    std::function<float(uint64_t)> getEnergy;
-    if (fileHeader.bytes4Energy == 4)
-    {
-        auto ptr = reinterpret_cast<const float *>(segBytes.energyBytes.get());
-        getEnergy = [ptr](uint64_t i)
-        { return ptr[i]; };
-    }
-    else if (fileHeader.bytes4Energy == 1)
-    {
-        auto ptr = reinterpret_cast<const uint8_t *>(segBytes.energyBytes.get());
-        getEnergy = [ptr](uint64_t i)
-        { return static_cast<float>(ptr[i]) * 4.0f; };
-    }
-    else if (fileHeader.bytes4Energy == 2)
-    {
-        auto ptr = reinterpret_cast<const uint16_t *>(segBytes.energyBytes.get());
-        getEnergy = [ptr](uint64_t i)
-        { return static_cast<float>(ptr[i]) * 0.01f; };
-    }
-    else
-    {
-        getEnergy = [](uint64_t)
-        { return 511.0f; };
-    }
-
-    // 并行解析
-    for (uint64_t i = 0; i < count; i++)
-    {
-        destBuffer[i].globalCrystalIndex = getCrystalIndex(i);
-        destBuffer[i].timeValue_pico = getTimeValue(i);
-        destBuffer[i].energy = getEnergy(i);
-    }
+    return singles;
 }
 
 /**
@@ -162,18 +90,21 @@ bool loadSingleFileToBuffer(
     try
     {
         // 打开 Single 文件
-        openpni::io::v1::single::SingleFileInput inputFile;
-        inputFile.open(filePath);
+        openpni::io::listmode::ListmodeFileInput inputFile;
+        inputFile.Open(filePath);
 
-        auto fileHeader = inputFile.header();
-        uint32_t segmentNum = fileHeader.segmentNum;
+        const auto &fileHeader = inputFile.Header();
+        uint32_t segmentNum = inputFile.SegmentNum();
+
+        if (fileHeader.FileTypeName() != openpni::io::listmode::fields::file_type_single_listmode)
+        {
+            std::cerr << "[loadSingleFileToBuffer] Error: not a single listmode file: " << filePath << std::endl;
+            return false;
+        }
 
         std::cout << "[loadSingleFileToBuffer] Node " << nodeId
                   << " loading file: " << filePath << std::endl;
         std::cout << "  Segments: " << segmentNum << std::endl;
-        std::cout << "  Format: crystalIndex=" << (int)fileHeader.bytes4CrystalIndex
-                  << "B, timeValue=" << (int)fileHeader.bytes4TimeValue
-                  << "B, energy=" << (int)fileHeader.bytes4Energy << "B" << std::endl;
 
         uint64_t totalSinglesLoaded = 0;
 
@@ -181,10 +112,10 @@ bool loadSingleFileToBuffer(
         for (uint32_t segIdx = 0; segIdx < segmentNum; ++segIdx)
         {
             // 读取段数据
-            auto segBytes = inputFile.readSegment(segIdx);
-            auto segHeader = inputFile.segmentHeader(segIdx);
+            auto segment = inputFile.ReadSegment(segIdx);
+            const auto data = segment.GetHAnyData();
 
-            if (segHeader.count == 0)
+            if (data.count == 0)
             {
                 std::cout << "  Segment " << segIdx << ": empty, skipping" << std::endl;
                 continue;
@@ -194,12 +125,11 @@ bool loadSingleFileToBuffer(
             TimestampedSingleChunk chunk;
             chunk.nodeId = nodeId;
             chunk.chunkId = segIdx;
-            chunk.computerClock_ms = segHeader.clock; // 使用段的 clock 作为计算机时钟
-            chunk.duration_ms = segHeader.duration;
+            chunk.computerClock_ms = segment.GetClockMs();
+            chunk.duration_ms = segment.GetDurationMs();
 
             // 分配空间并解析数据
-            chunk.singles.resize(segHeader.count);
-            parseSingleSegmentBytesToBuffer(segBytes, fileHeader, segHeader.count, chunk.singles.data());
+            chunk.singles = readSinglesFromSegment(segment);
 
             // 推送到缓冲区
             if (!buffer->push(std::move(chunk), 5000)) // 5秒超时
@@ -209,7 +139,7 @@ bool loadSingleFileToBuffer(
                 return false;
             }
 
-            totalSinglesLoaded += segHeader.count;
+            totalSinglesLoaded += data.count;
 
             // 模拟网络延迟
             if (simulateDelay > 0)
@@ -249,21 +179,99 @@ void fileLoaderThread(
         success->store(result);
     }
 }
-namespace fs = std::filesystem;
 
 // ==================== 测试工具函数 ====================
+
+struct EnergyStats
+{
+    uint64_t total = 0;
+    uint64_t inWindow_eV = 0;
+    uint64_t inWindow_keV = 0;
+    float minRaw = std::numeric_limits<float>::max();
+    float maxRaw = std::numeric_limits<float>::lowest();
+    float minScaled = std::numeric_limits<float>::max();
+    float maxScaled = std::numeric_limits<float>::lowest();
+};
+
+EnergyStats analyzeSinglesEnergy(const std::vector<std::string> &singlePaths)
+{
+    EnergyStats stats;
+
+    for (const auto &singlePath : singlePaths)
+    {
+        openpni::io::listmode::ListmodeFileInput input;
+        input.Open(singlePath);
+
+        const auto &header = input.Header();
+        std::cout << "\n[Energy] " << singlePath << std::endl;
+
+        if (header.FileTypeName() != openpni::io::listmode::fields::file_type_single_listmode)
+        {
+            std::cout << "  Not a single listmode file, skipping" << std::endl;
+            continue;
+        }
+
+        for (uint32_t segIdx = 0; segIdx < input.SegmentNum(); ++segIdx)
+        {
+            auto segment = input.ReadSegment(segIdx);
+            const auto data = segment.GetHAnyData();
+            const uint64_t count = data.count;
+            stats.total += count;
+
+            if (data.energy1)
+            {
+                for (uint64_t i = 0; i < count; ++i)
+                {
+                    const float raw = data.energy1[i];
+                    const float scaled = raw;
+                    stats.minRaw = std::min(stats.minRaw, raw);
+                    stats.maxRaw = std::max(stats.maxRaw, raw);
+                    stats.minScaled = std::min(stats.minScaled, scaled);
+                    stats.maxScaled = std::max(stats.maxScaled, scaled);
+                    if (scaled >= kEnergyLower_eV && scaled <= kEnergyUpper_eV)
+                        stats.inWindow_eV++;
+                    if (scaled >= kEnergyLower_eV / 1000.0f && scaled <= kEnergyUpper_eV / 1000.0f)
+                        stats.inWindow_keV++;
+                }
+            }
+            else
+            {
+                const float raw = 0.0f;
+                const float scaled = 511.0f;
+                stats.minRaw = std::min(stats.minRaw, raw);
+                stats.maxRaw = std::max(stats.maxRaw, raw);
+                stats.minScaled = std::min(stats.minScaled, scaled);
+                stats.maxScaled = std::max(stats.maxScaled, scaled);
+            }
+        }
+    }
+
+    if (stats.total > 0)
+    {
+        std::cout << "  raw range: [" << stats.minRaw << ", " << stats.maxRaw << "]" << std::endl;
+        std::cout << "  scaled range: [" << stats.minScaled << ", " << stats.maxScaled << "]" << std::endl;
+        const double ratioEv = 100.0 * static_cast<double>(stats.inWindow_eV) / static_cast<double>(stats.total);
+        const double ratioKev = 100.0 * static_cast<double>(stats.inWindow_keV) / static_cast<double>(stats.total);
+        std::cout << "  in window " << kEnergyLower_eV << "~" << kEnergyUpper_eV << " eV: "
+                  << stats.inWindow_eV << " (" << ratioEv << "%)" << std::endl;
+        std::cout << "  in window " << kEnergyLower_eV / 1000.0f << "~" << kEnergyUpper_eV / 1000.0f
+                  << " keV: " << stats.inWindow_keV << " (" << ratioKev << "%)" << std::endl;
+    }
+
+    return stats;
+}
 
 /**
  * @brief 生成模拟的单事件数据
  */
-std::vector<openpni::v1::basic::GlobalSingle_t> generateMockSingles(
+std::vector<Single> generateMockSingles(
     size_t count,
     uint64_t baseTime_pico,
     uint64_t timeRange_pico,
     uint32_t maxCrystalIndex,
     std::mt19937 &rng)
 {
-    std::vector<openpni::v1::basic::GlobalSingle_t> singles;
+    std::vector<Single> singles;
     singles.reserve(count);
 
     std::uniform_int_distribution<uint64_t> timeDist(0, timeRange_pico);
@@ -272,10 +280,11 @@ std::vector<openpni::v1::basic::GlobalSingle_t> generateMockSingles(
 
     for (size_t i = 0; i < count; ++i)
     {
-        openpni::v1::basic::GlobalSingle_t s;
-        s.globalCrystalIndex = crystalDist(rng);
+        Single s;
+        s.channelIndex = 0;
+        s.crystalIndex = static_cast<unsigned short>(crystalDist(rng));
         s.energy = energyDist(rng);
-        s.timeValue_pico = baseTime_pico + timeDist(rng);
+        s.timevalue_pico = baseTime_pico + timeDist(rng);
         singles.push_back(s);
     }
 
@@ -358,9 +367,9 @@ bool testNodeRingBuffer()
     chunk.chunkId = 0;
     chunk.computerClock_ms = 1000;
     chunk.duration_ms = 100;
-    // GlobalSingle_t: {globalCrystalIndex, timeValue_pico, energy}
-    chunk.singles.push_back({0, 1000000, 500000.0f});
-    chunk.singles.push_back({1, 2000000, 500000.0f});
+    // Single: {channelIndex, crystalIndex, timevalue_pico, energy}
+    chunk.singles.push_back({0, 0, 1000000, 500000.0f});
+    chunk.singles.push_back({0, 1, 2000000, 500000.0f});
 
     if (!buffer.push(std::move(chunk)))
     {
@@ -473,11 +482,11 @@ bool testTimeRangeCalculation()
     std::cout << "\n=== Test 3: Time Range Calculation ===" << std::endl;
 
     TimestampedSingleChunk chunk;
-    // GlobalSingle_t: {globalCrystalIndex, timeValue_pico, energy}
-    chunk.singles.push_back({0, 1000, 500000.0f});
-    chunk.singles.push_back({1, 5000, 500000.0f});
-    chunk.singles.push_back({2, 3000, 500000.0f});
-    chunk.singles.push_back({3, 2000, 500000.0f});
+    // Single: {channelIndex, crystalIndex, timevalue_pico, energy}
+    chunk.singles.push_back({0, 0, 1000, 500000.0f});
+    chunk.singles.push_back({0, 1, 5000, 500000.0f});
+    chunk.singles.push_back({0, 2, 3000, 500000.0f});
+    chunk.singles.push_back({0, 3, 2000, 500000.0f});
 
     chunk.updateTimeRange();
 
@@ -614,9 +623,9 @@ bool testBufferWithMemoryPool()
     // 创建带内存池的缓冲区
     NodeRingBuffer buffer(0, 100, &pool);
 
-    // 每个 single 约 16 字节 (4 + 8 + 4)，100 个 = 1600 字节
+    // 每个 single 约 16 字节 (2 + 2 + 8 + 4)，100 个 = 1600 字节
     const size_t singlesPerChunk = 100;
-    const size_t expectedChunkSize = singlesPerChunk * sizeof(openpni::v1::basic::GlobalSingle_t);
+    const size_t expectedChunkSize = singlesPerChunk * sizeof(Single);
     std::cout << "  Expected chunk memory: ~" << expectedChunkSize << " bytes" << std::endl;
 
     // 推送多个数据块，直到内存池接近满
@@ -632,8 +641,8 @@ bool testBufferWithMemoryPool()
         // 生成单事件数据
         for (size_t j = 0; j < singlesPerChunk; ++j)
         {
-            // GlobalSingle_t: {globalCrystalIndex, timeValue_pico, energy}
-            chunk.singles.push_back({static_cast<unsigned>(j), static_cast<uint64_t>(i * 1000000 + j * 1000), 500000.0f});
+            // Single: {channelIndex, crystalIndex, timevalue_pico, energy}
+            chunk.singles.push_back({0, static_cast<unsigned short>(j), static_cast<uint64_t>(i * 1000000 + j * 1000), 500000.0f});
         }
 
         if (!buffer.push(std::move(chunk), 100))
@@ -694,9 +703,10 @@ bool testStreamingCoincidenceComputation()
 
     // 配置文件路径
     std::vector<std::string> files = {
-        "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/split/singles_dist0.single",
-        "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/split/singles_dist1.single",
-        "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/split/singles_dist2.single"};
+        "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/singles_50100_split/singles_50100_test_ch0-35_n36.lsingle",
+        "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/singles_50100_split/singles_50100_test_ch36-71_n36.lsingle",
+        "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/singles_50100_split/singles_50100_test_ch72-107_n36.lsingle",
+        "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/singles_50100_split/singles_50100_test_ch108-143_n36.lsingle"};
 
     // 检查文件是否存在
     std::vector<std::string> validFiles;
@@ -723,15 +733,32 @@ bool testStreamingCoincidenceComputation()
     std::cout << "  Using " << nodeCount << " nodes/files" << std::endl;
 
     // 创建输出目录
-    std::string outputDir = "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/coin/streaming_coin_test_output";
+    std::string outputDir = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/coin_50100_stream";
     fs::create_directories(outputDir);
 
     // 创建 TimeAligner 配置
-    TimeAlignerConfig alignerConfig = createBDM2AlignerConfig(outputDir);
+    TimeAlignerConfig alignerConfig;
+    alignerConfig.outputDir = outputDir;
+    alignerConfig.channelNum = 48 * 3;
+    alignerConfig.crystalsPerChannel = 6 * 6 * 8;
+    alignerConfig.coinProtocol.timeWindow_ps = 2000;
+    alignerConfig.coinProtocol.delayTime_ps = 2000000;
+    alignerConfig.coinProtocol.energyLower_eV = kEnergyLower_eV;
+    alignerConfig.coinProtocol.energyUpper_eV = kEnergyUpper_eV;
     alignerConfig.networkLatencyMargin_pico = 10'000'000'000;      // 10ms 网络延迟裕量
     alignerConfig.processingIntervalMs = 100;                      // 100ms 处理间隔
     alignerConfig.maxChunksPerNode = 200;                          // 每节点最大200个chunk
     alignerConfig.maxTotalMemoryBytes = 1ULL * 1024 * 1024 * 1024; // 1GB 内存限制
+
+    const auto energyStats = analyzeSinglesEnergy(validFiles);
+    if (energyStats.total > 0 && energyStats.inWindow_eV == 0 && energyStats.inWindow_keV > 0)
+    {
+        alignerConfig.coinProtocol.energyLower_eV = kEnergyLower_eV / 1000.0f;
+        alignerConfig.coinProtocol.energyUpper_eV = kEnergyUpper_eV / 1000.0f;
+        std::cout << "[Energy] Auto-switch window to keV scale: "
+                  << alignerConfig.coinProtocol.energyLower_eV << "~"
+                  << alignerConfig.coinProtocol.energyUpper_eV << std::endl;
+    }
 
     std::cout << "  Config:" << std::endl;
     std::cout << "    Channel num: " << alignerConfig.channelNum << std::endl;
@@ -846,7 +873,7 @@ bool testFileToBufferLoading()
     std::cout << "\n=== Test 8: File to Buffer Loading ===" << std::endl;
 
     // 使用一个测试文件
-    std::string testFile = "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/split/singles_dist0.single";
+    std::string testFile = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/singles_50100_split/singles_50100_test_ch0-35_n36.lsingle";
 
     if (!fs::exists(testFile))
     {

@@ -134,46 +134,9 @@ namespace openpni::distributed::r2s
         return files;
     }
 
-    std::vector<GlobalSingle> convertLocalToGlobalSingles(
-        std::span<Single const> singles,
-        uint32_t crystalsPerChannel)
-    {
-        std::vector<GlobalSingle> globalSingles;
-        globalSingles.reserve(singles.size());
-
-        std::vector<Single> hostBuf;
-        const Single *dataPtr = singles.data();
-
-        if (isDevicePointer(dataPtr))
-        {
-            hostBuf.resize(singles.size());
-            cudaError_t err = cudaMemcpy(hostBuf.data(), dataPtr,
-                                         singles.size() * sizeof(Single),
-                                         cudaMemcpyDeviceToHost);
-            if (err != cudaSuccess)
-            {
-                throw std::runtime_error("cudaMemcpyDeviceToHost failed: " +
-                                         std::string(cudaGetErrorString(err)));
-            }
-            dataPtr = hostBuf.data();
-        }
-
-        for (size_t i = 0; i < singles.size(); i++)
-        {
-            GlobalSingle gs;
-            gs.globalCrystalIndex = dataPtr[i].channelIndex * crystalsPerChannel + dataPtr[i].crystalIndex;
-            gs.energy = dataPtr[i].energy;
-            gs.timeValue_pico = dataPtr[i].timevalue_pico;
-            globalSingles.push_back(gs);
-        }
-
-        return globalSingles;
-    }
-
     bool appendSinglesToSingleFile(
         openpni::distributed::coreio::SinglesFileWriter &outputFile,
         std::span<Single const> singles,
-        uint32_t crystalsPerChannel,
         uint64_t clock_ms,
         uint32_t duration_ms)
     {
@@ -184,11 +147,16 @@ namespace openpni::distributed::r2s
 
         try
         {
-            auto globalSingles = convertLocalToGlobalSingles(singles, crystalsPerChannel);
-            return outputFile.AppendSegment(
-                std::span<const openpni::v1::basic::GlobalSingle_t>(globalSingles.data(), globalSingles.size()),
-                clock_ms,
-                duration_ms);
+            if (isDevicePointer(singles.data()))
+            {
+                auto hostSingles = materializeSinglesOnHost(singles);
+                return outputFile.AppendSegment(
+                    std::span<const Single>(hostSingles.data(), hostSingles.size()),
+                    clock_ms,
+                    duration_ms);
+            }
+
+            return outputFile.AppendSegment(singles, clock_ms, duration_ms);
         }
         catch (const std::exception &e)
         {
@@ -255,7 +223,7 @@ namespace openpni::distributed::r2s
         return true;
     }
 
-    bool AsyncSingleFileWriter::submit(std::vector<GlobalSingle> &&singles, uint64_t clock_ms, uint32_t duration_ms)
+    bool AsyncSingleFileWriter::submit(std::vector<Single> &&singles, uint64_t clock_ms, uint32_t duration_ms)
     {
         if (!m_running.load())
         {
@@ -330,7 +298,7 @@ namespace openpni::distributed::r2s
             if (!task.singles.empty())
             {
                 bool success = m_output->AppendSegment(
-                    std::span<const openpni::v1::basic::GlobalSingle_t>(task.singles.data(), task.singles.size()),
+                    std::span<const Single>(task.singles.data(), task.singles.size()),
                     task.clock_ms,
                     task.duration_ms);
 
@@ -481,6 +449,22 @@ namespace openpni::distributed::r2s
                 d_data.channel,
                 d_data.count);
 
+            const cudaError_t cudaSyncErr = cudaDeviceSynchronize();
+            if (cudaSyncErr != cudaSuccess)
+            {
+                LOG(ERROR) << "CUDA sync error after R2S_CUDA: " << cudaGetErrorString(cudaSyncErr);
+                m_hadError = true;
+                return false;
+            }
+
+            const cudaError_t cudaLastErr = cudaGetLastError();
+            if (cudaLastErr != cudaSuccess)
+            {
+                LOG(ERROR) << "CUDA async error after R2S_CUDA: " << cudaGetErrorString(cudaLastErr);
+                m_hadError = true;
+                return false;
+            }
+
             if (m_config.r2sResultIndex >= r2sResults.size())
             {
                 LOG(ERROR) << "Error: r2sResultIndex " << m_config.r2sResultIndex
@@ -520,7 +504,7 @@ namespace openpni::distributed::r2s
                     const double speedMbPerSec =
                         static_cast<double>(view.count * 1024ULL) / 1024.0 / 1024.0 /
                         (static_cast<double>(timeMs) / 1000.0);
-                    LOG(INFO) << ", speed=" << speedMbPerSec << " MB/s";
+                    LOG(INFO) << " speed = " << speedMbPerSec << " MB/s";
                 }
 
                 LOG(INFO) << "";
@@ -627,8 +611,16 @@ namespace openpni::distributed::r2s
 
     bool R2SStreamProcessor::prepareGenerators()
     {
+        const bool useFullCalibrationLoad =
+            m_config.forceFullCalibrationLoad && m_config.detectorType == DetectorType::BDM50100;
+
+        if (useFullCalibrationLoad)
+        {
+            LOG(INFO) << "Full calibration load enabled for BDM50100";
+        }
+
         size_t requiredCalibrationCount = 0;
-        if (m_config.channelIndices.empty())
+        if (m_config.channelIndices.empty() || useFullCalibrationLoad)
         {
             requiredCalibrationCount = m_config.channelNums;
         }
@@ -649,9 +641,10 @@ namespace openpni::distributed::r2s
             return false;
         }
 
+        
         LOG(INFO) << "Loading " << m_channelsToProcess.size() << " channels' calibration data...";
 
-        if (m_config.channelIndices.empty())
+        if (m_config.channelIndices.empty() || useFullCalibrationLoad)
         {
             for (size_t i = 0; i < m_config.channelNums; i++)
             {
@@ -712,7 +705,7 @@ namespace openpni::distributed::r2s
         if (m_config.saveData2SingleFile)
         {
             const uint32_t totalCrystals = m_config.channelNums * m_config.crystalsPerChannel;
-            m_outputFilePath = m_config.resultPath + "/" + m_config.outputFileName + ".single";
+            m_outputFilePath = m_config.resultPath + "/" + m_config.outputFileName + ".lsingle";
 
             if (m_config.asyncFileWrite)
             {
@@ -758,8 +751,8 @@ namespace openpni::distributed::r2s
 
         if (m_config.onSinglesReady)
         {
-            auto globalSingles = convertLocalToGlobalSingles(singles, m_config.crystalsPerChannel);
-            const bool callbackSuccess = m_config.onSinglesReady(std::move(globalSingles), clockMs, durationMs);
+            auto hostSingles = materializeSinglesOnHost(singles);
+            const bool callbackSuccess = m_config.onSinglesReady(std::move(hostSingles), clockMs, durationMs);
             if (!callbackSuccess)
             {
                 LOG(ERROR) << "Callback onSinglesReady returned false, stopping";
@@ -779,9 +772,9 @@ namespace openpni::distributed::r2s
 
         if (m_config.asyncFileWrite)
         {
-            auto globalSinglesForFile = convertLocalToGlobalSingles(singles, m_config.crystalsPerChannel);
+            auto hostSingles = materializeSinglesOnHost(singles);
             const bool fileSuccess = m_asyncWriter->submit(
-                std::move(globalSinglesForFile),
+                std::move(hostSingles),
                 clockMs,
                 durationMs);
             if (!fileSuccess)
@@ -794,7 +787,6 @@ namespace openpni::distributed::r2s
         const bool fileSuccess = appendSinglesToSingleFile(
             *m_singleOutput,
             singles,
-            m_config.crystalsPerChannel,
             clockMs,
             durationMs);
         if (!fileSuccess)
@@ -1048,6 +1040,7 @@ namespace openpni::distributed::r2s
         config.outputFileName = outputFileName;
         config.channelNums = 48 * 3;
         config.channelIndices = channelIndices;
+        config.forceFullCalibrationLoad = true;
         return config;
     }
 

@@ -27,6 +27,7 @@
 #include <grpcpp/grpcpp.h>
 
 #include "protos/coincidence.grpc.pb.h"
+#include "core/io/IOAdapter.hpp"
 #include "core/r2s/R2S.hpp"
 #include "grpcNode/r2sNode.hpp"
 
@@ -40,11 +41,11 @@ namespace
     struct ProgramOptions
     {
         std::string address = "127.0.0.1:50061";
-        std::string splitDir = "Data/bdm2/split_Data";
-        std::string calibrationDir = "Data/bdm2/calibration";
-        std::string resultDir = "Data/result/Bdm2/split";
-        std::string rawPrefix = "2_PET_2Bed pet 600s-bed0";
-        uint32_t nodeCount = 3;
+        std::string splitDir = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/splitdata";
+        std::string calibrationDir = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/cali";
+        std::string resultDir = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res";
+        std::string rawPrefix = "converted_rawData";
+        uint32_t nodeCount = 4;
         size_t maxPendingSegments = 64;
         uint32_t batchSegmentsPerMessage = 1;
         bool parallelNodes = false;
@@ -80,71 +81,88 @@ namespace
             grpc::ServerReader<coincidence::SingleChunkMessage> *reader,
             coincidence::StreamResponse *response) override
         {
-            coincidence::SingleChunkMessage msg;
-            uint64_t totalReceivedInRpc = 0;
-
-            while (reader->Read(&msg))
+            try
             {
-                const uint32_t nodeId = msg.node_id();
-                const uint64_t singlesCount = static_cast<uint64_t>(msg.singles_size());
-                const uint64_t segmentCount =
-                    msg.segment_metas_size() > 0 ? static_cast<uint64_t>(msg.segment_metas_size()) : 1ULL;
+                coincidence::SingleChunkMessage msg;
+                uint64_t totalReceivedInRpc = 0;
 
-                totalReceivedInRpc += singlesCount;
-                m_totalChunksReceived.fetch_add(segmentCount, std::memory_order_relaxed);
-                m_totalSinglesReceived.fetch_add(singlesCount, std::memory_order_relaxed);
-
+                while (reader->Read(&msg))
                 {
-                    std::lock_guard<std::mutex> lock(m_mutex);
-                    auto &node = m_nodes[nodeId];
-                    node.connected = true;
+                    const uint32_t nodeId = msg.node_id();
+                    const uint64_t singlesCount = static_cast<uint64_t>(msg.singles_size());
+                    const uint64_t segmentCount =
+                        msg.segment_metas_size() > 0 ? static_cast<uint64_t>(msg.segment_metas_size()) : 1ULL;
 
-                    if (msg.segment_metas_size() > 0)
+                    totalReceivedInRpc += singlesCount;
+                    m_totalChunksReceived.fetch_add(segmentCount, std::memory_order_relaxed);
+                    m_totalSinglesReceived.fetch_add(singlesCount, std::memory_order_relaxed);
+
                     {
-                        uint64_t singlesFromMeta = 0;
-                        for (const auto &meta : msg.segment_metas())
-                        {
-                            const uint64_t segmentSingles = static_cast<uint64_t>(meta.singles_count());
-                            node.chunksReceived += 1;
-                            node.singlesReceived += segmentSingles;
-                            singlesFromMeta += segmentSingles;
+                        std::lock_guard<std::mutex> lock(m_mutex);
+                        auto &node = m_nodes[nodeId];
+                        node.connected = true;
 
-                            if (meta.chunk_id() % 500 == 0)
+                        if (msg.segment_metas_size() > 0)
+                        {
+                            uint64_t singlesFromMeta = 0;
+                            for (const auto &meta : msg.segment_metas())
+                            {
+                                const uint64_t segmentSingles = static_cast<uint64_t>(meta.singles_count());
+                                node.chunksReceived += 1;
+                                node.singlesReceived += segmentSingles;
+                                singlesFromMeta += segmentSingles;
+
+                                if (meta.chunk_id() % 500 == 0)
+                                {
+                                    std::cout << "[Receiver] node=" << nodeId
+                                              << " chunk=" << meta.chunk_id()
+                                              << " singles=" << segmentSingles
+                                              << " totalSingles=" << m_totalSinglesReceived.load(std::memory_order_relaxed)
+                                              << std::endl;
+                                }
+                            }
+
+                            if (singlesFromMeta < singlesCount)
+                            {
+                                node.singlesReceived += (singlesCount - singlesFromMeta);
+                            }
+                        }
+                        else
+                        {
+                            node.chunksReceived += 1;
+                            node.singlesReceived += singlesCount;
+
+                            if (msg.chunk_id() % 500 == 0)
                             {
                                 std::cout << "[Receiver] node=" << nodeId
-                                          << " chunk=" << meta.chunk_id()
-                                          << " singles=" << segmentSingles
+                                          << " chunk=" << msg.chunk_id()
+                                          << " singles=" << singlesCount
                                           << " totalSingles=" << m_totalSinglesReceived.load(std::memory_order_relaxed)
                                           << std::endl;
                             }
                         }
-
-                        if (singlesFromMeta < singlesCount)
-                        {
-                            node.singlesReceived += (singlesCount - singlesFromMeta);
-                        }
-                    }
-                    else
-                    {
-                        node.chunksReceived += 1;
-                        node.singlesReceived += singlesCount;
-
-                        if (msg.chunk_id() % 500 == 0)
-                        {
-                            std::cout << "[Receiver] node=" << nodeId
-                                      << " chunk=" << msg.chunk_id()
-                                      << " singles=" << singlesCount
-                                      << " totalSingles=" << m_totalSinglesReceived.load(std::memory_order_relaxed)
-                                      << std::endl;
-                        }
                     }
                 }
-            }
 
-            response->set_success(true);
-            response->set_singles_received(totalReceivedInRpc);
-            response->set_message("Receiver-only mode: chunk stream accepted");
-            return grpc::Status::OK;
+                response->set_success(true);
+                response->set_singles_received(totalReceivedInRpc);
+                response->set_message("Receiver-only mode: chunk stream accepted");
+                return grpc::Status::OK;
+            }
+            catch (const std::exception &e)
+            {
+                response->set_success(false);
+                response->set_singles_received(0);
+                response->set_message(std::string("Receiver exception: ") + e.what());
+                return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+            }
+            catch (...)
+            {
+                response->set_success(false);
+                response->set_singles_received(0);
+                response->set_message("Receiver unknown exception");
+                return grpc::Status(grpc::StatusCode::INTERNAL, "Receiver unknown exception");
+            }
         }
 
         grpc::Status GetStatus(
@@ -327,11 +345,11 @@ namespace
         std::cout << "Usage: " << prog << " [options]\n"
                   << "Options:\n"
                   << "  --address <host:port>         gRPC local address (default: 127.0.0.1:50061)\n"
-                  << "  --split-dir <path>            BDM2 split rawdata directory\n"
-                  << "  --calibration-dir <path>      BDM2 calibration directory\n"
+                  << "  --split-dir <path>            BDM50100 split rawdata directory\n"
+                  << "  --calibration-dir <path>      BDM50100 calibration directory\n"
                   << "  --result-dir <path>           Output directory for R2S config\n"
                   << "  --raw-prefix <name>           Split rawdata file prefix\n"
-                  << "  --node-count <N>              Number of nodes/files to process (default: 3)\n"
+                  << "  --node-count <N>              Number of nodes/files to process (default: 4)\n"
                   << "  --max-pending-segments <N>    Async sender queue length in segments (default: 64)\n"
                   << "  --batch-segments <N>          Segments packed into one gRPC message (default: 1)\n"
                   << "  --no-local-receiver           Do not start built-in receiver; use external coin host\n"
@@ -512,13 +530,17 @@ namespace
         const std::string &rawPrefix,
         const std::vector<uint16_t> &channels)
     {
+        const auto minIt = std::min_element(channels.begin(), channels.end());
+        const auto maxIt = std::max_element(channels.begin(), channels.end());
+        const uint16_t minChannel = *minIt;
+        const uint16_t maxChannel = *maxIt;
+        const auto channelCount = channels.size();
+
         std::ostringstream oss;
-        oss << rawPrefix;
-        for (auto ch : channels)
-        {
-            oss << "_ch" << ch;
-        }
-        oss << ".raw";
+        oss << rawPrefix
+            << "_ch" << minChannel << "-" << maxChannel
+            << "_n" << channelCount
+            << ".raw";
         return (fs::path(splitDir) / oss.str()).string();
     }
 
@@ -527,15 +549,21 @@ namespace
         std::vector<NodeInput> nodes;
         nodes.reserve(opts.nodeCount);
 
+        constexpr uint16_t kTotalChannels = 144;
+        const uint16_t groupCount = static_cast<uint16_t>(opts.nodeCount);
+        const uint16_t groupSize = static_cast<uint16_t>(kTotalChannels / groupCount);
+
         for (uint32_t i = 0; i < opts.nodeCount; ++i)
         {
             NodeInput n;
             n.nodeId = i;
-            n.channels = {
-                static_cast<uint16_t>(i * 4),
-                static_cast<uint16_t>(i * 4 + 1),
-                static_cast<uint16_t>(i * 4 + 2),
-                static_cast<uint16_t>(i * 4 + 3)};
+            const uint16_t startChannel = static_cast<uint16_t>(i * groupSize);
+            const uint16_t endChannel = static_cast<uint16_t>(startChannel + groupSize);
+            n.channels.reserve(groupSize);
+            for (uint16_t ch = startChannel; ch < endChannel; ++ch)
+            {
+                n.channels.push_back(ch);
+            }
             n.rawdataPath = makeSplitRawPath(opts.splitDir, opts.rawPrefix, n.channels);
             nodes.push_back(std::move(n));
         }
@@ -546,16 +574,85 @@ namespace
     std::vector<std::string> buildCalibrationFiles(const std::string &calibrationDir)
     {
         std::vector<std::string> files;
-        files.reserve(48);
+        files.reserve(144);
 
-        for (int i = 0; i < 48; ++i)
+        for (int i = 0; i < 144; ++i)
         {
             std::ostringstream fileName;
-            fileName << "channel_" << std::setw(2) << std::setfill('0') << i << ".data";
+            fileName << "bdm_" << i << ".bin";
             files.push_back((fs::path(calibrationDir) / fileName.str()).string());
         }
 
         return files;
+    }
+
+    bool validateRawdataHeaders(const std::vector<NodeInput> &nodes)
+    {
+        bool ok = true;
+        for (const auto &n : nodes)
+        {
+            try
+            {
+                openpni::distributed::coreio::RawDataFileReader reader(
+                    openpni::distributed::coreio::IOBackend::Latest);
+                reader.Open(n.rawdataPath);
+                const auto &info = reader.Info();
+                if (info.channelNum != 144)
+                {
+                    std::cerr << "[Input] Rawdata channelNum mismatch: " << n.rawdataPath
+                              << " channelNum=" << info.channelNum << std::endl;
+                    ok = false;
+                }
+                if (info.segmentNum == 0)
+                {
+                    std::cerr << "[Input] Rawdata has no segments: " << n.rawdataPath << std::endl;
+                    ok = false;
+                }
+
+                if (info.segmentNum > 0 && !n.channels.empty())
+                {
+                    const auto minIt = std::min_element(n.channels.begin(), n.channels.end());
+                    const auto maxIt = std::max_element(n.channels.begin(), n.channels.end());
+                    const uint16_t minChannel = *minIt;
+                    const uint16_t maxChannel = *maxIt;
+
+                    auto segment = reader.ReadSegment(0, 1);
+                    auto view = segment.View();
+                    for (uint64_t i = 0; i < view.count; ++i)
+                    {
+                        const uint16_t ch = view.channel[i];
+                        if (ch >= info.channelNum)
+                        {
+                            std::cerr << "[Input] Rawdata channel out of header range: " << n.rawdataPath
+                                      << " channel=" << ch << " header.channelNum=" << info.channelNum << std::endl;
+                            ok = false;
+                            break;
+                        }
+                        if (ch < minChannel || ch > maxChannel)
+                        {
+                            std::cerr << "[Input] Rawdata channel outside split range: " << n.rawdataPath
+                                      << " channel=" << ch << " expected=[" << minChannel << "-" << maxChannel << "]" << std::endl;
+                            ok = false;
+                            break;
+                        }
+                        if (view.length[i] == 0)
+                        {
+                            std::cerr << "[Input] Rawdata has zero-length packet: " << n.rawdataPath
+                                      << " at index=" << i << std::endl;
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            catch (const std::exception &e)
+            {
+                std::cerr << "[Input] Failed to read rawdata header: " << n.rawdataPath
+                          << " error=" << e.what() << std::endl;
+                ok = false;
+            }
+        }
+        return ok;
     }
 
     bool validateInputs(
@@ -572,6 +669,13 @@ namespace
                 std::cerr << "[Input] Missing split rawdata file: " << n.rawdataPath << std::endl;
                 ok = false;
             }
+        }
+
+        if (calibrationFiles.size() != 144)
+        {
+            std::cerr << "[Input] Calibration file count mismatch: expected 144, got "
+                      << calibrationFiles.size() << std::endl;
+            ok = false;
         }
 
         for (const auto &path : calibrationFiles)
@@ -592,6 +696,11 @@ namespace
             ok = false;
         }
 
+        if (!validateRawdataHeaders(nodes))
+        {
+            ok = false;
+        }
+
         return ok;
     }
 
@@ -600,7 +709,7 @@ namespace
         const NodeInput &node,
         const std::vector<std::string> &calibrationFiles)
     {
-        auto config = r2s::createBDM2Config(
+        auto config = r2s::createBDM50100Config(
             node.rawdataPath,
             opts.resultDir,
             calibrationFiles,
@@ -619,7 +728,7 @@ namespace
             static_cast<uint32_t>(node.channels.size()),
             opts.maxPendingSegments,
             "127.0.0.1",
-            "BDM2",
+            "BDM50100",
             50,
             true,
             0,
@@ -708,7 +817,7 @@ int main(int argc, char **argv)
     }
 
     std::cout << "============================================" << std::endl;
-    std::cout << "  Local gRPC R2S Streaming Test (BDM2)" << std::endl;
+    std::cout << "  Local gRPC R2S Streaming Test (BDM50100)" << std::endl;
     std::cout << "============================================" << std::endl;
     std::cout << "address      : " << opts.address << std::endl;
     std::cout << "splitDir     : " << opts.splitDir << std::endl;
@@ -721,9 +830,9 @@ int main(int argc, char **argv)
     std::cout << "parallelNodes: " << (opts.parallelNodes ? "true" : "false") << std::endl;
     std::cout << "noLocalReceiver: " << (opts.noLocalReceiver ? "true" : "false") << std::endl;
 
-    if (opts.nodeCount > 12)
+    if (opts.nodeCount != 4)
     {
-        std::cerr << "For BDM2 4-channel groups, nodeCount must be <= 12" << std::endl;
+        std::cerr << "For BDM50100 splitdata (0-143 into 4 groups), nodeCount must be 4" << std::endl;
         return 1;
     }
 
@@ -867,18 +976,18 @@ int main(int argc, char **argv)
 
 /*
 Build example:
-  make test-local-grpc-r2s
+    make test-local-grpc-r2s
 
-运行（连接外部 coin，3 节点并行注册并等待开始信号）
-./bin/test_local_grpc_r2s \
-  --address 127.0.0.1:50061 \
-  --split-dir Data/bdm2/split_Data \
-  --calibration-dir Data/bdm2/calibration \
-  --result-dir Data/result/Bdm2/split \
-  --raw-prefix "2_PET_2Bed pet 600s-bed0" \
-  --node-count 3 \
-  --max-pending-segments 128 \
+运行（50100 拆分数据，4 节点并行注册并等待开始信号）
+./bin/test/test_local_grpc_r2s \
+    --address 127.0.0.1:50061 \
+    --split-dir /media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/splitdata \
+    --calibration-dir /media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/cali \
+    --result-dir /media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res \
+    --raw-prefix "converted_rawData" \
+    --node-count 4 \
+    --max-pending-segments 128 \
     --batch-segments 3 \
-  --parallel \
-  --no-local-receiver
+    --parallel \
+    --no-local-receiver
 */

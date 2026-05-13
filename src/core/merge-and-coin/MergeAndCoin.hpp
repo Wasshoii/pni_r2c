@@ -1,5 +1,6 @@
 #pragma once
 #include <pni/io/IO.hpp>
+#include <pni/io/ListmodeIO.hpp>
 #include <filesystem>
 #include <iostream>
 #include <vector>
@@ -15,12 +16,16 @@
 #include <queue>
 #include <atomic>
 #include <span>
+#include <stdexcept>
 
 namespace openpni::distributed::coin
 {
     namespace fs = std::filesystem;
-    using ListmodeFileOutput = openpni::io::v1::listmode::ListmodeFileOutput;
-    using GlobalSingle = openpni::v1::basic::GlobalSingle;
+    using ListmodeFileOutput = openpni::io::listmode::ListmodeFileOutput;
+    using ListmodeFileInput = openpni::io::listmode::ListmodeFileInput;
+    using ListmodeFileHeader = openpni::io::listmode::ListmodeFileHeader;
+    using ListmodeFileSegment = openpni::io::listmode::ListmodeFileSegment;
+    using SupportedFields = openpni::io::listmode::SupportedFields;
 
     /**
      * @brief 符合 处理配置结构体
@@ -33,6 +38,42 @@ namespace openpni::distributed::coin
         uint32_t crystalsPerChannel = 0;
         std::string outputDir;
     };
+
+    inline ListmodeFileHeader createCoinListmodeHeader()
+    {
+        ListmodeFileHeader header;
+        auto fieldsInUse = static_cast<SupportedFields>(
+            SupportedFields::local_crystal_index1 |
+            SupportedFields::local_crystal_index2 |
+            SupportedFields::channel_index1 |
+            SupportedFields::channel_index2 |
+            SupportedFields::time_of_flight);
+        header.SetFieldsInUse(fieldsInUse);
+        header.SetBitsForStorage(SupportedFields::local_crystal_index1, 16);
+        header.SetBitsForStorage(SupportedFields::local_crystal_index2, 16);
+        header.SetBitsForStorage(SupportedFields::channel_index1, 16);
+        header.SetBitsForStorage(SupportedFields::channel_index2, 16);
+        header.SetBitsForStorage(SupportedFields::time_of_flight, 16);
+        header.SetFileTypeName(openpni::io::listmode::fields::file_type_coin_listmode);
+        return header;
+    }
+
+    inline ListmodeFileHeader createSingleListmodeHeader()
+    {
+        ListmodeFileHeader header;
+        auto fieldsInUse = static_cast<SupportedFields>(
+            SupportedFields::local_crystal_index1 |
+            SupportedFields::channel_index1 |
+            SupportedFields::energy1 |
+            SupportedFields::absolute_timestamp1);
+        header.SetFieldsInUse(fieldsInUse);
+        header.SetBitsForStorage(SupportedFields::local_crystal_index1, 16);
+        header.SetBitsForStorage(SupportedFields::channel_index1, 16);
+        header.SetBitsForStorage(SupportedFields::energy1, 32);
+        header.SetBitsForStorage(SupportedFields::absolute_timestamp1, 64);
+        header.SetFileTypeName(openpni::io::listmode::fields::file_type_single_listmode);
+        return header;
+    }
 
     /**
      * @brief IO Context to keep files open across chunks (Modified for Listmode Output)
@@ -50,16 +91,14 @@ namespace openpni::distributed::coin
 
         ListmodeFileOutput &getStream(const std::string &type, uint32_t totalCrystals)
         {
+            (void)totalCrystals;
             if (type == "prompt")
             {
                 if (!promptWriter)
                 {
                     std::string path = outputDir + "/prompt.lmf";
-                    promptWriter = std::make_unique<ListmodeFileOutput>();
-                    promptWriter->setBytes4CrystalIndex(openpni::io::v1::single::CrystalIndexType::UINT32);
-                    promptWriter->setBytes4TimeValue1_2(openpni::io::v1::listmode::TimeValue1_2Type::INT16);
-                    promptWriter->setTotalCrystalNum(totalCrystals);
-                    promptWriter->open(path);
+                    promptWriter = std::make_unique<ListmodeFileOutput>(createCoinListmodeHeader());
+                    promptWriter->Open(path);
                 }
                 return *promptWriter;
             }
@@ -68,11 +107,8 @@ namespace openpni::distributed::coin
                 if (!delayWriter)
                 {
                     std::string path = outputDir + "/delay.lmf";
-                    delayWriter = std::make_unique<ListmodeFileOutput>();
-                    delayWriter->setBytes4CrystalIndex(openpni::io::v1::single::CrystalIndexType::UINT32);
-                    delayWriter->setBytes4TimeValue1_2(openpni::io::v1::listmode::TimeValue1_2Type::INT16);
-                    delayWriter->setTotalCrystalNum(totalCrystals);
-                    delayWriter->open(path);
+                    delayWriter = std::make_unique<ListmodeFileOutput>(createCoinListmodeHeader());
+                    delayWriter->Open(path);
                 }
                 return *delayWriter;
             }
@@ -87,6 +123,7 @@ namespace openpni::distributed::coin
         std::span<Listmode const> coins,
         uint32_t crystalsPerChannel)
     {
+        (void)crystalsPerChannel;
         if (coins.empty())
             return;
 
@@ -106,34 +143,19 @@ namespace openpni::distributed::coin
             srcPtr = hostBuf.data();
         }
 
-        // Convert LocalListmode (Host) to Standard Listmode_t
-        std::vector<openpni::v1::basic::Listmode_t> listmodeData(coins.size());
-
-        // Parallel conversion
-        openpni::tools::parallel_for_each_CPU(
-            coins.size(),
-            [&](size_t i)
-            {
-                const auto &loc = srcPtr[i];
-                auto &glob = listmodeData[i];
-
-                // Calculate Global Indices
-                glob.globalCrystalIndex1 = (uint32_t)loc.channelIndex1 * crystalsPerChannel + loc.crystalIndex1;
-                glob.globalCrystalIndex2 = (uint32_t)loc.channelIndex2 * crystalsPerChannel + loc.crystalIndex2;
-
-                // Copy time difference directly (LocalListmode has 'time1_2pico' member)
-                glob.time1_2pico = static_cast<int16_t>(loc.time1_2pico);
-            });
-
-        // Write segment (using 0 for clock/duration as they are stream segments)
-        output.appendSegment(listmodeData.data(), listmodeData.size(), 0, 0);
+        const std::span<Listmode const> listmodes(srcPtr, coins.size());
+        ListmodeFileSegment segment;
+        segment.SetListmodes(listmodes);
+        segment.SetClockMs(0);
+        segment.SetDurationMs(0);
+        output.AppendSegment(std::move(segment));
     }
 
     /**
      * @brief 处理符合计算
      */
     void processCoincidenceForChunk(
-        const std::span<const GlobalSingle> &singles,
+        const std::span<const Single> &singles,
         const CoincidenceProcessConfig &config,
         const openpni::Coincidence &coinNode,
         CoincidenceIOContext *ioCtx)
@@ -141,26 +163,9 @@ namespace openpni::distributed::coin
         if (singles.empty() || config.crystalsPerChannel == 0 || !ioCtx)
             return;
 
-        // 1. Convert GlobalSingle to LocalSingle (Host)
-        std::vector<Single> localSingles(singles.size());
-        const uint32_t cpc = config.crystalsPerChannel;
-
-        // 并行转换
-        openpni::tools::parallel_for_each_CPU(
-            singles.size(),
-            [&](size_t i)
-            {
-                const auto &g = singles[i];
-                auto &l = localSingles[i];
-                l.channelIndex = g.globalCrystalIndex / cpc;
-                l.crystalIndex = g.globalCrystalIndex % cpc;
-                l.energy = g.energy;
-                l.timevalue_pico = g.timeValue_pico;
-            });
-
-        // 2. Upload to GPU
+        // Upload to GPU
         Single *d_singles_ptr = nullptr;
-        size_t bytes = localSingles.size() * sizeof(Single);
+        size_t bytes = singles.size() * sizeof(Single);
         cudaError_t err = cudaMalloc(&d_singles_ptr, bytes);
         if (err != cudaSuccess)
         {
@@ -168,7 +173,7 @@ namespace openpni::distributed::coin
             return;
         }
 
-        err = cudaMemcpy(d_singles_ptr, localSingles.data(), bytes, cudaMemcpyHostToDevice);
+        err = cudaMemcpy(d_singles_ptr, singles.data(), bytes, cudaMemcpyHostToDevice);
         if (err != cudaSuccess)
         {
             std::cerr << "cudaMemcpy failed: " << cudaGetErrorString(err) << std::endl;
@@ -179,7 +184,7 @@ namespace openpni::distributed::coin
         // 3. Perform Coincidence & Save
         try
         {
-            std::span<Single const> d_span(d_singles_ptr, localSingles.size());
+            std::span<Single const> d_span(d_singles_ptr, singles.size());
 
             std::vector<std::span<Single const>> inputList;
             inputList.push_back(d_span);
@@ -213,130 +218,53 @@ namespace openpni::distributed::coin
         cudaFree(d_singles_ptr);
     }
 
-    /**
-     * @brief 直接解析到缓冲区，避免返回 vector 导致的分配和拷贝
-     */
-    void parseSingleSegmentBytesToBuffer(
-        const openpni::io::v1::single::SingleSegmentBytes &segBytes,
-        const openpni::io::v1::single::SingleFileHeader &fileHeader,
-        uint64_t count,
-        GlobalSingle *destBuffer)
+    inline std::vector<Single> readSinglesFromSegment(ListmodeFileSegment &segment)
     {
-        // Lambda Selection for Crystal Index
-        std::function<uint32_t(uint64_t)> getCrystalIndex;
-        if (fileHeader.bytes4CrystalIndex == 2)
+        const auto data = segment.GetHAnyData();
+        if (!data.local_crystal_index1 || !data.channel_index1 || !data.absolute_timestamp1)
         {
-            auto ptr = reinterpret_cast<const uint16_t *>(segBytes.crystalIndexBytes.get());
-            getCrystalIndex = [ptr](uint64_t i)
-            { return ptr[i]; };
-        }
-        else if (fileHeader.bytes4CrystalIndex == 4)
-        {
-            auto ptr = reinterpret_cast<const uint32_t *>(segBytes.crystalIndexBytes.get());
-            getCrystalIndex = [ptr](uint64_t i)
-            { return ptr[i]; };
-        }
-        else // 3 bytes
-        {
-            auto ptr = reinterpret_cast<const uint8_t *>(segBytes.crystalIndexBytes.get());
-            getCrystalIndex = [ptr](uint64_t i)
-            {
-                const uint8_t *p = ptr + i * 3;
-                return p[0] | (p[1] << 8) | (p[2] << 16);
-            };
+            throw std::runtime_error("Single segment missing required fields");
         }
 
-        // Lambda Selection for Time Value
-        std::function<uint64_t(uint64_t)> getTimeValue;
-        if (fileHeader.bytes4TimeValue == 8)
+        std::vector<Single> singles(data.count);
+        for (std::size_t i = 0; i < data.count; ++i)
         {
-            auto ptr = reinterpret_cast<const uint64_t *>(segBytes.timeValueBytes.get());
-            getTimeValue = [ptr](uint64_t i)
-            { return ptr[i]; };
+            singles[i].channelIndex = data.channel_index1[i];
+            singles[i].crystalIndex = data.local_crystal_index1[i];
+            singles[i].timevalue_pico = data.absolute_timestamp1[i];
+            singles[i].energy = data.energy1 ? data.energy1[i] : 0.0f;
         }
-        else if (fileHeader.bytes4TimeValue == 4)
-        {
-            auto ptr = reinterpret_cast<const uint32_t *>(segBytes.timeValueBytes.get());
-            getTimeValue = [ptr](uint64_t i)
-            { return ptr[i]; };
-        }
-        else
-        {
-            int bytes = fileHeader.bytes4TimeValue;
-            auto ptr = reinterpret_cast<const uint8_t *>(segBytes.timeValueBytes.get());
-            getTimeValue = [ptr, bytes](uint64_t i)
-            {
-                const uint8_t *p = ptr + i * bytes;
-                uint64_t val = 0;
-                for (int k = 0; k < bytes; k++)
-                    val |= (static_cast<uint64_t>(p[k]) << (k * 8));
-                return val;
-            };
-        }
-
-        // Lambda Selection for Energy
-        std::function<float(uint64_t)> getEnergy;
-        if (fileHeader.bytes4Energy == 4)
-        {
-            auto ptr = reinterpret_cast<const float *>(segBytes.energyBytes.get());
-            getEnergy = [ptr](uint64_t i)
-            { return ptr[i]; };
-        }
-        else if (fileHeader.bytes4Energy == 1)
-        {
-            auto ptr = reinterpret_cast<const uint8_t *>(segBytes.energyBytes.get());
-            getEnergy = [ptr](uint64_t i)
-            { return static_cast<float>(ptr[i]) * 4.0f; };
-        }
-        else if (fileHeader.bytes4Energy == 2)
-        {
-            auto ptr = reinterpret_cast<const uint16_t *>(segBytes.energyBytes.get());
-            getEnergy = [ptr](uint64_t i)
-            { return static_cast<float>(ptr[i]) * 0.01f; };
-        }
-        else
-        {
-            getEnergy = [](uint64_t)
-            { return 511.0f; };
-        }
-
-        // Loop填充到目标 Buffer
-        for (uint64_t i = 0; i < count; i++)
-        {
-            destBuffer[i].globalCrystalIndex = getCrystalIndex(i);
-            destBuffer[i].timeValue_pico = getTimeValue(i);
-            destBuffer[i].energy = getEnergy(i);
-        }
-    }
-
-    /**
-     * @brief 从字节数据解析 GlobalSingle 数组 (Optimized)
-     */
-    std::vector<GlobalSingle> parseSingleSegmentBytes(
-        const openpni::io::v1::single::SingleSegmentBytes &segBytes,
-        const openpni::io::v1::single::SingleFileHeader &fileHeader,
-        uint64_t count)
-    {
-        std::vector<GlobalSingle> singles(count);
-        parseSingleSegmentBytesToBuffer(segBytes, fileHeader, count, singles.data());
         return singles;
     }
 
-    /**
-     * @brief 异步文件写入器
-     * 将数据写入任务放入队列，后台单线程负责实际 fwrite
-     */
+    inline void fillSinglesFromSegment(ListmodeFileSegment &segment, Single *dest)
+    {
+        const auto data = segment.GetHAnyData();
+        if (!data.local_crystal_index1 || !data.channel_index1 || !data.absolute_timestamp1)
+        {
+            throw std::runtime_error("Single segment missing required fields");
+        }
+
+        for (std::size_t i = 0; i < data.count; ++i)
+        {
+            dest[i].channelIndex = data.channel_index1[i];
+            dest[i].crystalIndex = data.local_crystal_index1[i];
+            dest[i].timevalue_pico = data.absolute_timestamp1[i];
+            dest[i].energy = data.energy1 ? data.energy1[i] : 0.0f;
+        }
+    }
+
     class AsyncSingleWriter
     {
     public:
         AsyncSingleWriter(const std::string &path,
-                          openpni::io::v1::single::SingleFileOutput &outputHelper,
                           size_t maxMemoryBytes = 16ULL * 1024 * 1024 * 1024)
-            : m_outputHelper(outputHelper), m_maxMemoryBytes(maxMemoryBytes), m_currentMemoryBytes(0), m_running(true)
+            : m_output(createSingleListmodeHeader())
+            , m_maxMemoryBytes(maxMemoryBytes)
+            , m_currentMemoryBytes(0)
+            , m_running(true)
         {
-            // 提前打开文件，确保清空旧内容
-            m_outputHelper.open(path);
-
+            m_output.Open(path);
             m_worker = std::thread([this]()
                                    { workerLoop(); });
         }
@@ -352,9 +280,9 @@ namespace openpni::distributed::coin
                 m_worker.join();
         }
 
-        void submit(std::vector<GlobalSingle> &&data, uint64_t clock, uint32_t duration)
+        void submit(std::vector<Single> &&data, uint64_t clock, uint32_t duration)
         {
-            size_t dataSize = data.capacity() * sizeof(GlobalSingle);
+            size_t dataSize = data.capacity() * sizeof(Single);
 
             std::unique_lock<std::mutex> lock(m_mutex);
             m_cv_capacity.wait(lock, [this, dataSize]
@@ -380,7 +308,7 @@ namespace openpni::distributed::coin
                                    { return !m_queue.empty() || !m_running; });
 
                     if (!m_running && m_queue.empty())
-                        return; // 退出条件
+                        return;
 
                     if (m_queue.empty())
                         continue;
@@ -389,13 +317,15 @@ namespace openpni::distributed::coin
                     m_queue.pop();
                 }
 
-                // 执行实际写入
                 if (!task.data.empty())
                 {
-                    size_t taskSize = task.data.capacity() * sizeof(GlobalSingle);
-                    m_outputHelper.appendSegment(task.data.data(), task.data.size(), task.clock, task.duration);
+                    size_t taskSize = task.data.capacity() * sizeof(Single);
+                    ListmodeFileSegment segment;
+                    segment.SetSingles(std::span<const Single>(task.data.data(), task.data.size()));
+                    segment.SetClockMs(task.clock);
+                    segment.SetDurationMs(task.duration);
+                    m_output.AppendSegment(std::move(segment));
 
-                    // 显式释放内存
                     task.data.clear();
                     task.data.shrink_to_fit();
 
@@ -410,12 +340,12 @@ namespace openpni::distributed::coin
 
         struct WriteTask
         {
-            std::vector<GlobalSingle> data;
+            std::vector<Single> data;
             uint64_t clock;
             uint32_t duration;
         };
 
-        openpni::io::v1::single::SingleFileOutput &m_outputHelper;
+        ListmodeFileOutput m_output;
         size_t m_maxMemoryBytes;
         size_t m_currentMemoryBytes;
         std::thread m_worker;
@@ -465,69 +395,49 @@ namespace openpni::distributed::coin
             }
 
             // 1. 打开所有输入文件并验证兼容性
-            std::vector<std::unique_ptr<openpni::io::v1::single::SingleFileInput>> inputs;
+            std::vector<std::unique_ptr<ListmodeFileInput>> inputs;
             inputs.reserve(inputFiles.size());
 
-            openpni::io::v1::single::SingleFileHeader firstHeader;
-            uint32_t maxCrystalNum = 0;
             uint64_t totalSegments = 0;
             uint64_t totalSingles = 0;
 
             for (size_t i = 0; i < inputFiles.size(); i++)
             {
-                auto input = std::make_unique<openpni::io::v1::single::SingleFileInput>();
-                input->open(inputFiles[i]);
+                auto input = std::make_unique<ListmodeFileInput>();
+                input->Open(inputFiles[i]);
 
-                auto header = input->header();
-
-                if (i == 0)
+                const auto &header = input->Header();
+                if (header.FileTypeName() != openpni::io::listmode::fields::file_type_single_listmode)
                 {
-                    firstHeader = header;
-                    std::cout << "  File format: bytes4CrystalIndex=" << static_cast<int>(header.bytes4CrystalIndex)
-                              << ", bytes4TimeValue=" << static_cast<int>(header.bytes4TimeValue)
-                              << ", bytes4Energy=" << static_cast<int>(header.bytes4Energy) << std::endl;
-                }
-                else
-                {
-                    // 验证文件格式兼容性
-                    if (header.bytes4CrystalIndex != firstHeader.bytes4CrystalIndex ||
-                        header.bytes4TimeValue != firstHeader.bytes4TimeValue ||
-                        header.bytes4Energy != firstHeader.bytes4Energy)
-                    {
-                        std::cerr << "Error: Incompatible file format at file " << i << ": " << inputFiles[i] << std::endl;
-                        return false;
-                    }
+                    std::cerr << "Error: Not a single listmode file: " << inputFiles[i] << std::endl;
+                    return false;
                 }
 
-                maxCrystalNum = std::max(maxCrystalNum, header.cystalNum);
-                totalSegments += header.segmentNum;
-
-                // 统计总事件数
-                for (uint32_t j = 0; j < header.segmentNum; j++)
+                const int fields = static_cast<int>(header.FieldsInUse());
+                const int required = static_cast<int>(SupportedFields::local_crystal_index1 |
+                                                     SupportedFields::channel_index1 |
+                                                     SupportedFields::absolute_timestamp1);
+                if ((fields & required) != required)
                 {
-                    totalSingles += input->segmentHeader(j).count;
+                    std::cerr << "Error: Missing required fields in file: " << inputFiles[i] << std::endl;
+                    return false;
                 }
+
+                const auto segmentNum = input->SegmentNum();
+                totalSegments += segmentNum;
 
                 inputs.push_back(std::move(input));
-                std::cout << "  Opened: " << inputFiles[i] << " (" << header.segmentNum << " segments)" << std::endl;
+                std::cout << "  Opened: " << inputFiles[i] << " (" << segmentNum << " segments)" << std::endl;
             }
 
             std::cout << "Total segments to merge: " << totalSegments << std::endl;
-            std::cout << "Total singles to merge: " << totalSingles << std::endl;
 
             // 2. 创建输出文件
-            openpni::io::v1::single::SingleFileOutput output;
-
-            // 设置输出文件参数
-            output.setBytes4CrystalIndex(static_cast<openpni::io::v1::single::CrystalIndexType>(firstHeader.bytes4CrystalIndex));
-            output.setBytes4TimeValue(static_cast<openpni::io::v1::single::TimeValueType>(firstHeader.bytes4TimeValue));
-            output.setBytes4Energy(static_cast<openpni::io::v1::single::EnergyType>(firstHeader.bytes4Energy));
-            output.setTotalCrystalNum(maxCrystalNum);
 
             std::unique_ptr<AsyncSingleWriter> asyncWriter;
             if (saveMergedSingles)
             {
-                asyncWriter = std::make_unique<AsyncSingleWriter>(outputFile, output);
+                asyncWriter = std::make_unique<AsyncSingleWriter>(outputFile);
                 std::cout << "Output file (Async): " << outputFile << std::endl;
             }
             else
@@ -549,20 +459,24 @@ namespace openpni::distributed::coin
 
             for (size_t i = 0; i < inputs.size(); i++)
             {
-                auto header = inputs[i]->header();
-                for (uint32_t j = 0; j < header.segmentNum; j++)
+                const auto segmentNum = inputs[i]->SegmentNum();
+                for (uint32_t j = 0; j < segmentNum; j++)
                 {
-                    auto segHeader = inputs[i]->segmentHeader(j);
+                    auto segment = inputs[i]->ReadSegment(j);
+                    auto data = segment.GetHAnyData();
                     SegmentTimeInfo info;
                     info.fileIndex = i;
                     info.segmentIndex = j;
-                    info.startTime_ms = segHeader.clock;
-                    info.duration_ms = segHeader.duration;
-                    info.endTime_ms = segHeader.clock + segHeader.duration;
-                    info.count = segHeader.count;
+                    info.startTime_ms = segment.GetClockMs();
+                    info.duration_ms = segment.GetDurationMs();
+                    info.endTime_ms = info.startTime_ms + info.duration_ms;
+                    info.count = data.count;
                     allSegments.push_back(info);
+                    totalSingles += data.count;
                 }
             }
+
+            std::cout << "Total singles to merge: " << totalSingles << std::endl;
 
             // 4. 分析时间分布
             if (!allSegments.empty())
@@ -648,20 +562,19 @@ namespace openpni::distributed::coin
                         auto &input = *inputs[segInfo.fileIndex];
 
                         auto t1 = std::chrono::high_resolution_clock::now();
-                        auto segBytes = input.readSegment(segInfo.segmentIndex);
-                        auto segHeader = input.segmentHeader(segInfo.segmentIndex);
-                        auto fileHeader = input.header();
-
-                        // 直接分配一次 vector
-                        std::vector<GlobalSingle> singles(segHeader.count);
-                        parseSingleSegmentBytesToBuffer(segBytes, fileHeader, segHeader.count, singles.data());
+                        auto segment = input.ReadSegment(segInfo.segmentIndex);
+                        std::vector<Single> singles = readSinglesFromSegment(segment);
                         auto t2 = std::chrono::high_resolution_clock::now();
                         t_read_parse += std::chrono::duration<double, std::milli>(t2 - t1).count();
 
                         if (coinConfig.enable)
                         {
                             auto tc1 = std::chrono::high_resolution_clock::now();
-                            processCoincidenceForChunk(singles, coinConfig, coinNode, ioCtx.get());
+                            processCoincidenceForChunk(
+                                std::span<const Single>(singles.data(), singles.size()),
+                                coinConfig,
+                                coinNode,
+                                ioCtx.get());
                             auto tc2 = std::chrono::high_resolution_clock::now();
                             t_coin += std::chrono::duration<double, std::milli>(tc2 - tc1).count();
                         }
@@ -670,7 +583,7 @@ namespace openpni::distributed::coin
                         if (saveMergedSingles)
                         {
                             asyncWriter->submit(std::move(singles), segInfo.startTime_ms, segInfo.duration_ms);
-                            totalWritten += segHeader.count;
+                            totalWritten += segInfo.count;
                         }
                         auto tw2 = std::chrono::high_resolution_clock::now();
                         t_write += std::chrono::duration<double, std::milli>(tw2 - tw1).count();
@@ -690,7 +603,7 @@ namespace openpni::distributed::coin
 
                         auto t1 = std::chrono::high_resolution_clock::now();
                         // 一次性分配大内存
-                        std::vector<GlobalSingle> mergedSingles(totalCount);
+                        std::vector<Single> mergedSingles(totalCount);
                         std::vector<uint64_t> segmentOffsets; // 每个段的起始位置
                         segmentOffsets.reserve(groupEnd - groupStart);
 
@@ -710,16 +623,15 @@ namespace openpni::distributed::coin
                                 const auto &segInfo = allSegments[globalIdx];
                                 auto &input = *inputs[segInfo.fileIndex];
 
-                                auto segBytes = [&]()
+                                auto segment = [&]()
                                 {
                                     std::lock_guard<std::mutex> lock(*fileMutexes[segInfo.fileIndex]);
-                                    return input.readSegment(segInfo.segmentIndex);
+                                    return input.ReadSegment(segInfo.segmentIndex);
                                 }();
-                                auto fileHeader = input.header();
 
                                 // 直接写入大数组的特定偏移位置
-                                GlobalSingle *destPtr = mergedSingles.data() + segmentOffsets[idx];
-                                parseSingleSegmentBytesToBuffer(segBytes, fileHeader, segInfo.count, destPtr);
+                                Single *destPtr = mergedSingles.data() + segmentOffsets[idx];
+                                fillSinglesFromSegment(segment, destPtr);
                             });
                         auto t2 = std::chrono::high_resolution_clock::now();
                         t_read_parse += std::chrono::duration<double, std::milli>(t2 - t1).count();
@@ -729,9 +641,9 @@ namespace openpni::distributed::coin
                         auto ts1 = std::chrono::high_resolution_clock::now();
                         std::sort(std::execution::par_unseq,
                                   mergedSingles.begin(), mergedSingles.end(),
-                                  [](const GlobalSingle &a, const GlobalSingle &b)
+                                  [](const Single &a, const Single &b)
                                   {
-                                      return a.timeValue_pico < b.timeValue_pico;
+                                      return a.timevalue_pico < b.timevalue_pico;
                                   });
                         auto ts2 = std::chrono::high_resolution_clock::now();
                         t_sort += std::chrono::duration<double, std::milli>(ts2 - ts1).count();
@@ -739,7 +651,11 @@ namespace openpni::distributed::coin
                         if (coinConfig.enable)
                         {
                             auto tc1 = std::chrono::high_resolution_clock::now();
-                            processCoincidenceForChunk(mergedSingles, coinConfig, coinNode, ioCtx.get());
+                            processCoincidenceForChunk(
+                                std::span<const Single>(mergedSingles.data(), mergedSingles.size()),
+                                coinConfig,
+                                coinNode,
+                                ioCtx.get());
                             auto tc2 = std::chrono::high_resolution_clock::now();
                             t_coin += std::chrono::duration<double, std::milli>(tc2 - tc1).count();
                         }

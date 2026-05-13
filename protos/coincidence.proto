@@ -11,9 +11,10 @@ option cc_enable_arenas = true;
 
 // 单个单事件数据
 message SingleEvent {
-    uint32 crystal_index = 1;    // 全局晶体索引
-    float energy = 2;            // 能量 (eV)
-    uint64 time_pico = 3;        // PET 时钟时间戳 (pico秒)
+    uint32 channel_index = 1;    // 探测器索引
+    uint32 crystal_index = 2;    // 探测器内晶体索引
+    float energy = 3;            // 能量 (eV)
+    uint64 time_pico = 4;        // PET 时钟时间戳 (pico秒)
 }
 
 // 单事件数据块（从分布式节点发送到主节点）

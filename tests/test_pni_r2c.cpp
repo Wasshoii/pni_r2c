@@ -108,11 +108,11 @@ void test_bdm2_saveflie()
     }
 
     //     std::vector<std::string> files = {
-    //         "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/split/singles_dist0.single",
-    //         "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/split/singles_dist1.single",
-    //         "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/split/singles_dist2.single"};
+    //         "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/split/singles_dist0.lsingle",
+    //         "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/split/singles_dist1.lsingle",
+    //         "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/split/singles_dist2.lsingle"};
     //     // // std::vector<std::string> files = {
-    //     // //     "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/singles.single"};
+    //     // //     "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdmbid/singles.lsingle"};
     //     auto time_ms = timer(
     //         [&]
     //         {
@@ -122,7 +122,7 @@ void test_bdm2_saveflie()
     //             mergeConfig.crystalsPerChannel = 169 * 4;
     //             mergeConfig.outputDir = "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/coin";
 
-    //             merge_single_files(files, "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/split/merged.single", mergeConfig);
+    //             merge_single_files(files, "/media/ustc-pni/5282FE19AB6D5297/pni_grpc/r2c/Data/result/Bdm2/split/merged.lsingle", mergeConfig);
     //         },
     //         1);
 
@@ -199,7 +199,7 @@ void test_bdm2_callback()
 
     // 设置回调函数 - 模拟接收数据（实际使用时会通过 gRPC 发送）
     config.onSinglesReady = [&totalSinglesReceived, &totalCallbacks](
-                                std::vector<r2s::GlobalSingle> &&singles,
+                                std::vector<r2s::Single> &&singles,
                                 uint64_t clock_ms,
                                 uint32_t duration_ms) -> bool
     {
@@ -217,9 +217,10 @@ void test_bdm2_callback()
             // 输出前几个单事件的详细信息
             if (!singles.empty())
             {
-                std::cout << "  First single: crystalIdx=" << singles[0].globalCrystalIndex
+                std::cout << "  First single: channelIdx=" << singles[0].channelIndex
+                          << ", crystalIdx=" << singles[0].crystalIndex
                           << ", energy=" << singles[0].energy
-                          << ", time_pico=" << singles[0].timeValue_pico << std::endl;
+                          << ", time_pico=" << singles[0].timevalue_pico << std::endl;
             }
         }
 
@@ -245,6 +246,34 @@ void test_bdm2_callback()
               << std::endl;
 }
 
+void split_930_data()
+{
+    const std::string rawdataPath = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/converted_rawData.bin";
+    const std::string outputFolderName = "splitdata";
+    constexpr uint16_t kTotalChannels = 144;
+    constexpr uint16_t kGroupCount = 4;
+    constexpr uint16_t kGroupSize = kTotalChannels / kGroupCount;
+
+    for (uint16_t groupIndex = 0; groupIndex < kGroupCount; ++groupIndex)
+    {
+        const uint16_t startChannel = static_cast<uint16_t>(groupIndex * kGroupSize);
+        const uint16_t endChannel = static_cast<uint16_t>(startChannel + kGroupSize);
+        std::vector<uint16_t> channels;
+        channels.reserve(kGroupSize);
+        for (uint16_t ch = startChannel; ch < endChannel; ++ch)
+        {
+            channels.push_back(ch);
+        }
+
+        std::cout << "Splitting channels [" << startChannel << "-" << (endChannel - 1) << "]" << std::endl;
+        if (!extract_multiple_channels_from_rawdata(rawdataPath, channels, outputFolderName))
+        {
+            std::cerr << "Failed to split channels [" << startChannel << "-" << (endChannel - 1) << "]" << std::endl;
+            break;
+        }
+    }
+
+}
 void test_50100_930_callback()
 {
     std::cout << "\n========== Testing 50100 R2S Callback Mode ==========\n"
@@ -263,15 +292,18 @@ void test_50100_930_callback()
     std::string singleRawdataPath =
         std::string("/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/") +
         "converted_rawData.bin";
+    // std::string singleRawdataPath =
+    //     std::string("/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/splitdata/") +
+    //     "converted_rawData_ch108-143_n36.raw";
 
-    auto config = r2s::createBDM50100Config(singleRawdataPath, resPath, calibrationFilePaths, "singles_50100_test", {});
+    auto config = r2s::createBDM50100Config(singleRawdataPath, resPath, calibrationFilePaths, "singles_50100_test_ch108-143_n36", {});
 
-    config.saveData2SingleFile = true;
-    config.asyncFileWrite = true;
+    config.saveData2SingleFile = false;
+    config.asyncFileWrite = false;
 
     // 设置回调函数 - 模拟接收数据（实际使用时会通过 gRPC 发送）
     config.onSinglesReady = [&totalSinglesReceived, &totalCallbacks](
-                                std::vector<r2s::GlobalSingle> &&singles,
+                                std::vector<r2s::Single> &&singles,
                                 uint64_t clock_ms,
                                 uint32_t duration_ms) -> bool
     {
@@ -289,9 +321,10 @@ void test_50100_930_callback()
             // 输出前几个单事件的详细信息
             if (!singles.empty())
             {
-                std::cout << "  First single: crystalIdx=" << singles[0].globalCrystalIndex
+                std::cout << "  First single: channelIdx=" << singles[0].channelIndex
+                          << ", crystalIdx=" << singles[0].crystalIndex
                           << ", energy=" << singles[0].energy
-                          << ", time_pico=" << singles[0].timeValue_pico << std::endl;
+                          << ", time_pico=" << singles[0].timevalue_pico << std::endl;
             }
         }
 
@@ -338,6 +371,9 @@ int main()
     std::cout << "[Test 3] Testing 50100 callback mode..." << std::endl;
     test_50100_930_callback();
 
+    // std::cout << "[Test 4] Splitting 50100 rawdata channels..." << std::endl;
+    // split_930_data();
+    
     std::cout << "\n======================================" << std::endl;
     std::cout << "     All tests completed!" << std::endl;
     std::cout << "======================================" << std::endl;

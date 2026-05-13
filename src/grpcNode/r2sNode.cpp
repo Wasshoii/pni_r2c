@@ -7,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <exception>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -393,49 +394,68 @@ namespace openpni::distributed::grpcnode
 
             void senderLoop()
             {
-                while (true)
+                try
                 {
-                    std::vector<SegmentPayload> batch;
-                    batch.reserve(std::max<size_t>(1, static_cast<size_t>(m_cfg.batchSegmentsPerMessage)));
-
+                    while (true)
                     {
-                        std::unique_lock<std::mutex> lock(m_mutex);
-                        m_cvNotEmpty.wait(lock, [this]
-                                          { return !m_queue.empty() || !m_running.load(std::memory_order_relaxed); });
+                        std::vector<SegmentPayload> batch;
+                        batch.reserve(std::max<size_t>(1, static_cast<size_t>(m_cfg.batchSegmentsPerMessage)));
 
-                        if (m_queue.empty())
                         {
-                            break;
-                        }
+                            std::unique_lock<std::mutex> lock(m_mutex);
+                            m_cvNotEmpty.wait(lock, [this]
+                                              { return !m_queue.empty() || !m_running.load(std::memory_order_relaxed); });
 
-                        const size_t targetBatchSize = std::max<size_t>(1, static_cast<size_t>(m_cfg.batchSegmentsPerMessage));
-                        while (!m_queue.empty() && batch.size() < targetBatchSize)
-                        {
+                            if (m_queue.empty())
+                            {
+                                break;
+                            }
+
+                            const size_t targetBatchSize = std::max<size_t>(1, static_cast<size_t>(m_cfg.batchSegmentsPerMessage));
+                            while (!m_queue.empty() && batch.size() < targetBatchSize)
+                            {
 #ifdef DEBUG
-                            m_queueSegmentsInFlight.fetch_sub(1, std::memory_order_relaxed);
-                            m_queueSinglesInFlight.fetch_sub(
-                                static_cast<uint64_t>(m_queue.front().singles.size()),
-                                std::memory_order_relaxed);
+                                m_queueSegmentsInFlight.fetch_sub(1, std::memory_order_relaxed);
+                                m_queueSinglesInFlight.fetch_sub(
+                                    static_cast<uint64_t>(m_queue.front().singles.size()),
+                                    std::memory_order_relaxed);
 #endif
-                            batch.push_back(std::move(m_queue.front()));
-                            m_queue.pop_front();
+                                batch.push_back(std::move(m_queue.front()));
+                                m_queue.pop_front();
+                            }
                         }
-                    }
 
-                    m_cvNotFull.notify_all();
-
-                    if (!sendBatch(batch))
-                    {
-                        m_sendFailed = true;
-                        {
-                            std::lock_guard<std::mutex> lock(m_mutex);
-                            m_running = false;
-                        }
-                        m_cvNotEmpty.notify_all();
                         m_cvNotFull.notify_all();
-                        return;
+
+                        if (!sendBatch(batch))
+                        {
+                            m_sendFailed = true;
+                            {
+                                std::lock_guard<std::mutex> lock(m_mutex);
+                                m_running = false;
+                            }
+                            m_cvNotEmpty.notify_all();
+                            m_cvNotFull.notify_all();
+                            return;
+                        }
                     }
                 }
+                catch (const std::exception &e)
+                {
+                    LOG(ERROR) << "[Node " << m_cfg.nodeId << "] senderLoop exception: " << e.what();
+                }
+                catch (...)
+                {
+                    LOG(ERROR) << "[Node " << m_cfg.nodeId << "] senderLoop unknown exception";
+                }
+
+                m_sendFailed = true;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    m_running = false;
+                }
+                m_cvNotEmpty.notify_all();
+                m_cvNotFull.notify_all();
             }
 
             bool sendBatch(const std::vector<SegmentPayload> &batch)
@@ -503,18 +523,9 @@ namespace openpni::distributed::grpcnode
 
                     for (const auto &s : payload.singles)
                     {
-                        const uint64_t globalCrystalIndex64 =
-                            static_cast<uint64_t>(s.channelIndex) * static_cast<uint64_t>(m_cfg.crystalsPerChannel) +
-                            static_cast<uint64_t>(s.crystalIndex);
-                        if (globalCrystalIndex64 > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()))
-                        {
-                            LOG(ERROR) << "[Node " << m_cfg.nodeId
-                                       << "] global crystal index overflow: " << globalCrystalIndex64;
-                            return false;
-                        }
-
                         auto *event = msg.add_singles();
-                        event->set_crystal_index(static_cast<uint32_t>(globalCrystalIndex64));
+                        event->set_channel_index(static_cast<uint32_t>(s.channelIndex));
+                        event->set_crystal_index(static_cast<uint32_t>(s.crystalIndex));
                         event->set_energy(s.energy);
                         event->set_time_pico(s.timevalue_pico);
                     }

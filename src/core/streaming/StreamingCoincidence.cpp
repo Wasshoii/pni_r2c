@@ -131,20 +131,20 @@ namespace openpni::distributed::streaming
         maxTime_pico = 0;
         for (const auto &s : singles)
         {
-            minTime_pico = std::min(minTime_pico, s.timeValue_pico);
-            maxTime_pico = std::max(maxTime_pico, s.timeValue_pico);
+            minTime_pico = std::min(minTime_pico, s.timevalue_pico);
+            maxTime_pico = std::max(maxTime_pico, s.timevalue_pico);
         }
     }
 
     size_t TimestampedSingleChunk::memorySize() const
     {
         return sizeof(TimestampedSingleChunk) +
-               singles.capacity() * sizeof(GlobalSingle);
+               singles.capacity() * sizeof(Single);
     }
 
     size_t TimestampedSingleChunk::singlesMemorySize() const
     {
-        return singles.capacity() * sizeof(GlobalSingle);
+        return singles.capacity() * sizeof(Single);
     }
 
     bool TimestampedSingleChunk::operator<(const TimestampedSingleChunk &other) const
@@ -288,10 +288,10 @@ namespace openpni::distributed::streaming
         return chunk;
     }
 
-    std::vector<GlobalSingle> NodeRingBuffer::extractSinglesBefore(uint64_t boundary)
+    std::vector<Single> NodeRingBuffer::extractSinglesBefore(uint64_t boundary)
     {
         std::unique_lock<std::mutex> lock(m_mutex);
-        std::vector<GlobalSingle> result;
+        std::vector<Single> result;
         size_t releasedMemory = 0;
 
         while (!m_buffer.empty())
@@ -322,9 +322,9 @@ namespace openpni::distributed::streaming
                     frontChunk.singles.begin(),
                     frontChunk.singles.end(),
                     boundary,
-                    [](uint64_t bound, const GlobalSingle &s)
+                    [](uint64_t bound, const Single &s)
                     {
-                        return bound < s.timeValue_pico;
+                        return bound < s.timevalue_pico;
                     });
 
                 if (splitPoint != frontChunk.singles.begin())
@@ -638,6 +638,9 @@ namespace openpni::distributed::streaming
         const size_t maxEmptyRounds = 100;
         uint64_t lastWatermark = 0;
 
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(m_config.processingIntervalMs));
+
         while (m_running.load())
         {
             auto startTime = std::chrono::high_resolution_clock::now();
@@ -658,7 +661,7 @@ namespace openpni::distributed::streaming
 
             consecutiveEmptyRounds = 0;
 
-            std::vector<GlobalSingle> allSingles;
+            std::vector<Single> allSingles;
 
             for (auto &buf : m_nodeBuffers)
             {
@@ -694,31 +697,15 @@ namespace openpni::distributed::streaming
         flushRemaining();
     }
 
-    void StreamingTimeAligner::processCoincidence(const std::vector<GlobalSingle> &singles)
+    void StreamingTimeAligner::processCoincidence(const std::vector<Single> &singles)
     {
         if (singles.empty())
         {
             return;
         }
-
-        std::vector<Single> localSingles(singles.size());
-        const uint32_t cpc = m_config.crystalsPerChannel;
-
-        openpni::tools::parallel_for_each_CPU(
-            singles.size(),
-            [&](size_t i)
-            {
-                const auto &g = singles[i];
-                auto &l = localSingles[i];
-                l.channelIndex = g.globalCrystalIndex / cpc;
-                l.crystalIndex = g.globalCrystalIndex % cpc;
-                l.energy = g.energy;
-                l.timevalue_pico = g.timeValue_pico;
-            });
-
         try
         {
-            m_singleBuffer.CopyFromHost(std::span<const Single>(localSingles));
+            m_singleBuffer.CopyFromHost(std::span<const Single>(singles));
 
             std::vector<std::span<Single const>> inputList;
             inputList.push_back(m_singleBuffer.CudaRSpan());
@@ -755,30 +742,15 @@ namespace openpni::distributed::streaming
         m_coinBuffer.CopyFromCuda(coins);
         auto hostBuf = m_coinBuffer.HostRSpan();
 
-        std::vector<openpni::v1::basic::Listmode_t> listmodeData(coins.size());
-        const uint32_t cpc = m_config.crystalsPerChannel;
-
-        for (size_t i = 0; i < hostBuf.size(); ++i)
-        {
-            const auto &loc = hostBuf[i];
-            auto &glob = listmodeData[i];
-            glob.globalCrystalIndex1 = static_cast<uint32_t>(loc.channelIndex1) * cpc + loc.crystalIndex1;
-            glob.globalCrystalIndex2 = static_cast<uint32_t>(loc.channelIndex2) * cpc + loc.crystalIndex2;
-            glob.time1_2pico = static_cast<int16_t>(loc.time1_2pico);
-        }
-
         std::lock_guard<std::mutex> lock(m_outputMutex);
-        output.AppendSegment(
-            std::span<const openpni::v1::basic::Listmode_t>(listmodeData.data(), listmodeData.size()),
-            0,
-            0);
+        output.AppendSegment(hostBuf, 0, 0);
     }
 
     void StreamingTimeAligner::flushRemaining()
     {
         LOG(INFO) << "[StreamingTimeAligner] Flushing remaining data...";
 
-        std::vector<GlobalSingle> remaining;
+        std::vector<Single> remaining;
 
         for (auto &buf : m_nodeBuffers)
         {

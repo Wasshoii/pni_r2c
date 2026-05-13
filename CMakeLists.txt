@@ -83,8 +83,8 @@ set(R2C_PROTO_FILES
   "${R2C_PROTO_DIR}/timesync.proto"
 )
 
-set(R2C_PROTO_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/protos")
-file(MAKE_DIRECTORY "${R2C_PROTO_GEN_DIR}")
+set(R2C_PROTO_GEN_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
+set(R2C_PROTO_GEN_DIR "${R2C_PROTO_GEN_ROOT}/protos")
 
 set(R2C_PROTO_GEN_SRCS "")
 set(R2C_PROTO_GEN_HDRS "")
@@ -113,6 +113,7 @@ endforeach()
 add_library(r2c_proto_objs OBJECT ${R2C_PROTO_GEN_SRCS} ${R2C_PROTO_GEN_HDRS})
 target_include_directories(r2c_proto_objs
   PUBLIC
+    "${R2C_PROTO_GEN_ROOT}"
     "${R2C_PROTO_GEN_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -128,6 +129,11 @@ target_compile_options(r2c_proto_objs
     -Wextra
     -O2
     -pthread
+)
+
+# Optional explicit target to (re)generate proto/grpc sources.
+add_custom_target(r2c_proto
+  DEPENDS ${R2C_PROTO_GEN_SRCS} ${R2C_PROTO_GEN_HDRS}
 )
 
 if(R2C_BUILD_TEST_BASIC)
@@ -148,6 +154,7 @@ if(R2C_BUILD_TEST_GRPC)
   )
   target_include_directories(test_distributed_clock_sync_grpc
     PRIVATE
+      "${R2C_PROTO_GEN_ROOT}"
       "${R2C_PROTO_GEN_DIR}"
       "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
       "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -197,6 +204,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
   )
   target_include_directories(test_streaming_coincidence
     PRIVATE
+      "${R2C_PROTO_GEN_ROOT}"
       "${R2C_PROTO_GEN_DIR}"
       "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
       "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -222,6 +230,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
       target_include_directories(r2c_app_common_objs
         PRIVATE
           "${CMAKE_CURRENT_SOURCE_DIR}"
+          "${R2C_PROTO_GEN_ROOT}"
           "${R2C_PROTO_GEN_DIR}"
           "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
           "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -252,6 +261,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
       target_include_directories(r2c_grpc_service_acq_master_objs
         PRIVATE
           "${CMAKE_CURRENT_SOURCE_DIR}"
+          "${R2C_PROTO_GEN_ROOT}"
           "${R2C_PROTO_GEN_DIR}"
           "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
           "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -282,6 +292,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
     target_include_directories(r2c_grpc_service_coin_objs
       PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${R2C_PROTO_GEN_ROOT}"
         "${R2C_PROTO_GEN_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -310,6 +321,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
     target_include_directories(r2c_grpc_node_coin_objs
       PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${R2C_PROTO_GEN_ROOT}"
         "${R2C_PROTO_GEN_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -342,6 +354,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
     target_include_directories(test_local_grpc_coin
       PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${R2C_PROTO_GEN_ROOT}"
         "${R2C_PROTO_GEN_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -371,6 +384,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
       target_include_directories(app_coin_master
         PRIVATE
           "${CMAKE_CURRENT_SOURCE_DIR}"
+          "${R2C_PROTO_GEN_ROOT}"
           "${R2C_PROTO_GEN_DIR}"
           "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
           "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -411,6 +425,7 @@ if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_ACQ_DATAPATH_UDP OR R2C_BUI
     target_include_directories(r2c_grpc_service_acq_master_objs
       PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${R2C_PROTO_GEN_ROOT}"
         "${R2C_PROTO_GEN_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -441,6 +456,7 @@ if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_ACQ_DATAPATH_UDP OR R2C_BUI
     target_include_directories(r2c_grpc_node_acq_objs
       PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${R2C_PROTO_GEN_ROOT}"
         "${R2C_PROTO_GEN_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -473,6 +489,7 @@ if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_ACQ_DATAPATH_UDP OR R2C_BUI
     target_include_directories(r2c_core_acq_objs
       PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${R2C_PROTO_GEN_ROOT}"
         "${R2C_PROTO_GEN_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -507,6 +524,7 @@ if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_ACQ_DATAPATH_UDP OR R2C_BUI
     target_include_directories(test_acquisition_control_init
       PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${R2C_PROTO_GEN_ROOT}"
         "${R2C_PROTO_GEN_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -535,6 +553,7 @@ if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_ACQ_DATAPATH_UDP OR R2C_BUI
     target_include_directories(test_acquisition_datapath_udp
       PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${R2C_PROTO_GEN_ROOT}"
         "${R2C_PROTO_GEN_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -621,6 +640,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
   )
   target_include_directories(r2c_grpc_node_r2s_objs
     PRIVATE
+      "${R2C_PROTO_GEN_ROOT}"
       "${R2C_PROTO_GEN_DIR}"
       "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
       "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -650,6 +670,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
     target_include_directories(r2c_grpc_node_acq_objs
       PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${R2C_PROTO_GEN_ROOT}"
         "${R2C_PROTO_GEN_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -682,6 +703,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
     target_include_directories(r2c_core_acq_objs
       PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${R2C_PROTO_GEN_ROOT}"
         "${R2C_PROTO_GEN_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -711,6 +733,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
   target_include_directories(r2c_grpc_service_coin_client_objs
     PRIVATE
       "${CMAKE_CURRENT_SOURCE_DIR}"
+      "${R2C_PROTO_GEN_ROOT}"
       "${R2C_PROTO_GEN_DIR}"
       "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
       "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -740,6 +763,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
     target_include_directories(r2c_app_common_objs
       PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${R2C_PROTO_GEN_ROOT}"
         "${R2C_PROTO_GEN_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -823,6 +847,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
     target_include_directories(test_local_grpc_r2s
       PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${R2C_PROTO_GEN_ROOT}"
         "${R2C_PROTO_GEN_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -854,6 +879,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
     target_include_directories(app_acq_r2s_node
       PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${R2C_PROTO_GEN_ROOT}"
         "${R2C_PROTO_GEN_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -893,6 +919,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
     target_include_directories(test_acquisition_r2s_pipeline
       PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${R2C_PROTO_GEN_ROOT}"
         "${R2C_PROTO_GEN_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
         "${CMAKE_CURRENT_SOURCE_DIR}/include"

@@ -129,6 +129,7 @@
       "name": "build-tests-core",
       "configurePreset": "linux-release-tests-core",
       "targets": [
+        "r2c_proto",
         "test_distributed_clock_sync",
         "test_distributed_clock_sync_grpc"
       ]
@@ -137,6 +138,7 @@
       "name": "build-tests-pni",
       "configurePreset": "linux-release-tests-pni",
       "targets": [
+        "r2c_proto",
         "test_streaming_coincidence",
         "test_local_grpc_coin",
         "test_acquisition_control_init",
@@ -147,6 +149,7 @@
       "name": "build-tests-cuda",
       "configurePreset": "linux-release-tests-cuda",
       "targets": [
+        "r2c_proto",
         "test_pni_r2c",
         "test_local_grpc_r2s",
         "test_pni_coin",
@@ -157,6 +160,7 @@
       "name": "build-apps-basic",
       "configurePreset": "linux-release-apps-basic",
       "targets": [
+        "r2c_proto",
         "app_coin_master"
       ]
     },
@@ -164,6 +168,7 @@
       "name": "build-apps-cuda",
       "configurePreset": "linux-release-apps-cuda",
       "targets": [
+        "r2c_proto",
         "app_acq_r2s_node"
       ]
     },

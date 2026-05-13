@@ -282,7 +282,7 @@ int main(int argc, char **argv)
 
     if (cfg.coinClient.enabled)
     {
-        r2sConfig.onSinglesReady = [&coinClient](std::vector<r2s::GlobalSingle> &&singles, uint64_t clockMs, uint32_t durationMs) -> bool
+        r2sConfig.onSinglesReady = [&coinClient](std::vector<r2s::Single> &&singles, uint64_t clockMs, uint32_t durationMs) -> bool
         {
             return coinClient.sendSingles(singles, clockMs, durationMs);
         };

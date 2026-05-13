@@ -79,7 +79,7 @@ namespace openpni::distributed::streaming
     }
 
     bool CoincidenceClient::sendSingles(
-        const std::vector<GlobalSingle> &singles,
+        const std::vector<Single> &singles,
         uint64_t computerClock_ms,
         uint32_t duration_ms)
     {
@@ -97,45 +97,34 @@ namespace openpni::distributed::streaming
         for (const auto &s : singles)
         {
             auto *event = msg->add_singles();
-            uint32_t crystalIndexToSend = s.globalCrystalIndex;
+            uint32_t channelIndexToSend = s.channelIndex;
+            uint32_t crystalIndexToSend = s.crystalIndex;
 
             if (m_config.remapLocalToGlobalChannels)
             {
-                if (m_config.crystalsPerChannel == 0)
-                {
-                    LOG(ERROR) << "invalid crystalsPerChannel=0";
-                    return false;
-                }
-
-                const uint32_t localChannel = s.globalCrystalIndex / m_config.crystalsPerChannel;
-                const uint32_t crystalInChannel = s.globalCrystalIndex % m_config.crystalsPerChannel;
-                const uint64_t globalChannel = static_cast<uint64_t>(localChannel) +
+                const uint64_t globalChannel = static_cast<uint64_t>(channelIndexToSend) +
                                                static_cast<uint64_t>(m_config.globalChannelOffset);
-                const uint64_t remapped =
-                    globalChannel * static_cast<uint64_t>(m_config.crystalsPerChannel) +
-                    static_cast<uint64_t>(crystalInChannel);
-
-                if (remapped > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()))
+                if (globalChannel > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()))
                 {
-                    LOG(ERROR) << "remapped crystal index overflow: " << remapped;
+                    LOG(ERROR) << "remapped channel index overflow: " << globalChannel;
                     return false;
                 }
 
-                crystalIndexToSend = static_cast<uint32_t>(remapped);
+                channelIndexToSend = static_cast<uint32_t>(globalChannel);
 
                 if (!m_remapSampleLogged.exchange(true))
                 {
                     LOG(INFO) << "remap sample node=" << m_config.nodeId
-                              << " local_channel=" << localChannel
-                              << " global_channel=" << globalChannel
-                              << " local_index=" << s.globalCrystalIndex
-                              << " remapped_index=" << crystalIndexToSend;
+                              << " local_channel=" << s.channelIndex
+                              << " global_channel=" << channelIndexToSend
+                              << " local_crystal=" << s.crystalIndex;
                 }
             }
 
+            event->set_channel_index(channelIndexToSend);
             event->set_crystal_index(crystalIndexToSend);
             event->set_energy(s.energy);
-            event->set_time_pico(s.timeValue_pico);
+            event->set_time_pico(s.timevalue_pico);
         }
 
         {

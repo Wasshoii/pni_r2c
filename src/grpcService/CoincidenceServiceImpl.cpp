@@ -61,12 +61,13 @@ namespace openpni::distributed::streaming
                     "Invalid node ID: " + std::to_string(nodeId));
             }
 
-            auto appendSingle = [](const coincidence::SingleEvent &s, std::vector<GlobalSingle> &out)
+            auto appendSingle = [](const coincidence::SingleEvent &s, std::vector<Single> &out)
             {
-                GlobalSingle single;
-                single.globalCrystalIndex = s.crystal_index();
+                Single single;
+                single.channelIndex = static_cast<uint16_t>(s.channel_index());
+                single.crystalIndex = static_cast<uint16_t>(s.crystal_index());
                 single.energy = s.energy();
-                single.timeValue_pico = s.time_pico();
+                single.timevalue_pico = s.time_pico();
                 out.push_back(single);
             };
 

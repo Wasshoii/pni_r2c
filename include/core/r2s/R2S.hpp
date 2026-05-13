@@ -4,7 +4,6 @@
 
 #include <cstdint>
 #include <pni/io/IO.hpp>
-#include <pni/io/v1/PetDataType_v1.h>
 #include "core/io/IOAdapter.hpp"
 // #include <pni/node/BDMBiDR2S.hpp>
 
@@ -34,7 +33,6 @@
 
 namespace openpni::distributed::r2s
 {
-    using GlobalSingle = openpni::v1::basic::GlobalSingle_t;
     using Single = openpni::Single;
 
     /**
@@ -46,17 +44,17 @@ namespace openpni::distributed::r2s
      * @return bool 返回true表示处理成功，false表示需要停止处理
      */
     using SinglesReadyCallback = std::function<bool(
-        std::vector<GlobalSingle> &&singles,
+        std::vector<Single> &&singles,
         uint64_t clock_ms,
         uint32_t duration_ms)>;
 
     /**
-     * @brief 原始 Single 视图回调（零额外 GlobalSingle 中间转换）
+    * @brief 原始 Single 视图回调（零额外 host 物化）
      *
      * 说明：
      * - span 仅在回调函数返回前有效，回调内若异步使用需自行拷贝。
-     * - 当该回调已设置时，processR2S 会优先调用它，以避免额外的
-     *   LocalSingle -> GlobalSingle 转换。
+    * - 当该回调已设置时，processR2S 会优先调用它，以避免额外的
+    *   device -> host 拷贝（若上游在 GPU 上生成 Single）。
      */
     using SinglesSpanReadyCallback = std::function<bool(
         std::span<Single const> singles,
@@ -126,9 +124,10 @@ namespace openpni::distributed::r2s
         bool asyncFileWrite = false;               // 是否异步写入文件（提高处理吞吐量）
         size_t asyncWriteQueueSize = 200;          // 异步写入队列大小
         uint32_t progressLogInterval = 50;         // 处理进度日志间隔，0 表示关闭
+        bool forceFullCalibrationLoad = false;     // 强制加载全部通道的校正文件（用于 50100 特殊处理）
 
         // 分布式处理回调，使用时需设置（可与 saveData2SingleFile 同时使用，支持同时保存文件和流式传输）
-        SinglesReadyCallback onSinglesReady = nullptr;         // 传输转换后的 GlobalSingle
+        SinglesReadyCallback onSinglesReady = nullptr;         // 传输 host 侧 Single
         SinglesSpanReadyCallback onSinglesSpanReady = nullptr; // 直接传输原始 Single 数据，避免转换开销
 
         R2SProcessConfig()
@@ -142,7 +141,7 @@ namespace openpni::distributed::r2s
      */
     struct AsyncWriteTask
     {
-        std::vector<GlobalSingle> singles;
+        std::vector<Single> singles;
         uint64_t clock_ms;
         uint32_t duration_ms;
     };
@@ -169,7 +168,7 @@ namespace openpni::distributed::r2s
          *
          * @return true 成功提交，false 队列已满或已停止
          */
-        bool submit(std::vector<GlobalSingle> &&singles, uint64_t clock_ms, uint32_t duration_ms);
+        bool submit(std::vector<Single> &&singles, uint64_t clock_ms, uint32_t duration_ms);
 
         /**
          * @brief 停止写入器，等待所有任务完成
@@ -207,19 +206,11 @@ namespace openpni::distributed::r2s
     };
 
     /**
-     * @brief 将 LocalSingle 转换为 GlobalSingle_t
-     */
-    std::vector<GlobalSingle> convertLocalToGlobalSingles(
-        std::span<Single const> singles,
-        uint32_t crystalsPerChannel);
-
-    /**
-     * @brief 追加单事件数据到 Single 文件（标准格式）
+     * @brief 追加单事件数据到 Single 文件（新 listmode 格式）
      */
     bool appendSinglesToSingleFile(
         openpni::distributed::coreio::SinglesFileWriter &outputFile,
         std::span<Single const> singles,
-        uint32_t crystalsPerChannel,
         uint64_t clock_ms,
         uint32_t duration_ms);
 

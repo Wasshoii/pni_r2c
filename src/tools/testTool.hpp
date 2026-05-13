@@ -4,10 +4,12 @@
 #include <iostream>
 #include <vector>
 #include <string>
+#include <algorithm>
 #include <pni/tools/Parallel.hpp>
 #include <pni/core/CommonDataType.hpp>
 #include <pni/process/Acquisition.hpp>
 #include <pni/detector/BDM50100.hpp>
+#include "core/io/IOAdapter.hpp"
 //#include <pni/bdm_system/BDM50100Array.hpp>
 
 namespace fs = std::filesystem;
@@ -28,12 +30,13 @@ bool extract_channel_from_rawdata(
     try
     {
         // 1. 打开输入文件
-        openpni::io::v1::RawFileInput inputFile;
-        inputFile.open(inputRawDataPath);
+        openpni::distributed::coreio::RawDataFileReader inputFile(
+            openpni::distributed::coreio::IOBackend::Latest);
+        inputFile.Open(inputRawDataPath);
 
-        auto header = inputFile.header();
-        auto segmentNum = header.segmentNum;
-        auto channelNum = header.channelNum;
+        const auto &info = inputFile.Info();
+        auto segmentNum = info.segmentNum;
+        auto channelNum = info.channelNum;
 
         std::cout << "Input file info:" << std::endl;
         std::cout << "  Total channels: " << channelNum << std::endl;
@@ -72,18 +75,13 @@ bool extract_channel_from_rawdata(
         std::string outputFileName = inputPath.stem().string() + "_channel_" + std::to_string(channelIndexToExtract) + ".raw";
         fs::path outputPath = outputDir / outputFileName;
 
-        openpni::io::v1::RawFileOutput outputFile;
-        // 关键修正：为了保留原始Channel ID，文件头中的通道数量必须足够涵盖该ID
-        // 因此这里使用原始文件的通道数量，而不是 1
-        outputFile.setChannelNum(channelNum);
+        openpni::distributed::coreio::RawDataWriterOptions options;
+        options.backend = openpni::distributed::coreio::IOBackend::Latest;
+        options.channelNum = channelNum;
+        options.channelTypeNames = info.channelTypeNames;
 
-        // 复制所有通道的类型名称，保持文件元数据一致
-        for (uint16_t i = 0; i < channelNum; i++)
-        {
-            outputFile.setTypeNameOfChannel(i, inputFile.typeNameOfChannel(i));
-        }
-
-        outputFile.open(outputPath.string());
+        openpni::distributed::coreio::RawDataFileWriter outputFile(std::move(options));
+        outputFile.Open(outputPath.string());
 
         std::cout << "Output file: " << outputPath << std::endl;
         std::cout << "Channel header count: " << channelNum << " (Preserved to maintain ID: " << channelIndexToExtract << ")" << std::endl;
@@ -95,9 +93,8 @@ bool extract_channel_from_rawdata(
         for (uint32_t segIdx = 0; segIdx < segmentNum; segIdx++)
         {
             // 读取原始段
-            auto segment = inputFile.readSegment(segIdx, segIdx + 1);
-            auto segHeader = inputFile.segmentHeader(segIdx);
-            auto view = segment.view(header, segHeader);
+            auto segment = inputFile.ReadSegment(segIdx, segIdx + 1);
+            auto view = segment.View();
 
             totalPacketsProcessed += view.count;
 
@@ -163,10 +160,11 @@ bool extract_channel_from_rawdata(
             filteredView.offset = filteredOffset.data();
             filteredView.channel = filteredChannel.data();
             filteredView.count = channelPacketCount;
-            filteredView.clock_ms = segHeader.clock;
-            filteredView.duration_ms = segHeader.duration;
+            filteredView.clock_ms = view.clock_ms;
+            filteredView.duration_ms = view.duration_ms;
+            filteredView.channelNum = channelNum;
 
-            bool writeSuccess = outputFile.appendSegment(filteredView);
+            bool writeSuccess = outputFile.AppendSegment(filteredView);
 
             if (writeSuccess)
             {
@@ -220,12 +218,13 @@ bool extract_multiple_channels_from_rawdata(
     try
     {
         // 1. 打开输入文件
-        openpni::io::v1::RawFileInput inputFile;
-        inputFile.open(inputRawDataPath);
+        openpni::distributed::coreio::RawDataFileReader inputFile(
+            openpni::distributed::coreio::IOBackend::Latest);
+        inputFile.Open(inputRawDataPath);
 
-        auto header = inputFile.header();
-        auto segmentNum = header.segmentNum;
-        auto channelNum = header.channelNum;
+        const auto &info = inputFile.Info();
+        auto segmentNum = info.segmentNum;
+        auto channelNum = info.channelNum;
 
         std::cout << "Input file info:" << std::endl;
         std::cout << "  Total channels: " << channelNum << std::endl;
@@ -265,25 +264,25 @@ bool extract_multiple_channels_from_rawdata(
         }
 
         // 3. 创建输出文件
+        const auto minIt = std::min_element(channelIndices.begin(), channelIndices.end());
+        const auto maxIt = std::max_element(channelIndices.begin(), channelIndices.end());
+        const uint16_t minChannel = *minIt;
+        const uint16_t maxChannel = *maxIt;
+        const auto channelCount = channelIndices.size();
+
         std::string outputFileName = inputPath.stem().string();
-        for (auto ch : channelIndices)
-        {
-            outputFileName += "_ch" + std::to_string(ch);
-        }
-        outputFileName += +".raw";
+        outputFileName += "_ch" + std::to_string(minChannel) + "-" + std::to_string(maxChannel);
+        outputFileName += "_n" + std::to_string(channelCount);
+        outputFileName += ".raw";
         fs::path outputPath = outputDir / outputFileName;
 
-        openpni::io::v1::RawFileOutput outputFile;
-        // 关键修正：为了保留原始Channel ID，文件头必须保持原始通道维度
-        outputFile.setChannelNum(channelNum);
+        openpni::distributed::coreio::RawDataWriterOptions options;
+        options.backend = openpni::distributed::coreio::IOBackend::Latest;
+        options.channelNum = channelNum;
+        options.channelTypeNames = info.channelTypeNames;
 
-        // 复制所有通道的类型名称
-        for (uint16_t i = 0; i < channelNum; i++)
-        {
-            outputFile.setTypeNameOfChannel(i, inputFile.typeNameOfChannel(i));
-        }
-
-        outputFile.open(outputPath.string());
+        openpni::distributed::coreio::RawDataFileWriter outputFile(std::move(options));
+        outputFile.Open(outputPath.string());
         std::cout << "Output file: " << outputPath << std::endl;
 
         // 4. 逐段处理数据
@@ -292,9 +291,8 @@ bool extract_multiple_channels_from_rawdata(
 
         for (uint32_t segIdx = 0; segIdx < segmentNum; segIdx++)
         {
-            auto segment = inputFile.readSegment(segIdx, segIdx + 1);
-            auto segHeader = inputFile.segmentHeader(segIdx);
-            auto view = segment.view(header, segHeader);
+            auto segment = inputFile.ReadSegment(segIdx, segIdx + 1);
+            auto view = segment.View();
 
             totalPacketsProcessed += view.count;
 
@@ -363,10 +361,11 @@ bool extract_multiple_channels_from_rawdata(
             filteredView.offset = filteredOffset.data();
             filteredView.channel = filteredChannel.data();
             filteredView.count = channelPacketCount;
-            filteredView.clock_ms = segHeader.clock;
-            filteredView.duration_ms = segHeader.duration;
+            filteredView.clock_ms = view.clock_ms;
+            filteredView.duration_ms = view.duration_ms;
+            filteredView.channelNum = channelNum;
 
-            if (outputFile.appendSegment(filteredView))
+            if (outputFile.AppendSegment(filteredView))
             {
                 totalPacketsExtracted += channelPacketCount;
                 if (segIdx % 10 == 0 || segIdx == segmentNum - 1)

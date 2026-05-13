@@ -62,6 +62,9 @@ which protoc
 
 # 仅构建工具
 ./build.sh --tools
+
+# 若使用gdb等工具时,需要进行调试编译，加入以下参数
+./build.sh --debug
 ```
 构建完成后，可执行的二进制文件会输出到`bin/`目录下
 

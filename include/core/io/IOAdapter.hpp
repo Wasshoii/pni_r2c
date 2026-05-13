@@ -31,13 +31,13 @@ namespace coreio
 
     struct IOBackendRuntimeConfig
     {
-        IOBackend rawdataReader = IOBackend::V1;
-        IOBackend rawdataWriter = IOBackend::V1;
-        IOBackend singlesWriter = IOBackend::V1;
-        IOBackend listmodeWriter = IOBackend::V1;
+        IOBackend rawdataReader = IOBackend::Latest;
+        IOBackend rawdataWriter = IOBackend::Latest;
+        IOBackend singlesWriter = IOBackend::Latest;
+        IOBackend listmodeWriter = IOBackend::Latest;
     };
 
-    inline IOBackend ParseIOBackend(std::string_view value, IOBackend fallback = IOBackend::V1)
+    inline IOBackend ParseIOBackend(std::string_view value, IOBackend fallback = IOBackend::Latest)
     {
         if (value == "latest" || value == "LATEST" || value == "Latest")
         {
@@ -337,20 +337,37 @@ namespace coreio
         explicit SinglesFileWriter(SingleWriterOptions options = {})
             : options_(std::move(options))
         {
-            output_ = std::make_unique<::openpni::io::v1::single::SingleFileOutput>();
+            ::openpni::io::IOOptions ioOptions;
+            ioOptions.SetReservedBytes(options_.io.reservedBytes);
+            ioOptions.SetCreatePathIfNotExist(options_.io.createPathIfNotExist);
+            ioOptions.SetEnableOverrideExistingFile(options_.io.enableOverrideExistingFile);
+            ioOptions.SetIOQueueSize(options_.io.ioQueueSize);
+
+            using Fields = ::openpni::io::listmode::SupportedFields;
+            auto fieldsInUse = static_cast<Fields>(
+                Fields::local_crystal_index1 |
+                Fields::channel_index1 |
+                Fields::energy1 |
+                Fields::absolute_timestamp1);
+
+            ::openpni::io::listmode::ListmodeFileHeader header;
+            header.SetFieldsInUse(fieldsInUse);
+            header.SetBitsForStorage(Fields::local_crystal_index1, 16);
+            header.SetBitsForStorage(Fields::channel_index1, 16);
+            header.SetBitsForStorage(Fields::energy1, 32);
+            header.SetBitsForStorage(Fields::absolute_timestamp1, 64);
+            header.SetFileTypeName(::openpni::io::listmode::fields::file_type_single_listmode);
+
+            output_ = std::make_unique<::openpni::io::ListmodeFileOutput>(std::move(header), std::move(ioOptions));
         }
 
         void Open(const std::string &path, uint32_t totalCrystals)
         {
-            output_->setBytes4CrystalIndex(::openpni::io::v1::single::CrystalIndexType::UINT32);
-            output_->setBytes4TimeValue(::openpni::io::v1::single::TimeValueType::UINT64);
-            output_->setBytes4Energy(::openpni::io::v1::single::EnergyType::FLT32);
-            output_->setTotalCrystalNum(totalCrystals);
-            output_->setReservedBytes(options_.io.reservedBytes);
-            output_->open(path);
+            (void)totalCrystals;
+            output_->Open(path);
         }
 
-        bool AppendSegment(std::span<const ::openpni::v1::basic::GlobalSingle_t> singles,
+        bool AppendSegment(std::span<const ::openpni::Single> singles,
                            uint64_t clockMs,
                            uint32_t durationMs)
         {
@@ -358,17 +375,23 @@ namespace coreio
             {
                 return true;
             }
-            return output_->appendSegment(singles.data(), singles.size(), clockMs, durationMs);
+
+            ::openpni::io::listmode::ListmodeFileSegment segment;
+            segment.SetSingles(singles);
+            segment.SetClockMs(clockMs);
+            segment.SetDurationMs(durationMs);
+            output_->AppendSegment(std::move(segment));
+            return (output_->GetStatus() & ::openpni::io::IOStatus_DiskSpaceNotEnough) == 0;
         }
 
-        ::openpni::io::v1::single::SingleFileOutput *RawHandle()
+        ::openpni::io::ListmodeFileOutput *RawHandle()
         {
             return output_.get();
         }
 
     private:
         SingleWriterOptions options_;
-        std::unique_ptr<::openpni::io::v1::single::SingleFileOutput> output_;
+        std::unique_ptr<::openpni::io::ListmodeFileOutput> output_;
     };
 
     struct ListmodeWriterOptions
@@ -384,37 +407,30 @@ namespace coreio
         explicit ListmodeFileWriter(ListmodeWriterOptions options)
             : options_(std::move(options))
         {
-            if (options_.backend == IOBackend::Latest)
-            {
-                ::openpni::io::IOOptions ioOptions;
-                ioOptions.SetReservedBytes(options_.io.reservedBytes);
-                ioOptions.SetCreatePathIfNotExist(options_.io.createPathIfNotExist);
-                ioOptions.SetEnableOverrideExistingFile(options_.io.enableOverrideExistingFile);
-                ioOptions.SetIOQueueSize(options_.io.ioQueueSize);
+            ::openpni::io::IOOptions ioOptions;
+            ioOptions.SetReservedBytes(options_.io.reservedBytes);
+            ioOptions.SetCreatePathIfNotExist(options_.io.createPathIfNotExist);
+            ioOptions.SetEnableOverrideExistingFile(options_.io.enableOverrideExistingFile);
+            ioOptions.SetIOQueueSize(options_.io.ioQueueSize);
 
-                using Fields = ::openpni::io::listmode::SupportedFields;
-                auto fieldsInUse = static_cast<Fields>(
-                    Fields::global_crystal_index1 |
-                    Fields::global_crystal_index2 |
-                    Fields::time_of_flight);
+            using Fields = ::openpni::io::listmode::SupportedFields;
+            auto fieldsInUse = static_cast<Fields>(
+                Fields::local_crystal_index1 |
+                Fields::local_crystal_index2 |
+                Fields::channel_index1 |
+                Fields::channel_index2 |
+                Fields::time_of_flight);
 
-                ::openpni::io::listmode::ListmodeFileHeader header;
-                header.SetFieldsInUse(fieldsInUse);
-                header.SetBitsForStorage(Fields::global_crystal_index1, 32);
-                header.SetBitsForStorage(Fields::global_crystal_index2, 32);
-                header.SetBitsForStorage(Fields::time_of_flight, 16);
-                header.SetFileTypeName(::openpni::io::listmode::fields::file_type_coin_listmode);
+            ::openpni::io::listmode::ListmodeFileHeader header;
+            header.SetFieldsInUse(fieldsInUse);
+            header.SetBitsForStorage(Fields::local_crystal_index1, 16);
+            header.SetBitsForStorage(Fields::local_crystal_index2, 16);
+            header.SetBitsForStorage(Fields::channel_index1, 16);
+            header.SetBitsForStorage(Fields::channel_index2, 16);
+            header.SetBitsForStorage(Fields::time_of_flight, 16);
+            header.SetFileTypeName(::openpni::io::listmode::fields::file_type_coin_listmode);
 
-                latestWriter_ = std::make_unique<::openpni::io::ListmodeFileOutput>(std::move(header), std::move(ioOptions));
-            }
-            else
-            {
-                v1Writer_ = std::make_unique<::openpni::io::v1::listmode::ListmodeFileOutput>();
-                v1Writer_->setBytes4CrystalIndex(::openpni::io::v1::single::CrystalIndexType::UINT32);
-                v1Writer_->setBytes4TimeValue1_2(::openpni::io::v1::listmode::TimeValue1_2Type::INT16);
-                v1Writer_->setTotalCrystalNum(options_.totalCrystals);
-                v1Writer_->setReservedBytes(options_.io.reservedBytes);
-            }
+            latestWriter_ = std::make_unique<::openpni::io::ListmodeFileOutput>(std::move(header), std::move(ioOptions));
         }
 
         void Open(const std::string &path)
@@ -424,17 +440,9 @@ namespace coreio
                 latestWriter_->Open(path);
                 return;
             }
-
-            if (v1Writer_)
-            {
-                v1Writer_->open(path);
-                return;
-            }
-
-            throw std::runtime_error("ListmodeFileWriter is not initialized");
         }
 
-        bool AppendSegment(std::span<const ::openpni::v1::basic::Listmode_t> listmodes,
+        bool AppendSegment(std::span<const ::openpni::Listmode> listmodes,
                            uint64_t clockMs,
                            uint32_t durationMs)
         {
@@ -442,44 +450,17 @@ namespace coreio
             {
                 return true;
             }
-
-            if (v1Writer_)
-            {
-                return v1Writer_->appendSegment(listmodes.data(), listmodes.size(), clockMs, durationMs);
-            }
-
-            if (latestWriter_)
-            {
-                std::vector<uint32_t> g1(listmodes.size());
-                std::vector<uint32_t> g2(listmodes.size());
-                std::vector<uint16_t> tof(listmodes.size());
-                for (size_t i = 0; i < listmodes.size(); ++i)
-                {
-                    g1[i] = listmodes[i].globalCrystalIndex1;
-                    g2[i] = listmodes[i].globalCrystalIndex2;
-                    tof[i] = static_cast<uint16_t>(listmodes[i].time1_2pico);
-                }
-
-                ::openpni::io::listmode::ListmodeFileSegment segment;
-                ::openpni::io::listmode::ListmodeFileSegment::ListmodeAnyData data;
-                data.count = listmodes.size();
-                data.global_crystal_index1 = g1.data();
-                data.global_crystal_index2 = g2.data();
-                data.time_of_flight = tof.data();
-                segment.SetAnyData(data);
-                segment.SetClockMs(clockMs);
-                segment.SetDurationMs(durationMs);
-                latestWriter_->AppendSegment(std::move(segment));
-                return (latestWriter_->GetStatus() & ::openpni::io::IOStatus_DiskSpaceNotEnough) == 0;
-            }
-
-            return false;
+            ::openpni::io::listmode::ListmodeFileSegment segment;
+            segment.SetListmodes(listmodes);
+            segment.SetClockMs(clockMs);
+            segment.SetDurationMs(durationMs);
+            latestWriter_->AppendSegment(std::move(segment));
+            return (latestWriter_->GetStatus() & ::openpni::io::IOStatus_DiskSpaceNotEnough) == 0;
         }
 
     private:
         ListmodeWriterOptions options_;
         std::unique_ptr<::openpni::io::ListmodeFileOutput> latestWriter_;
-        std::unique_ptr<::openpni::io::v1::listmode::ListmodeFileOutput> v1Writer_;
     };
 
 } // namespace coreio

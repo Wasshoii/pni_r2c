@@ -13,7 +13,7 @@
 
 #include <pni/PnI-Config.hpp>
 #include <pni/io/IO.hpp>
-#include <pni/io/v1/Decoding_v1.hpp>
+#include <pni/io/ListmodeIO.hpp>
 
 #include "src/core/merge-and-coin/MergeAndCoin.hpp"
 
@@ -30,7 +30,7 @@ namespace
     constexpr float kEnergyLower_eV = 350000.0f;
     constexpr float kEnergyUpper_eV = 650000.0f;
 
-    const std::string kSinglesFile = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/singles_50100_test.single";
+    const std::string kSinglesFile = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/singles_50100_test.lsingle";
     const std::string kCoinOutputDir = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/coin_50100_full";
     struct EventSample
     {
@@ -74,11 +74,6 @@ namespace
         uint64_t energySelectedSingles = 0;
     };
 
-    inline uint16_t globalCrystalToChannel(uint32_t crystal)
-    {
-        return static_cast<uint16_t>(crystal / kBdm50100CrystalsPerChannel);
-    }
-
     uint16_t channelSeparation(uint32_t crystal1, uint32_t crystal2)
     {
         uint16_t ch1 = static_cast<uint16_t>(crystal1 / kBdm50100CrystalsPerChannel);
@@ -91,63 +86,51 @@ namespace
     EnergyStats analyzeSinglesEnergy(const std::string &singlePath)
     {
         EnergyStats stats;
-        openpni::io::v1::single::SingleFileInput input;
-        input.open(singlePath);
+        openpni::io::listmode::ListmodeFileInput input;
+        input.Open(singlePath);
 
-        const auto header = input.header();
+        const auto &header = input.Header();
         std::cout << "\n[Energy] " << singlePath << std::endl;
-        std::cout << "  bytes4Energy=" << static_cast<int>(header.bytes4Energy)
-                  << ", bytes4CrystalIndex=" << static_cast<int>(header.bytes4CrystalIndex)
-                  << ", bytes4TimeValue=" << static_cast<int>(header.bytes4TimeValue) << std::endl;
-
-        for (uint32_t segIdx = 0; segIdx < header.segmentNum; ++segIdx)
         {
-            const auto segHeader = input.segmentHeader(segIdx);
-            const auto segBytes = input.readSegment(segIdx);
-            const uint64_t count = segHeader.count;
+            const auto typeName = std::string(header.FileTypeName().data());
+            const int fields = static_cast<int>(header.FieldsInUse());
+            auto has = [&](openpni::io::listmode::SupportedFields f)
+            {
+                return (fields & static_cast<int>(f)) != 0;
+            };
+
+            std::cout << "  header.fileType=" << typeName << std::endl;
+            std::cout << "  header.segmentNum=" << input.SegmentNum() << std::endl;
+            std::cout << "  header.fieldsInUse=0x" << std::hex << fields << std::dec << std::endl;
+            if (has(openpni::io::listmode::SupportedFields::local_crystal_index1))
+                std::cout << "  bits.local_crystal_index1=" << header.BitsForStorage(openpni::io::listmode::SupportedFields::local_crystal_index1) << std::endl;
+            if (has(openpni::io::listmode::SupportedFields::channel_index1))
+                std::cout << "  bits.channel_index1=" << header.BitsForStorage(openpni::io::listmode::SupportedFields::channel_index1) << std::endl;
+            if (has(openpni::io::listmode::SupportedFields::energy1))
+                std::cout << "  bits.energy1=" << header.BitsForStorage(openpni::io::listmode::SupportedFields::energy1) << std::endl;
+            if (has(openpni::io::listmode::SupportedFields::absolute_timestamp1))
+                std::cout << "  bits.absolute_timestamp1=" << header.BitsForStorage(openpni::io::listmode::SupportedFields::absolute_timestamp1) << std::endl;
+        }
+
+        if (header.FileTypeName() != openpni::io::listmode::fields::file_type_single_listmode)
+        {
+            std::cout << "  Not a single listmode file, skipping" << std::endl;
+            return stats;
+        }
+
+        for (uint32_t segIdx = 0; segIdx < input.SegmentNum(); ++segIdx)
+        {
+            auto segment = input.ReadSegment(segIdx);
+            const auto data = segment.GetHAnyData();
+            const uint64_t count = data.count;
             stats.total += count;
 
-            if (header.bytes4Energy == 4)
+            if (data.energy1)
             {
-                auto ptr = reinterpret_cast<const float *>(segBytes.energyBytes.get());
                 for (uint64_t i = 0; i < count; ++i)
                 {
-                    const float raw = ptr[i];
+                    const float raw = data.energy1[i];
                     const float scaled = raw;
-                    stats.minRaw = std::min(stats.minRaw, raw);
-                    stats.maxRaw = std::max(stats.maxRaw, raw);
-                    stats.minScaled = std::min(stats.minScaled, scaled);
-                    stats.maxScaled = std::max(stats.maxScaled, scaled);
-                    if (scaled >= kEnergyLower_eV && scaled <= kEnergyUpper_eV)
-                        stats.inWindow_eV++;
-                    if (scaled >= kEnergyLower_eV / 1000.0f && scaled <= kEnergyUpper_eV / 1000.0f)
-                        stats.inWindow_keV++;
-                }
-            }
-            else if (header.bytes4Energy == 2)
-            {
-                auto ptr = reinterpret_cast<const uint16_t *>(segBytes.energyBytes.get());
-                for (uint64_t i = 0; i < count; ++i)
-                {
-                    const float raw = static_cast<float>(ptr[i]);
-                    const float scaled = raw * 0.01f;
-                    stats.minRaw = std::min(stats.minRaw, raw);
-                    stats.maxRaw = std::max(stats.maxRaw, raw);
-                    stats.minScaled = std::min(stats.minScaled, scaled);
-                    stats.maxScaled = std::max(stats.maxScaled, scaled);
-                    if (scaled >= kEnergyLower_eV && scaled <= kEnergyUpper_eV)
-                        stats.inWindow_eV++;
-                    if (scaled >= kEnergyLower_eV / 1000.0f && scaled <= kEnergyUpper_eV / 1000.0f)
-                        stats.inWindow_keV++;
-                }
-            }
-            else if (header.bytes4Energy == 1)
-            {
-                auto ptr = reinterpret_cast<const uint8_t *>(segBytes.energyBytes.get());
-                for (uint64_t i = 0; i < count; ++i)
-                {
-                    const float raw = static_cast<float>(ptr[i]);
-                    const float scaled = raw * 4.0f;
                     stats.minRaw = std::min(stats.minRaw, raw);
                     stats.maxRaw = std::max(stats.maxRaw, raw);
                     stats.minScaled = std::min(stats.minScaled, scaled);
@@ -226,7 +209,7 @@ namespace
         }
 
         const std::vector<std::string> singleFiles = {kSinglesFile};
-        const std::string mergedOutputPlaceholder = kCoinOutputDir + "/merged_placeholder.single";
+        const std::string mergedOutputPlaceholder = kCoinOutputDir + "/merged_placeholder.lsingle";
 
         std::cout << "\n=== Step 1: MergeAndCoin 符合计算 ===" << std::endl;
         std::cout << "Input singles: " << kSinglesFile << std::endl;
@@ -267,48 +250,49 @@ namespace
         stats.channelPairHist12x12.assign(kAnalyzeChannelNum * kAnalyzeChannelNum, 0);
         stats.samples.reserve(12);
 
-        openpni::io::v1::listmode::ListmodeFileInput input;
-        input.open(lmfPath);
+        openpni::io::listmode::ListmodeFileInput input;
+        input.Open(lmfPath);
 
-        const auto header = input.header();
-        stats.segmentNum = header.segmentNum;
+        stats.segmentNum = input.SegmentNum();
 
         std::cout << "\n[LMF] " << lmfPath << std::endl;
-        std::cout << "  segmentNum=" << header.segmentNum
-                  << ", cystalNum=" << header.cystalNum
-                  << ", bytes4CrystalIndex1=" << static_cast<int>(header.bytes4CrystalIndex1)
-                  << ", bytes4CrystalIndex2=" << static_cast<int>(header.bytes4CrystalIndex2)
-                  << ", bytes4TimeValue1_2=" << static_cast<int>(header.bytes4TimeValue1_2)
-                  << std::endl;
+        std::cout << "  segmentNum=" << stats.segmentNum << std::endl;
 
-        for (uint32_t segIdx = 0; segIdx < header.segmentNum; ++segIdx)
+        for (uint32_t segIdx = 0; segIdx < stats.segmentNum; ++segIdx)
         {
-            const auto segHeader = input.segmentHeader(segIdx);
-            const auto segBytes = input.readSegment(segIdx);
-            auto events = openpni::io::v1::listmode::decompress(header, segHeader, segBytes);
-
-            stats.totalEvents += segHeader.count;
-
-            for (uint64_t i = 0; i < segHeader.count; ++i)
+            auto segment = input.ReadSegment(segIdx);
+            const auto data = segment.GetHAnyData();
+            if (!data.local_crystal_index1 || !data.local_crystal_index2 ||
+                !data.channel_index1 || !data.channel_index2 || !data.time_of_flight)
             {
-                const auto &ev = events[i];
-                const uint16_t ch1 = globalCrystalToChannel(ev.globalCrystalIndex1);
-                const uint16_t ch2 = globalCrystalToChannel(ev.globalCrystalIndex2);
+                std::cout << "  Segment " << segIdx << " missing listmode fields, skipping" << std::endl;
+                continue;
+            }
+
+            stats.totalEvents += data.count;
+
+            for (std::size_t i = 0; i < data.count; ++i)
+            {
+                const uint16_t ch1 = data.channel_index1[i];
+                const uint16_t ch2 = data.channel_index2[i];
+                const uint32_t g1 = static_cast<uint32_t>(ch1) * kBdm50100CrystalsPerChannel + data.local_crystal_index1[i];
+                const uint32_t g2 = static_cast<uint32_t>(ch2) * kBdm50100CrystalsPerChannel + data.local_crystal_index2[i];
+                const int16_t dt = static_cast<int16_t>(data.time_of_flight[i]);
 
                 stats.checkedDtCount++;
-                if (ev.time1_2pico < 0)
+                if (dt < 0)
                 {
                     stats.negativeDtCount++;
                 }
-                else if (ev.time1_2pico > kTimeWindowPs)
+                else if (dt > kTimeWindowPs)
                 {
                     stats.overWindowDtCount++;
                 }
 
-                stats.minDt = std::min(stats.minDt, ev.time1_2pico);
-                stats.maxDt = std::max(stats.maxDt, ev.time1_2pico);
+                stats.minDt = std::min(stats.minDt, dt);
+                stats.maxDt = std::max(stats.maxDt, dt);
 
-                const uint16_t sep = channelSeparation(ev.globalCrystalIndex1, ev.globalCrystalIndex2);
+                const uint16_t sep = channelSeparation(g1, g2);
                 stats.channelSepHist[sep]++;
 
                 if (ch1 < kAnalyzeChannelNum && ch2 < kAnalyzeChannelNum)
@@ -326,9 +310,9 @@ namespace
                 if (stats.samples.size() < 8)
                 {
                     stats.samples.push_back(EventSample{
-                        ev.globalCrystalIndex1,
-                        ev.globalCrystalIndex2,
-                        ev.time1_2pico,
+                        g1,
+                        g2,
+                        dt,
                         sep});
                 }
             }

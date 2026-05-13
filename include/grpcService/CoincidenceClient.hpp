@@ -1,6 +1,6 @@
 #pragma once
 
-#include <pni/io/v1/PetDataType_v1.h>
+#include <pni/io/IO.hpp>
 #include <grpcpp/grpcpp.h>
 
 #include "protos/coincidence.grpc.pb.h"
@@ -18,7 +18,7 @@
 namespace openpni::distributed::streaming
 {
 
-    using GlobalSingle = openpni::v1::basic::GlobalSingle_t;
+    using Single = openpni::Single;
 
     struct CoincidenceClientConfig
     {
@@ -55,7 +55,7 @@ namespace openpni::distributed::streaming
         void stop();
 
         bool sendSingles(
-            const std::vector<GlobalSingle> &singles,
+            const std::vector<Single> &singles,
             uint64_t computerClock_ms,
             uint32_t duration_ms);
 

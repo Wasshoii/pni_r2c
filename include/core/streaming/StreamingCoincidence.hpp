@@ -9,7 +9,6 @@
 #include <pni/tools/Parallel.hpp>
 #include <pni/CudaPtr.hpp>
 #include <pni/tools/UniPtr.hpp>
-#include <pni/io/v1/PetDataType_v1.h>
 
 #include <vector>
 #include <deque>
@@ -27,7 +26,6 @@
 
 namespace openpni::distributed::streaming
 {
-    using GlobalSingle = openpni::v1::basic::GlobalSingle_t;
     using Single = openpni::Single;
     namespace fs = std::filesystem;
 
@@ -72,7 +70,7 @@ namespace openpni::distributed::streaming
         uint64_t chunkId = 0;
         uint64_t computerClock_ms = 0;
         uint32_t duration_ms = 0;
-        std::vector<GlobalSingle> singles;
+        std::vector<Single> singles;
 
         uint64_t minTime_pico = UINT64_MAX;
         uint64_t maxTime_pico = 0;
@@ -95,7 +93,7 @@ namespace openpni::distributed::streaming
         std::optional<TimestampedSingleChunk> pop();
         std::optional<TimestampedSingleChunk> tryPop();
 
-        std::vector<GlobalSingle> extractSinglesBefore(uint64_t boundary);
+        std::vector<Single> extractSinglesBefore(uint64_t boundary);
         std::vector<TimestampedSingleChunk> extractCompleteBefore(uint64_t boundary);
 
         uint64_t getFrontMinTime() const;
@@ -188,7 +186,7 @@ namespace openpni::distributed::streaming
         void finalizeOutput();
         uint64_t calculateWatermark() const;
         void processingLoop();
-        void processCoincidence(const std::vector<GlobalSingle> &singles);
+        void processCoincidence(const std::vector<Single> &singles);
         void saveCoincidenceResult(
             openpni::distributed::coreio::ListmodeFileWriter &output,
             std::span<Listmode const> coins);

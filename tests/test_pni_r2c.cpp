@@ -283,7 +283,9 @@ void test_50100_930_callback()
    auto calibrationFilePaths = r2s::collectCalibrationFiles(
     "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/cali",
     { ".bin"},
-    true);
+    true,
+    "bdm_",
+    ".bin");
     // 统计变量
     uint64_t totalSinglesReceived = 0;
     uint64_t totalCallbacks = 0;
@@ -291,15 +293,15 @@ void test_50100_930_callback()
   
     std::string singleRawdataPath =
         std::string("/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/") +
-        "converted_rawData.bin";
+        "converted_rawData2.bin";
     // std::string singleRawdataPath =
     //     std::string("/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/splitdata/") +
     //     "converted_rawData_ch108-143_n36.raw";
 
-    auto config = r2s::createBDM50100Config(singleRawdataPath, resPath, calibrationFilePaths, "singles_50100_test_ch108-143_n36", {});
+    auto config = r2s::createBDM50100Config(singleRawdataPath, resPath, calibrationFilePaths, "singles_50100_test", {});
 
-    config.saveData2SingleFile = false;
-    config.asyncFileWrite = false;
+    config.saveData2SingleFile = true;
+    config.asyncFileWrite = true;
 
     // 设置回调函数 - 模拟接收数据（实际使用时会通过 gRPC 发送）
     config.onSinglesReady = [&totalSinglesReceived, &totalCallbacks](
@@ -365,11 +367,12 @@ int main()
     // std::cout << "[Test 2] Testing callback mode..." << std::endl;
     // test_bdm2_callback();
 
-    // convert_50100_rawdata_with_pos_to_standard(std::string("/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/rawData.bin"),
-    // std::string("/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/pos.bin"),
-    //                                            std::string("/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/converted_rawData.bin"));
-    std::cout << "[Test 3] Testing 50100 callback mode..." << std::endl;
-    test_50100_930_callback();
+    convert_50100_rawdata_with_pos_to_standard(std::string("/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/rawData.bin"),
+    std::string("/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/pos.bin"),
+                                               std::string("/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/converted_rawData2.bin"),
+                                            1024 * 1024);
+    // std::cout << "[Test 3] Testing 50100 callback mode..." << std::endl;
+    // test_50100_930_callback();
 
     // std::cout << "[Test 4] Splitting 50100 rawdata channels..." << std::endl;
     // split_930_data();

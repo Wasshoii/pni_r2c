@@ -27,8 +27,8 @@ namespace
     constexpr uint32_t kBdm50100CrystalsPerChannel = 6 * 6 * 8;
     constexpr uint16_t kAnalyzeChannelNum = kBdm50100ChannelNum;
     constexpr int16_t kTimeWindowPs = 2000;
-    constexpr float kEnergyLower_eV = 350000.0f;
-    constexpr float kEnergyUpper_eV = 650000.0f;
+    constexpr float kEnergyLower_eV = 421000.0f;
+    constexpr float kEnergyUpper_eV = 1000000.0f;
 
     const std::string kSinglesFile = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/singles_50100_test.lsingle";
     const std::string kCoinOutputDir = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/coin_50100_full";

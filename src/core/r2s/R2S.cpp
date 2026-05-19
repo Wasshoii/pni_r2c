@@ -1,5 +1,6 @@
 #include "core/r2s/R2S.hpp"
 
+#include <cctype>
 #include <glog/logging.h>
 
 namespace openpni::distributed::r2s
@@ -35,6 +36,59 @@ namespace openpni::distributed::r2s
             }
 
             return false;
+        }
+
+        bool tryExtractNumericSuffix(const std::string &filename,
+                                     const std::string &prefix,
+                                     const std::string &suffix,
+                                     uint64_t &value)
+        {
+            if (prefix.empty() || suffix.empty())
+            {
+                return false;
+            }
+
+            if (filename.size() <= prefix.size() + suffix.size())
+            {
+                return false;
+            }
+
+            if (filename.compare(0, prefix.size(), prefix) != 0)
+            {
+                return false;
+            }
+
+            if (filename.compare(filename.size() - suffix.size(), suffix.size(), suffix) != 0)
+            {
+                return false;
+            }
+
+            const size_t numberOffset = prefix.size();
+            const size_t numberLength = filename.size() - prefix.size() - suffix.size();
+            const std::string numberText = filename.substr(numberOffset, numberLength);
+            if (numberText.empty())
+            {
+                return false;
+            }
+
+            for (unsigned char ch : numberText)
+            {
+                if (std::isdigit(ch) == 0)
+                {
+                    return false;
+                }
+            }
+
+            try
+            {
+                value = std::stoull(numberText);
+            }
+            catch (const std::exception &)
+            {
+                return false;
+            }
+
+            return true;
         }
     }
 
@@ -82,7 +136,9 @@ namespace openpni::distributed::r2s
     std::vector<std::string> collectCalibrationFiles(
         const std::string &directory,
         const std::vector<std::string> &extensions,
-        bool sortByName)
+        bool sortByName,
+        const std::string &namePrefix,
+        const std::string &nameSuffix)
     {
         std::vector<std::string> files;
 
@@ -122,7 +178,30 @@ namespace openpni::distributed::r2s
             files.push_back(path.string());
         }
 
-        if (sortByName)
+        if (sortByName && !namePrefix.empty() && !nameSuffix.empty())
+        {
+            std::sort(files.begin(), files.end(), [&](const std::string &a, const std::string &b)
+                      {
+                          const std::string nameA = std::filesystem::path(a).filename().string();
+                          const std::string nameB = std::filesystem::path(b).filename().string();
+                          uint64_t valueA = 0;
+                          uint64_t valueB = 0;
+                          const bool hasNumberA = tryExtractNumericSuffix(nameA, namePrefix, nameSuffix, valueA);
+                          const bool hasNumberB = tryExtractNumericSuffix(nameB, namePrefix, nameSuffix, valueB);
+
+                          if (hasNumberA && hasNumberB)
+                          {
+                              if (valueA != valueB)
+                              {
+                                  return valueA < valueB;
+                              }
+                              return nameA < nameB;
+                          }
+
+                          return nameA < nameB;
+                      });
+        }
+        else if (sortByName)
         {
             std::sort(files.begin(), files.end(), [](const std::string &a, const std::string &b)
                       {
@@ -130,6 +209,8 @@ namespace openpni::distributed::r2s
                                  std::filesystem::path(b).filename().string();
                       });
         }
+        
+        LOG(INFO) << "Collected " << files.size() << " calibration files from: " << directory;
 
         return files;
     }

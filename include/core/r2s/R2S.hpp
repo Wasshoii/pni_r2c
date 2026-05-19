@@ -77,12 +77,16 @@ namespace openpni::distributed::r2s
      * @param directory 目录路径
      * @param extensions 过滤后缀列表（为空表示不过滤，例如 {".data", ".bin"}）
      * @param sortByName 是否按文件名排序
+     * @param namePrefix 文件名前缀（用于按数字排序）
+     * @param nameSuffix 文件名后缀（用于按数字排序）
      * @return std::vector<std::string> 目录下的校正文件完整路径
      */
     std::vector<std::string> collectCalibrationFiles(
         const std::string &directory,
         const std::vector<std::string> &extensions = {},
-        bool sortByName = true);
+        bool sortByName = true,
+        const std::string &namePrefix = {},
+        const std::string &nameSuffix = {});
 
     auto timer(auto func, auto time)
     {

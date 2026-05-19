@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <pni/io/IO.hpp>
 #include "core/io/IOAdapter.hpp"
-#include <pni/node/Coincidence.hpp>
+#include <pni/node/misc/Coincidence.hpp>
 #include <pni/tools/Parallel.hpp>
 #include <pni/tools/CudaPtr.hpp>
 #include <pni/tools/UniPtr.hpp>

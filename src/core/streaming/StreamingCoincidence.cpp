@@ -708,7 +708,7 @@ namespace openpni::distributed::streaming
             m_singleBuffer.CopyFromHost(std::span<const Single>(singles));
 
             std::vector<std::span<Single const>> inputList;
-            inputList.push_back(m_singleBuffer.CudaRSpan());
+            inputList.push_back(m_singleBuffer.CudaRStdSpan());
 
             auto [prompt, delay] = m_coinNode.getDListmode(inputList, m_config.coinProtocol);
 
@@ -740,7 +740,7 @@ namespace openpni::distributed::streaming
         }
 
         m_coinBuffer.CopyFromCuda(coins);
-        auto hostBuf = m_coinBuffer.HostRSpan();
+        auto hostBuf = m_coinBuffer.HostRStdSpan();
 
         std::lock_guard<std::mutex> lock(m_outputMutex);
         output.AppendSegment(hostBuf, 0, 0);

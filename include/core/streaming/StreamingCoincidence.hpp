@@ -7,7 +7,7 @@
 #include "core/io/IOAdapter.hpp"
 #include <pni/node/Coincidence.hpp>
 #include <pni/tools/Parallel.hpp>
-#include <pni/CudaPtr.hpp>
+#include <pni/tools/CudaPtr.hpp>
 #include <pni/tools/UniPtr.hpp>
 
 #include <vector>

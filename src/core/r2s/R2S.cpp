@@ -265,6 +265,7 @@ namespace openpni::distributed::r2s
             params.matchXTalkEnabled = true;
             params.crossTalkEnabled = true;
             params.__deviceId = 0;
+            params.crossTalkTimeWindow = 2.0f; 
             g50100->setParams(params);
             generator = g50100;
             break;
@@ -273,8 +274,8 @@ namespace openpni::distributed::r2s
             throw std::runtime_error("Unknown detector type");
         }
 
-        generator->setChannelIndex(channelIndex);
-        generator->loadCalibration(calibrationFile);
+        generator->SetChannelIndex(channelIndex);
+        generator->LoadCalibration(calibrationFile);
 
         return generator;
     }

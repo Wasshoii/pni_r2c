@@ -17,7 +17,8 @@
 #include <chrono>
 #include <stdexcept>
 
-#include <pni/node/Acquisition.hpp>
+#include <pni/node/acquisition/Socket.hpp>
+#include <pni/node/acquisition/DPDK.hpp>
 #include "core/io/IOAdapter.hpp"
 #include "core/io/RawFileOutputFactory.hpp"
 #include "protos/acquisition.pb.h"
@@ -231,7 +232,7 @@ namespace openpni::distributed::acquisition
                 std::lock_guard<std::mutex> lock(algo_mutex_);
                 if (algo_)
                 {
-                    algo_->stop();
+                    algo_->Stop();
                 }
             }
 
@@ -290,22 +291,20 @@ namespace openpni::distributed::acquisition
                 return;
             }
 
-            if (!algo->start())
+            if (!algo->Start())
             {
                 NotifyError("Failed to start acquisition");
                 running_.store(false, std::memory_order_release);
                 return;
             }
 
-            auto readHandler = openpni::read_from_acquisition(std::ref(*algo));
-
             int missTime = 0;
 
             // 采集循环
-            while (running_.load(std::memory_order_acquire) && !algo->isFinished())
+            while (running_.load(std::memory_order_acquire) && !algo->IsFinished())
             {
                 // 尝试读取数据
-                auto data_opt = algo->read();
+                auto data_opt = algo->Read();
 
                 if (data_opt && data_opt->count > 0)
                 {
@@ -341,7 +340,7 @@ namespace openpni::distributed::acquisition
                 std::lock_guard<std::mutex> lock(algo_mutex_);
                 if (algo_)
                 {
-                    algo_->stop();
+                    algo_->Stop();
                 }
                 // 停止后不要立即销毁 algo_，因为 monitor 可能会最后访问一次 status
             }
@@ -361,13 +360,13 @@ namespace openpni::distributed::acquisition
                 std::this_thread::sleep_for(milliseconds(1000));
 
                 // 获取采集实例的状态
-                typename AlgoType::Status status;
+                openpni::interface::IAcquisitionBase::AcquisitionStatus status;
                 bool algo_valid = false;
                 {
                     std::lock_guard<std::mutex> lock(algo_mutex_);
                     if (algo_)
                     {
-                        status = algo_->status();
+                        status = algo_->Status();
                         algo_valid = true;
                     }
                 }

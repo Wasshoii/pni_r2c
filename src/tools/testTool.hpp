@@ -1,6 +1,7 @@
 #pragma once
 #include <pni/io/IO.hpp>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <vector>
 #include <string>
@@ -9,6 +10,7 @@
 #include <pni/core/CommonDataType.hpp>
 #include <pni/process/Acquisition.hpp>
 #include <pni/detector/BDM50100.hpp>
+#include <pni/io/ListmodeIO.hpp>
 #include "core/io/IOAdapter.hpp"
 //#include <pni/bdm_system/BDM50100Array.hpp>
 
@@ -195,6 +197,7 @@ bool extract_channel_from_rawdata(
         return false;
     }
 }
+
 
 /**
  * @brief 从原始数据文件中提取多个通道的数据并保存到新文件
@@ -839,4 +842,96 @@ bool print_single_file_info(const std::string &singlePath)
 
     info.print();
     return true;
+}
+
+/**
+ * @brief 读取 singles 文件并导出纯 Single 数据（不包含任何头部或段头）
+ *
+ * @param singlePath 输入的 singles 文件路径
+ * @param outputSuffix 输出文件后缀（默认 "_payload.single"）
+ * @return bool 成功返回 true，失败返回 false
+ */
+bool export_singles_payload_only(
+    const std::string &singlePath,
+    const std::string &outputSuffix = "_payload.single")
+{
+    try
+    {
+        openpni::io::listmode::ListmodeFileInput inputFile;
+        inputFile.Open(singlePath);
+
+        const auto &header = inputFile.Header();
+        if (header.FileTypeName() != openpni::io::listmode::fields::file_type_single_listmode)
+        {
+            std::cerr << "Error: Not a single listmode file: " << singlePath << std::endl;
+            return false;
+        }
+
+        const auto segmentNum = inputFile.SegmentNum();
+        if (segmentNum == 0)
+        {
+            std::cerr << "Error: Single file has no segments: " << singlePath << std::endl;
+            return false;
+        }
+
+        fs::path inputPath(singlePath);
+        fs::path outputPath = inputPath.parent_path() /
+                              (inputPath.stem().string() + outputSuffix);
+
+        std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
+        if (!output.is_open())
+        {
+            std::cerr << "Error: Failed to open output file: " << outputPath << std::endl;
+            return false;
+        }
+
+        uint64_t totalSingles = 0;
+
+        std::vector<openpni::Single> buffer;
+        for (uint32_t segIdx = 0; segIdx < segmentNum; ++segIdx)
+        {
+            auto segment = inputFile.ReadSegment(segIdx, segIdx + 1);
+            const auto data = segment.GetHAnyData();
+            if (!data.channel_index1 || !data.local_crystal_index1 || !data.absolute_timestamp1)
+            {
+                std::cerr << "Error: Segment " << segIdx << " missing required single fields" << std::endl;
+                return false;
+            }
+
+            const uint64_t count = data.count;
+            if (count == 0)
+            {
+                continue;
+            }
+
+            buffer.resize(count);
+            for (uint64_t i = 0; i < count; ++i)
+            {
+                auto &single = buffer[i];
+                single.channelIndex = data.channel_index1[i];
+                single.crystalIndex = data.local_crystal_index1[i];
+                single.timevalue_pico = data.absolute_timestamp1[i];
+                single.energy = data.energy1[i];
+            }
+
+            output.write(reinterpret_cast<const char *>(buffer.data()),
+                         static_cast<std::streamsize>(buffer.size() * sizeof(openpni::Single)));
+
+            if (!output)
+            {
+                std::cerr << "Error: Failed to write segment " << segIdx << " to " << outputPath << std::endl;
+                return false;
+            }
+
+            totalSingles += buffer.size();
+        }
+
+        std::cout << "Exported " << totalSingles << " singles to " << outputPath << std::endl;
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Exception in export_singles_payload_only: " << e.what() << std::endl;
+        return false;
+    }
 }

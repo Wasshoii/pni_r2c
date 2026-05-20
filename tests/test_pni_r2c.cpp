@@ -371,9 +371,10 @@ int main()
     // std::string("/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/pos.bin"),
     //                                            std::string("/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/converted_rawData2.bin"),
     //                                         1024 * 1024);
-    std::cout << "[Test 3] Testing 50100 callback mode..." << std::endl;
-    test_50100_930_callback();
+    // std::cout << "[Test 3] Testing 50100 callback mode..." << std::endl;
+    // test_50100_930_callback();
 
+    export_singles_payload_only("/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/singles_50100_test.lsingle");
     // std::cout << "[Test 4] Splitting 50100 rawdata channels..." << std::endl;
     // split_930_data();
     

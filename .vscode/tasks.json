@@ -1,0 +1,45 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build: all",
+      "type": "shell",
+      "command": "${workspaceFolder}/build.sh",
+      "args": ["--all"],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "build: apps",
+      "type": "shell",
+      "command": "${workspaceFolder}/build.sh",
+      "args": ["--apps"],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "build: tests",
+      "type": "shell",
+      "command": "${workspaceFolder}/build.sh",
+      "args": ["--tests"],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "build: tools",
+      "type": "shell",
+      "command": "${workspaceFolder}/build.sh",
+      "args": ["--tools"],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "build: debug",
+      "type": "shell",
+      "command": "${workspaceFolder}/build.sh",
+      "args": ["--all", "--debug"],
+      "group": "build",
+      "problemMatcher": []
+    }
+  ]
+}

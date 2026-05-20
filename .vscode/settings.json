@@ -1,0 +1,16 @@
+{
+  "cmake.useCMakePresets": "always",
+  "cmake.configureOnOpen": true,
+  "cmake.configurePreset": "linux-release-tests-cuda",
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/tests/cuda/compile_commands.json",
+  "C_Cpp.default.cppStandard": "c++23",
+  "C_Cpp.default.intelliSenseMode": "linux-gcc-x64",
+  "files.associations": {
+    "*.hpp": "cpp",
+    "*.h": "cpp",
+    "*.cuh": "cuda-cpp",
+    "*.cu": "cuda-cpp"
+  },
+  "makefile.configureOnOpen": true
+}

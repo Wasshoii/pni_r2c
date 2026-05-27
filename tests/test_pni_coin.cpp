@@ -27,13 +27,16 @@ namespace
     constexpr uint32_t kBdm50100CrystalsPerChannel = 6 * 6 * 8;
     constexpr uint16_t kAnalyzeChannelNum = kBdm50100ChannelNum;
     constexpr int16_t kTimeWindowPs = 2000;
-    constexpr float kEnergyLower_eV = 421000.0f;
-    constexpr float kEnergyUpper_eV = 1000000.0f;
+    constexpr float kEnergyLower_eV = 421.0f;
+    constexpr float kEnergyUpper_eV = 1000.0f;
     constexpr int timeWindowPicosec = 2000;
     constexpr int delayTimePicosec = 100000;
 
-    const std::string kSinglesFile = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/singles_50100_test.lsingle";
-    const std::string kCoinOutputDir = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/coin_50100_full";
+    const std::string kSinglesFile = "/media/lenovo/新加卷/PNI_rawdata/NECR20260520/20260520001/PET-WB-2026_05_20_10_38_31/0/pni_singles";
+    const std::string kCoinOutputDir = "/media/lenovo/新加卷/PNI_rawdata/NECR20260520/20260520001/PET-WB-2026_05_20_10_38_31/0/pni_lm";
+    const uint64_t kListmodeMaxBytes = 1300ull * 1024 * 1024; // 约 1.3G
+    const std::string kPromptBaseName = "prompt";
+    const std::string kDelayBaseName = "delay";
     struct EventSample
     {
         uint32_t globalCrystalIndex1 = 0;
@@ -170,13 +173,66 @@ namespace
 
     bool computeCoincidenceByMergeAndCoin(CoinRunStats *statsOut)
     {
-        if (!fs::exists(kSinglesFile))
+        std::vector<std::string> singleFiles;
+        auto parse_part_number = [](const std::string &path) -> std::optional<uint64_t> {
+            const std::string name = fs::path(path).filename().string();
+            const std::string marker = "_part";
+            const size_t pos = name.rfind(marker);
+            if (pos == std::string::npos)
+            {
+                return std::nullopt;
+            }
+            const size_t start = pos + marker.size();
+            const size_t end = name.find('.', start);
+            if (end == std::string::npos || end <= start)
+            {
+                return std::nullopt;
+            }
+            try
+            {
+                return static_cast<uint64_t>(std::stoull(name.substr(start, end - start)));
+            }
+            catch (...)
+            {
+                return std::nullopt;
+            }
+        };
+        if (fs::exists(kSinglesFile) && fs::is_directory(kSinglesFile))
+        {
+            for (const auto &entry : fs::directory_iterator(kSinglesFile))
+            {
+                if (!entry.is_regular_file())
+                {
+                    continue;
+                }
+                if (entry.path().extension() == ".lsingle")
+                {
+                    singleFiles.push_back(entry.path().string());
+                }
+            }
+            std::sort(singleFiles.begin(), singleFiles.end(),
+                      [&](const std::string &a, const std::string &b) {
+                          const auto partA = parse_part_number(a);
+                          const auto partB = parse_part_number(b);
+                          if (partA && partB && partA != partB)
+                          {
+                              return partA.value() < partB.value();
+                          }
+                          return fs::path(a).filename().string() < fs::path(b).filename().string();
+                      });
+        }
+        else
+        {
+            singleFiles.push_back(kSinglesFile);
+        }
+
+        if (singleFiles.empty())
         {
             std::cerr << "[Error] singles 文件不存在: " << kSinglesFile << std::endl;
             return false;
         }
 
-        const auto energyStats = analyzeSinglesEnergy(kSinglesFile);
+        const auto energyStats = analyzeSinglesEnergy(singleFiles.front());
         if (statsOut)
         {
             statsOut->inputSingles = energyStats.total;
@@ -210,22 +266,198 @@ namespace
             statsOut->energySelectedSingles = useKevWindow ? energyStats.inWindow_keV : energyStats.inWindow_eV;
         }
 
-        const std::vector<std::string> singleFiles = {kSinglesFile};
-        const std::string mergedOutputPlaceholder = kCoinOutputDir + "/merged_placeholder.lsingle";
-
         std::cout << "\n=== Step 1: MergeAndCoin 符合计算 ===" << std::endl;
-        std::cout << "Input singles: " << kSinglesFile << std::endl;
+        std::cout << "Input singles count: " << singleFiles.size() << std::endl;
         std::cout << "Output dir: " << kCoinOutputDir << std::endl;
 
-        bool ok = merge_single_files(singleFiles, mergedOutputPlaceholder, cfg, false);
-        if (!ok)
+        struct RotatingListmodeWriter
         {
-            std::cerr << "[Error] merge_single_files 执行失败" << std::endl;
+            std::string outputDir;
+            std::string baseName;
+            uint64_t maxBytes = 0;
+            uint64_t currentBytes = 0;
+            size_t index = 0;
+            std::unique_ptr<openpni::io::listmode::ListmodeFileOutput> writer;
+
+            void openNew()
+            {
+                index++;
+                currentBytes = 0;
+                const std::string path = outputDir + "/" + baseName +
+                                         "_" + (index < 10 ? "000" : index < 100 ? "00" : index < 1000 ? "0" : "") +
+                                         std::to_string(index) + ".lmf";
+                writer = std::make_unique<openpni::io::listmode::ListmodeFileOutput>(
+                    openpni::distributed::coin::createCoinListmodeHeader());
+                writer->Open(path);
+            }
+
+            void append(std::span<openpni::Listmode const> listmodes)
+            {
+                if (listmodes.empty())
+                {
+                    return;
+                }
+                if (!writer)
+                {
+                    openNew();
+                }
+                const uint64_t bytesNeeded = static_cast<uint64_t>(listmodes.size()) * sizeof(openpni::Listmode);
+                if (maxBytes > 0 && currentBytes + bytesNeeded > maxBytes)
+                {
+                    openNew();
+                }
+
+                openpni::io::listmode::ListmodeFileSegment segment;
+                segment.SetListmodes(listmodes);
+                segment.SetClockMs(0);
+                segment.SetDurationMs(0);
+                writer->AppendSegment(std::move(segment));
+
+                currentBytes += bytesNeeded;
+            }
+        };
+
+        RotatingListmodeWriter promptWriter;
+        RotatingListmodeWriter delayWriter;
+        promptWriter.outputDir = kCoinOutputDir;
+        delayWriter.outputDir = kCoinOutputDir;
+        promptWriter.baseName = kPromptBaseName;
+        delayWriter.baseName = kDelayBaseName;
+        promptWriter.maxBytes = kListmodeMaxBytes;
+        delayWriter.maxBytes = kListmodeMaxBytes;
+
+        openpni::Coincidence coinNode;
+        if (cfg.channelNum == 0 || cfg.crystalsPerChannel == 0)
+        {
+            std::cerr << "[Error] channelNum or crystalsPerChannel is zero." << std::endl;
             return false;
         }
+        std::vector<uint32_t> crystalNumOfEachChannel(cfg.channelNum, cfg.crystalsPerChannel);
+        coinNode.setTotalCrystalNumOfEachChannel(crystalNumOfEachChannel);
 
-        const std::string promptPath = kCoinOutputDir + "/prompt.lmf";
-        const std::string delayPath = kCoinOutputDir + "/delay.lmf";
+        uint64_t totalSegments = 0;
+        uint64_t totalSingles = 0;
+        uint64_t totalPromptEvents = 0;
+        uint64_t totalDelayEvents = 0;
+        uint64_t totalPromptBytes = 0;
+        uint64_t totalDelayBytes = 0;
+
+        for (const auto &singlePath : singleFiles)
+        {
+            openpni::io::listmode::ListmodeFileInput input;
+            input.Open(singlePath);
+
+            std::cout << "Processing singles: " << singlePath << std::endl;
+
+            for (uint32_t segIdx = 0; segIdx < input.SegmentNum(); ++segIdx)
+            {
+                auto segment = input.ReadSegment(segIdx);
+                auto singles = openpni::distributed::coin::readSinglesFromSegment(segment);
+                if (singles.empty())
+                {
+                    continue;
+                }
+
+                totalSegments++;
+                totalSingles += singles.size();
+
+                std::span<const openpni::distributed::r2s::Single> hostSpan(singles.data(), singles.size());
+
+                openpni::distributed::r2s::Single *d_singles_ptr = nullptr;
+                const size_t bytes = singles.size() * sizeof(openpni::distributed::r2s::Single);
+                cudaError_t err = cudaMalloc(&d_singles_ptr, bytes);
+                if (err != cudaSuccess)
+                {
+                    std::cerr << "cudaMalloc failed: " << cudaGetErrorString(err) << std::endl;
+                    return false;
+                }
+
+                err = cudaMemcpy(d_singles_ptr, hostSpan.data(), bytes, cudaMemcpyHostToDevice);
+                if (err != cudaSuccess)
+                {
+                    std::cerr << "cudaMemcpy failed: " << cudaGetErrorString(err) << std::endl;
+                    cudaFree(d_singles_ptr);
+                    return false;
+                }
+
+                std::span<const openpni::distributed::r2s::Single> d_span(d_singles_ptr, singles.size());
+                std::vector<std::span<openpni::distributed::r2s::Single const>> inputList;
+                inputList.push_back(d_span);
+
+                try
+                {
+                    auto [prompt, delay] = coinNode.getDListmode(inputList, cfg.protocol);
+
+                    if (!prompt.empty())
+                    {
+                        std::vector<openpni::Listmode> promptHost;
+                        const openpni::Listmode *promptPtr = prompt.data();
+                        if (openpni::distributed::r2s::isDevicePointer(promptPtr))
+                        {
+                            promptHost.resize(prompt.size());
+                            cudaError_t pErr = cudaMemcpy(promptHost.data(), promptPtr,
+                                                          prompt.size() * sizeof(openpni::Listmode),
+                                                          cudaMemcpyDeviceToHost);
+                            if (pErr != cudaSuccess)
+                            {
+                                std::cerr << "cudaMemcpy prompt failed: " << cudaGetErrorString(pErr) << std::endl;
+                                cudaFree(d_singles_ptr);
+                                return false;
+                            }
+                            promptPtr = promptHost.data();
+                        }
+                        promptWriter.append(std::span<const openpni::Listmode>(promptPtr, prompt.size()));
+                        totalPromptEvents += prompt.size();
+                        totalPromptBytes += static_cast<uint64_t>(prompt.size()) * sizeof(openpni::Listmode);
+                    }
+
+                    if (!delay.empty())
+                    {
+                        std::vector<openpni::Listmode> delayHost;
+                        const openpni::Listmode *delayPtr = delay.data();
+                        if (openpni::distributed::r2s::isDevicePointer(delayPtr))
+                        {
+                            delayHost.resize(delay.size());
+                            cudaError_t dErr = cudaMemcpy(delayHost.data(), delayPtr,
+                                                          delay.size() * sizeof(openpni::Listmode),
+                                                          cudaMemcpyDeviceToHost);
+                            if (dErr != cudaSuccess)
+                            {
+                                std::cerr << "cudaMemcpy delay failed: " << cudaGetErrorString(dErr) << std::endl;
+                                cudaFree(d_singles_ptr);
+                                return false;
+                            }
+                            delayPtr = delayHost.data();
+                        }
+                        delayWriter.append(std::span<const openpni::Listmode>(delayPtr, delay.size()));
+                        totalDelayEvents += delay.size();
+                        totalDelayBytes += static_cast<uint64_t>(delay.size()) * sizeof(openpni::Listmode);
+                    }
+
+                    if (totalSegments % 10 == 0)
+                    {
+                        std::cout << "[Stats] segments=" << totalSegments
+                                  << ", singles=" << totalSingles
+                                  << ", prompt=" << totalPromptEvents
+                                  << ", delay=" << totalDelayEvents
+                                  << ", promptMB=" << (totalPromptBytes / (1024.0 * 1024.0))
+                                  << ", delayMB=" << (totalDelayBytes / (1024.0 * 1024.0))
+                                  << std::endl;
+                    }
+                }
+                catch (const std::exception &e)
+                {
+                    std::cerr << "Coincidence error: " << e.what() << std::endl;
+                    cudaFree(d_singles_ptr);
+                    return false;
+                }
+
+                cudaFree(d_singles_ptr);
+            }
+        }
+
+        const std::string promptPath = kCoinOutputDir + "/" + kPromptBaseName + "_0001.lmf";
+        const std::string delayPath = kCoinOutputDir + "/" + kDelayBaseName + "_0001.lmf";
 
         std::cout << "prompt exists: " << (fs::exists(promptPath) ? "yes" : "no");
         if (fs::exists(promptPath))
@@ -240,6 +472,15 @@ namespace
             std::cout << ", size=" << fs::file_size(delayPath) << " bytes";
         }
         std::cout << std::endl;
+
+        std::cout << "[Summary] segments=" << totalSegments
+                  << ", singles=" << totalSingles
+                  << ", prompt=" << totalPromptEvents
+                  << ", delay=" << totalDelayEvents
+                  << ", promptMB=" << (totalPromptBytes / (1024.0 * 1024.0))
+                  << ", delayMB=" << (totalDelayBytes / (1024.0 * 1024.0))
+                  << ", totalMB=" << ((totalPromptBytes + totalDelayBytes) / (1024.0 * 1024.0))
+                  << std::endl;
 
         return fs::exists(promptPath) && fs::exists(delayPath);
     }
@@ -481,8 +722,8 @@ int main()
         return 1;
     }
 
-    const std::string promptPath = kCoinOutputDir + "/prompt.lmf";
-    const std::string delayPath = kCoinOutputDir + "/delay.lmf";
+    const std::string promptPath = kCoinOutputDir + "/" + kPromptBaseName + "_0001.lmf";
+    const std::string delayPath = kCoinOutputDir + "/" + kDelayBaseName + "_0001.lmf";
 
     if (!fs::exists(promptPath) || !fs::exists(delayPath))
     {

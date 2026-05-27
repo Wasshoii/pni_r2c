@@ -3,15 +3,20 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <array>
+#include <limits>
+#include <cmath>
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <cstring>
+#include <iomanip>
 #include <pni/tools/Parallel.hpp>
 #include <pni/core/CommonDataType.hpp>
-#include <pni/process/Acquisition.hpp>
 #include <pni/detector/BDM50100.hpp>
 #include <pni/io/ListmodeIO.hpp>
 #include "core/io/IOAdapter.hpp"
+#include "core/merge-and-coin/MergeAndCoin.hpp"
 //#include <pni/bdm_system/BDM50100Array.hpp>
 
 namespace fs = std::filesystem;
@@ -429,6 +434,229 @@ struct PacketPositionInfo {
   uint16_t length;
   uint16_t channel;
 };
+
+/**
+ * @brief 直接将 50100 原始 rawdata 转为标准 RawData 文件
+ *
+ * @param inputRawPath 输入 done_YYYYMMDD-<clock>.bin 路径（含 510 字节头）
+ * @param outputRawPath 输出标准 rawdata 路径
+ * @param clock_ms 写入段头的时钟（毫秒）
+ * @param packetsPerSegment 每段写入的包数量，0 表示一个文件一段
+ * @param channelNum 通道数量（固定 144）
+ * @param channelTypeName 通道类型名称
+ * @param forceReplace 输出文件存在时是否覆盖
+ * @param reservedBytes 预留磁盘空间（必须大于0，否则不会写入）
+ * @return bool 成功返回 true，失败返回 false
+ */
+bool convert_50100_original_rawdata_to_standard(const std::string &inputRawPath,
+                                                const std::string &outputRawPath,
+                                                uint64_t clock_ms,
+                                                uint32_t packetsPerSegment = 0,
+                                                uint16_t channelNum = 144,
+                                                const std::string &channelTypeName = "BDM50100",
+                                                bool forceReplace = true,
+                                                uint64_t reservedBytes = 1ull * 1024 * 1024)
+{
+    using openpni::device::bdm50100::UDP_PACKET_SIZE;
+    using openpni::device::bdm50100::UDP_RAWDATA_SIZE;
+    using openpni::device::bdm50100::UDP_UNUSED_SIZE;
+
+    auto dump_bytes = [](const uint8_t *data, std::size_t count) {
+        std::ios::fmtflags f(std::cout.flags());
+        std::cout << std::hex << std::setfill('0');
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            std::cout << std::setw(2) << static_cast<int>(data[i]);
+            if (i + 1 < count)
+            {
+                std::cout << ' ';
+            }
+        }
+        std::cout.flags(f);
+    };
+
+    struct DataFrame50100Old
+    {
+        uint8_t data[UDP_RAWDATA_SIZE];
+        uint16_t srcChannel;
+    };
+
+    try
+    {
+        std::ifstream input(inputRawPath, std::ios::binary);
+        if (!input)
+        {
+            std::cerr << "Failed to open raw data file: " << inputRawPath << std::endl;
+            return false;
+        }
+
+        std::array<char, 510> header{};
+        input.read(header.data(), static_cast<std::streamsize>(header.size()));
+        if (!input)
+        {
+            std::cerr << "Failed to read raw data header: " << inputRawPath << std::endl;
+            return false;
+        }
+
+        input.seekg(0, std::ios::end);
+        const std::streamsize fileBytes = input.tellg();
+        const std::streamsize dataBytes = fileBytes - static_cast<std::streamsize>(header.size());
+        if (dataBytes <= 0 || dataBytes % static_cast<std::streamsize>(sizeof(DataFrame50100Old)) != 0)
+        {
+            std::cerr << "Invalid raw data size: " << fileBytes << std::endl;
+            return false;
+        }
+        const uint64_t frameCount = static_cast<uint64_t>(dataBytes / sizeof(DataFrame50100Old));
+        if (frameCount == 0)
+        {
+            std::cerr << "Empty raw data file: " << inputRawPath << std::endl;
+            return false;
+        }
+
+        if (packetsPerSegment == 0)
+        {
+            packetsPerSegment = static_cast<uint32_t>(std::min<uint64_t>(frameCount, UINT32_MAX));
+        }
+
+        fs::path outputPath(outputRawPath);
+        if (outputPath.has_parent_path() && !fs::exists(outputPath.parent_path()))
+        {
+            fs::create_directories(outputPath.parent_path());
+        }
+        if (fs::exists(outputPath) && !forceReplace)
+        {
+            std::cerr << "Output file already exists: " << outputRawPath << std::endl;
+            return false;
+        }
+
+        openpni::io::rawdata::RawDataFileHeader headerOut;
+        headerOut.SetChannelNum(channelNum);
+        for (uint16_t i = 0; i < channelNum; ++i)
+        {
+            headerOut.SetNameOfChannel(i, channelTypeName);
+        }
+
+        openpni::io::IOOptions options;
+        if (reservedBytes == 0)
+        {
+            reservedBytes = 1;
+        }
+        options.SetReservedBytes(static_cast<std::size_t>(reservedBytes));
+        options.SetCreatePathIfNotExist(true);
+        options.SetEnableOverrideExistingFile(forceReplace);
+        options.SetIOQueueSize(2);
+
+        openpni::io::RawFileOutput output(std::move(headerOut), std::move(options));
+        output.Open(outputRawPath);
+
+        const uint64_t totalFrames = frameCount;
+        const uint64_t totalSegments = (totalFrames + packetsPerSegment - 1) / packetsPerSegment;
+        input.seekg(static_cast<std::streamoff>(header.size()), std::ios::beg);
+
+        uint64_t processed = 0;
+        uint64_t invalidChannel = 0;
+        bool dumpedSample = false;
+        for (uint64_t seg = 0; seg < totalSegments; ++seg)
+        {
+            const uint64_t remaining = totalFrames - processed;
+            const uint64_t frameThisSeg = std::min<uint64_t>(remaining, packetsPerSegment);
+
+            std::vector<DataFrame50100Old> frames(frameThisSeg);
+            input.read(reinterpret_cast<char *>(frames.data()),
+                       static_cast<std::streamsize>(frameThisSeg * sizeof(DataFrame50100Old)));
+            if (!input)
+            {
+                std::cerr << "Failed to read raw frames at segment " << seg << std::endl;
+                return false;
+            }
+
+            std::vector<uint8_t> data(frameThisSeg * UDP_PACKET_SIZE);
+            std::vector<uint16_t> length(frameThisSeg, static_cast<uint16_t>(UDP_PACKET_SIZE));
+            std::vector<uint64_t> offset(frameThisSeg, 0);
+            std::vector<uint16_t> channel(frameThisSeg, 0);
+
+            for (uint64_t i = 0; i < frameThisSeg; ++i)
+            {
+                const auto &frame = frames[i];
+                const uint64_t packetOffset = i * UDP_PACKET_SIZE;
+                offset[i] = packetOffset;
+
+                uint8_t *dst = data.data() + packetOffset;
+                std::memset(dst, 0, UDP_UNUSED_SIZE);
+                std::memcpy(dst + UDP_UNUSED_SIZE, frame.data, UDP_RAWDATA_SIZE);
+                std::memcpy(dst + UDP_UNUSED_SIZE + UDP_RAWDATA_SIZE, &frame.srcChannel, sizeof(uint16_t));
+
+                const int ring = static_cast<int>(frame.srcChannel >> 8);
+                const int ip = static_cast<int>(frame.srcChannel & 0xFF);
+                const int bdmId = (ring - 2) * 48 + (ip - 1);
+
+                if (bdmId < 0 || bdmId >= static_cast<int>(channelNum))
+                {
+                    invalidChannel++;
+                    std::cerr << "Invalid BDM ID: " << bdmId
+                              << " (srcChannel=" << frame.srcChannel
+                              << ") at frame " << (processed + i) << std::endl;
+                    return false;
+                }
+
+                channel[i] = static_cast<uint16_t>(bdmId);
+            }
+
+            if (!dumpedSample)
+            {
+                const std::size_t sampleCount = std::min<std::size_t>(3, channel.size());
+                std::cout << "Sample packets (input vs output)" << std::endl;
+                for (std::size_t i = 0; i < sampleCount; ++i)
+                {
+                    const auto &frame = frames[i];
+                    const int ring = static_cast<int>(frame.srcChannel >> 8);
+                    const int ip = static_cast<int>(frame.srcChannel & 0xFF);
+                    const int bdmId = (ring - 2) * 48 + (ip - 1);
+                    const uint8_t *outPacket = data.data() + i * UDP_PACKET_SIZE;
+
+                    std::cout << "  idx=" << (processed + i)
+                              << ", srcChannel=" << frame.srcChannel
+                              << ", bdmId=" << bdmId
+                              << ", in[0:15]=";
+                    dump_bytes(frame.data, 16);
+                    std::cout << ", out[0:15]=";
+                    dump_bytes(outPacket, 16);
+                    std::cout << std::endl;
+                }
+                dumpedSample = true;
+            }
+
+            openpni::RawDataView view;
+            view.data = data.data();
+            view.length = length.data();
+            view.offset = offset.data();
+            view.channel = channel.data();
+            view.count = channel.size();
+            view.clock_ms = clock_ms;
+            view.duration_ms = 0;
+            view.channelNum = channelNum;
+
+            output.AppendSegment(view);
+            processed += frameThisSeg;
+        }
+
+        if (invalidChannel > 0)
+        {
+            std::cerr << "Invalid channel count: " << invalidChannel << std::endl;
+            return false;
+        }
+
+        std::cout << "Conversion done. frames=" << frameCount
+                  << ", segments=" << totalSegments
+                  << ", output=" << outputRawPath << std::endl;
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Exception in convert_50100_original_rawdata_to_standard: " << e.what() << std::endl;
+        return false;
+    }
+}
 /**
  * @brief 将 50100 原始 UDP 包文件 + pos.bin 转换为标准 RawData 文件
  *
@@ -449,6 +677,8 @@ bool convert_50100_rawdata_with_pos_to_standard(const std::string &rawDataPath,
                                                 uint16_t channelNumOverride = 0,
                                                 const std::string &channelTypeName = "BDM50100",
                                                 bool forceReplace = false,
+                                                uint64_t clock_ms = 0,
+                                                uint64_t duration_ms = 0,
                                                 uint64_t reservedBytes = 1ull * 1024 * 1024)
 {
     using openpni::device::bdm50100::UDP_PACKET_SIZE;
@@ -645,8 +875,8 @@ bool convert_50100_rawdata_with_pos_to_standard(const std::string &rawDataPath,
             view.offset = offset.data();
             view.channel = channel.data();
             view.count = channel.size();
-            view.clock_ms = 0;
-            view.duration_ms = 0;
+            view.clock_ms = clock_ms;
+            view.duration_ms = duration_ms;
             view.channelNum = channelNum;
 
             output.AppendSegment(view);
@@ -667,6 +897,224 @@ bool convert_50100_rawdata_with_pos_to_standard(const std::string &rawDataPath,
     catch (const std::exception &e)
     {
         std::cerr << "Exception in convert_50100_rawdata_with_pos_to_standard: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+/**
+ * @brief 将 50100 原始 UDP 包文件 + pos.bin 追加写入已打开的 RawData 文件
+ *
+ * @param output 已打开的 RawFileOutput
+ * @param rawDataPath 输入 rawData.bin 路径（连续 1286 字节 UDP 包）
+ * @param posPath 输入 pos.bin 路径（PacketPositionInfo 数组）
+ * @param packetsPerSegment 每段写入的包数量，0 表示单段输出
+ * @param channelNumOverride 可选的通道数覆盖值（0 表示自动推断）
+ * @param clock_ms 写入段头的时钟（毫秒）
+ * @param duration_ms 写入段头的持续时间（毫秒）
+ * @return bool 成功返回 true，失败返回 false
+ */
+bool append_50100_rawdata_with_pos_to_standard(openpni::io::RawFileOutput &output,
+                                               const std::string &rawDataPath,
+                                               const std::string &posPath,
+                                               uint32_t packetsPerSegment = 0,
+                                               uint16_t channelNumOverride = 0,
+                                               uint64_t clock_ms = 0,
+                                               uint64_t duration_ms = 0)
+{
+    using openpni::device::bdm50100::UDP_PACKET_SIZE;
+
+    try
+    {
+        // 1) 读取 pos.bin
+        std::ifstream posFile(posPath, std::ios::binary);
+        if (!posFile)
+        {
+            std::cerr << "Failed to open pos file: " << posPath << std::endl;
+            return false;
+        }
+        posFile.seekg(0, std::ios::end);
+        const std::streamsize posBytes = posFile.tellg();
+        posFile.seekg(0, std::ios::beg);
+
+        if (posBytes <= 0 || posBytes % sizeof(PacketPositionInfo) != 0)
+        {
+            std::cerr << "Invalid pos file size: " << posBytes << std::endl;
+            return false;
+        }
+
+        const uint64_t posCount = static_cast<uint64_t>(posBytes / sizeof(PacketPositionInfo));
+        std::vector<PacketPositionInfo> positions(posCount);
+        posFile.read(reinterpret_cast<char *>(positions.data()), posBytes);
+        if (!posFile)
+        {
+            std::cerr << "Failed to read pos file: " << posPath << std::endl;
+            return false;
+        }
+
+        if (posCount == 0)
+        {
+            std::cerr << "Empty pos file: " << posPath << std::endl;
+            return false;
+        }
+
+        if (packetsPerSegment == 0)
+        {
+            packetsPerSegment = static_cast<uint32_t>(posCount);
+        }
+        if (packetsPerSegment == 0)
+        {
+            std::cerr << "Invalid packetsPerSegment: 0" << std::endl;
+            return false;
+        }
+
+        // 2) 打开 rawdata.bin
+        std::ifstream rawFile(rawDataPath, std::ios::binary);
+        if (!rawFile)
+        {
+            std::cerr << "Failed to open raw data file: " << rawDataPath << std::endl;
+            return false;
+        }
+        rawFile.seekg(0, std::ios::end);
+        const uint64_t rawBytes = static_cast<uint64_t>(rawFile.tellg());
+        rawFile.seekg(0, std::ios::beg);
+
+        // 3) 推断通道数
+        uint16_t maxChannel = 0;
+        bool hasValidChannel = false;
+        for (const auto &pos : positions)
+        {
+            if (pos.channel == UINT16_MAX)
+            {
+                continue;
+            }
+            hasValidChannel = true;
+            if (pos.channel > maxChannel)
+            {
+                maxChannel = pos.channel;
+            }
+        }
+        const uint16_t channelNum = channelNumOverride > 0
+                                        ? channelNumOverride
+                                        : static_cast<uint16_t>(hasValidChannel ? (maxChannel + 1) : 0);
+
+        if (channelNum == 0)
+        {
+            std::cerr << "Cannot infer channelNum from pos file." << std::endl;
+            return false;
+        }
+
+        // 4) 自动判断 offset 单位（字节偏移 vs 包序号）
+        auto estimate_mode = [&](bool offsetIsIndex) {
+            uint64_t invalid = 0;
+            const uint64_t sampleCount = std::min<uint64_t>(positions.size(), 1000);
+            for (uint64_t i = 0; i < sampleCount; ++i)
+            {
+                const auto &pos = positions[i];
+                if (pos.channel == UINT16_MAX)
+                {
+                    continue;
+                }
+                const uint64_t baseOffset = offsetIsIndex ? pos.offset * UDP_PACKET_SIZE : pos.offset;
+                if (baseOffset + UDP_PACKET_SIZE > rawBytes)
+                {
+                    invalid++;
+                }
+            }
+            return invalid;
+        };
+
+        bool offsetIsIndex = false;
+        const uint64_t invalidDirect = estimate_mode(false);
+        const uint64_t invalidIndex = estimate_mode(true);
+        if (invalidIndex < invalidDirect)
+        {
+            offsetIsIndex = true;
+        }
+
+        // 5) 分段写入
+        uint64_t totalWritten = 0;
+        uint64_t skippedPackets = 0;
+        uint64_t skippedInvalidChannel = 0;
+        uint64_t skippedOutOfRange = 0;
+        for (uint64_t base = 0; base < posCount; base += packetsPerSegment)
+        {
+            const uint64_t end = std::min<uint64_t>(posCount, base + packetsPerSegment);
+            std::vector<uint8_t> data;
+            std::vector<uint16_t> length;
+            std::vector<uint64_t> offset;
+            std::vector<uint16_t> channel;
+
+            data.reserve((end - base) * UDP_PACKET_SIZE);
+            length.reserve(end - base);
+            offset.reserve(end - base);
+            channel.reserve(end - base);
+
+            uint64_t currentOffset = 0;
+            for (uint64_t i = base; i < end; ++i)
+            {
+                const auto &pos = positions[i];
+                if (pos.channel == UINT16_MAX)
+                {
+                    skippedPackets++;
+                    skippedInvalidChannel++;
+                    continue;
+                }
+                const uint64_t packetOffset = offsetIsIndex ? pos.offset * UDP_PACKET_SIZE : pos.offset;
+                if (packetOffset + UDP_PACKET_SIZE > rawBytes)
+                {
+                    skippedPackets++;
+                    skippedOutOfRange++;
+                    continue;
+                }
+
+                data.resize(currentOffset + UDP_PACKET_SIZE);
+                rawFile.seekg(static_cast<std::streamoff>(packetOffset), std::ios::beg);
+                rawFile.read(reinterpret_cast<char *>(data.data() + currentOffset), UDP_PACKET_SIZE);
+                if (!rawFile)
+                {
+                    std::cerr << "Failed to read raw data at offset " << pos.offset << std::endl;
+                    return false;
+                }
+
+                length.push_back(static_cast<uint16_t>(UDP_PACKET_SIZE));
+                offset.push_back(currentOffset);
+                channel.push_back(pos.channel);
+                currentOffset += UDP_PACKET_SIZE;
+            }
+
+            if (channel.empty())
+            {
+                continue;
+            }
+
+            openpni::RawDataView view;
+            view.data = data.data();
+            view.length = length.data();
+            view.offset = offset.data();
+            view.channel = channel.data();
+            view.count = channel.size();
+            view.clock_ms = clock_ms;
+            view.duration_ms = duration_ms;
+            view.channelNum = channelNum;
+
+            output.AppendSegment(view);
+            totalWritten += view.count;
+        }
+
+        std::cout << "Append done. packets=" << posCount
+                  << ", written=" << totalWritten
+                  << ", skipped=" << skippedPackets
+                  << ", skippedInvalidChannel=" << skippedInvalidChannel
+                  << ", skippedOutOfRange=" << skippedOutOfRange
+                  << ", channelNum=" << channelNum
+                  << ", offsetMode=" << (offsetIsIndex ? "index" : "bytes")
+                  << std::endl;
+
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Exception in append_50100_rawdata_with_pos_to_standard: " << e.what() << std::endl;
         return false;
     }
 }
@@ -853,7 +1301,7 @@ bool print_single_file_info(const std::string &singlePath)
  */
 bool export_singles_payload_only(
     const std::string &singlePath,
-    const std::string &outputSuffix = "_payload.single")
+    const std::string &outputSuffix = "_payload.nlm")
 {
     try
     {
@@ -932,6 +1380,328 @@ bool export_singles_payload_only(
     catch (const std::exception &e)
     {
         std::cerr << "Exception in export_singles_payload_only: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+/**
+ * @brief 目标 Listmode 头部参数（与 ReadFileHeadFn.m 的 Type=1 对齐）
+ */
+struct TargetListmodeHeader
+{
+    std::string magic{"RRRRAAAAYYYYSSSS"};
+    uint16_t headCrc{0};
+    uint32_t commonInfoLength{44};
+    uint16_t type{1};
+    std::string softVer{"CS001.7.0.260211"};
+    uint32_t headLength{510};
+
+    uint32_t deviceInfoLength{96};
+    std::string device{"DigitMI 930 "};
+    std::string serial{};
+    uint16_t axisDetectors{3};
+    uint16_t transDetectors{48};
+    uint16_t detectorRings{72};
+    uint16_t detectorChannels{12};
+    uint16_t ipCount{48};
+    uint16_t ipStart{1};
+    uint16_t chCount{288};
+    uint16_t chStart{1};
+    std::array<float, 8> mvtThreds{{0}};
+    std::array<float, 3> mvtParams{{0}};
+
+    uint32_t studyInfoLength{360};
+    uint16_t isotope{0};
+    float activity{0.0f};
+    std::string injectTime{};
+    std::string time{};
+    uint16_t duration{0};
+    float timeWindow{2.0f};
+    float delayWindow{100.0f};
+    float xTalkWindow{1002.0f};
+    std::array<uint32_t, 2> energyWindow{{0, 0}};
+    uint16_t positionWindow{13};
+    uint16_t corrected{3};
+    float tablePosition{0.0f};
+    float tableHeight{0.0f};
+    float petCtSpacing{0.0f};
+    uint16_t tableCount{0};
+    uint16_t tableIndex{0};
+    float scanLengthPerTable{0.0f};
+    std::string patientId{};
+    std::string studyId{};
+    std::string patientName{};
+    std::string patientSex{};
+    float patientHeight{0.0f};
+    float patientWeight{0.0f};
+
+    uint32_t dataInfoLength{10};
+    uint32_t dataLength{0};
+    uint16_t dataCrc{0};
+};
+
+static void write_padded_string(std::ofstream &out, const std::string &value, std::size_t size)
+{
+    std::string clipped = value;
+    if (clipped.size() > size)
+    {
+        clipped.resize(size);
+    }
+    out.write(clipped.data(), static_cast<std::streamsize>(clipped.size()));
+    if (clipped.size() < size)
+    {
+        const std::string padding(size - clipped.size(), '\0');
+        out.write(padding.data(), static_cast<std::streamsize>(padding.size()));
+    }
+}
+
+template <typename T>
+static void write_le(std::ofstream &out, const T &value)
+{
+    out.write(reinterpret_cast<const char *>(&value), sizeof(T));
+}
+
+static std::streampos write_target_listmode_header(std::ofstream &out, const TargetListmodeHeader &h)
+{
+    write_padded_string(out, h.magic, 16);
+    write_le(out, h.headCrc);
+    write_le(out, h.commonInfoLength);
+    write_le(out, h.type);
+    write_padded_string(out, h.softVer, 16);
+    write_le(out, h.headLength);
+
+    write_le(out, h.deviceInfoLength);
+    write_padded_string(out, h.device, 16);
+    write_padded_string(out, h.serial, 16);
+    write_le(out, h.axisDetectors);
+    write_le(out, h.transDetectors);
+    write_le(out, h.detectorRings);
+    write_le(out, h.detectorChannels);
+    write_le(out, h.ipCount);
+    write_le(out, h.ipStart);
+    write_le(out, h.chCount);
+    write_le(out, h.chStart);
+    for (const auto &v : h.mvtThreds)
+    {
+        write_le(out, v);
+    }
+    for (const auto &v : h.mvtParams)
+    {
+        write_le(out, v);
+    }
+
+    write_le(out, h.studyInfoLength);
+    write_le(out, h.isotope);
+    write_le(out, h.activity);
+    write_padded_string(out, h.injectTime, 16);
+    write_padded_string(out, h.time, 16);
+    write_le(out, h.duration);
+    write_le(out, h.timeWindow);
+    write_le(out, h.delayWindow);
+    write_le(out, h.xTalkWindow);
+    write_le(out, h.energyWindow[0]);
+    write_le(out, h.energyWindow[1]);
+    write_le(out, h.positionWindow);
+    write_le(out, h.corrected);
+    write_le(out, h.tablePosition);
+    write_le(out, h.tableHeight);
+    write_le(out, h.petCtSpacing);
+    write_le(out, h.tableCount);
+    write_le(out, h.tableIndex);
+    write_le(out, h.scanLengthPerTable);
+    write_padded_string(out, h.patientId, 64);
+    write_padded_string(out, h.studyId, 64);
+    write_padded_string(out, h.patientName, 128);
+    write_padded_string(out, h.patientSex, 8);
+    write_le(out, h.patientHeight);
+    write_le(out, h.patientWeight);
+
+    write_le(out, h.dataInfoLength);
+    const std::streampos dataLengthPos = out.tellp();
+    write_le(out, h.dataLength);
+    write_le(out, h.dataCrc);
+
+    const std::streampos currentPos = out.tellp();
+    const std::streampos targetPos = static_cast<std::streampos>(h.headLength);
+    if (currentPos < targetPos)
+    {
+        const std::size_t padSize = static_cast<std::size_t>(targetPos - currentPos);
+        const std::string padding(padSize, '\0');
+        out.write(padding.data(), static_cast<std::streamsize>(padding.size()));
+    }
+    else if (currentPos > targetPos)
+    {
+        std::cerr << "Warning: Listmode header size (" << currentPos
+                  << ") exceeds HeadLength (" << h.headLength << ")" << std::endl;
+    }
+
+    return dataLengthPos;
+}
+
+/**
+ * @brief 将 Single 文件转换为目标 Listmode 格式（16 字节/条：IP、CH、Energy、Time）
+ *        Energy 从 eV 转换为 keV
+ *
+ * @param singlePath 输入 Single 文件路径
+ * @param outputPath 输出目标 Listmode 文件路径
+ * @param header 目标文件头参数（可按需修改）
+ * @param ipBase IP 起始值（默认 1）
+ * @param chBase CH 起始值（默认 1）
+ * @param energyScale 能量缩放系数（默认 0.001，把 eV 转为 keV）
+ * @return bool 成功返回 true，失败返回 false
+ */
+bool convert_single_to_RS_listmode(const std::string &singlePath,
+                                       const std::string &outputPath,
+                                       TargetListmodeHeader header = TargetListmodeHeader{},
+                                       uint16_t ipBase = 1,
+                                       uint16_t chBase = 1,
+                                       double energyScale = 0.001)
+{
+    try
+    {
+        openpni::io::listmode::ListmodeFileInput inputFile;
+        inputFile.Open(singlePath);
+
+        const auto &srcHeader = inputFile.Header();
+        if (srcHeader.FileTypeName() != openpni::io::listmode::fields::file_type_single_listmode)
+        {
+            std::cerr << "Error: Not a single listmode file: " << singlePath << std::endl;
+            return false;
+        }
+
+        const auto segmentNum = inputFile.SegmentNum();
+        if (segmentNum == 0)
+        {
+            std::cerr << "Error: Single file has no segments: " << singlePath << std::endl;
+            return false;
+        }
+
+        const auto fieldsInUse = srcHeader.FieldsInUse();
+        if ((fieldsInUse & openpni::io::listmode::SupportedFields::energy1) == 0)
+        {
+            std::cerr << "Warning: source single file has no energy1 field enabled." << std::endl;
+        }
+
+        std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
+        if (!output.is_open())
+        {
+            std::cerr << "Error: Failed to open output file: " << outputPath << std::endl;
+            return false;
+        }
+
+        const auto dataLengthPos = write_target_listmode_header(output, header);
+
+        struct TargetListmodeEvent
+        {
+            uint16_t ip;
+            uint16_t ch;
+            float energy;
+            double time;
+        };
+
+        uint64_t totalSingles = 0;
+        uint64_t skippedInvalid = 0;
+        uint64_t missingEnergy = 0;
+        uint64_t nonFiniteEnergy = 0;
+        uint64_t finiteRawCount = 0;
+        long double rawEnergySum = 0.0;
+        double rawEnergyMin = std::numeric_limits<double>::infinity();
+        double rawEnergyMax = -std::numeric_limits<double>::infinity();
+        double minEnergy = std::numeric_limits<double>::infinity();
+        double maxEnergy = -std::numeric_limits<double>::infinity();
+        std::vector<TargetListmodeEvent> buffer;
+
+        for (uint32_t segIdx = 0; segIdx < segmentNum; ++segIdx)
+        {
+            auto segment = inputFile.ReadSegment(segIdx, segIdx + 1);
+            const auto singles = openpni::distributed::coin::readSinglesFromSegment(segment);
+            if (singles.empty())
+            {
+                continue;
+            }
+
+            buffer.clear();
+            buffer.reserve(singles.size());
+            for (const auto &single : singles)
+            {
+                const uint16_t chIndex = single.channelIndex;
+                const uint16_t crystalIndex = single.crystalIndex;
+                if ((chIndex & 0x8000u) != 0 || (crystalIndex & 0x8000u) != 0)
+                {
+                    skippedInvalid++;
+                    continue;
+                }
+
+                TargetListmodeEvent evt{};
+                evt.ip = static_cast<uint16_t>(single.channelIndex + ipBase);
+                evt.ch = static_cast<uint16_t>(single.crystalIndex + chBase);
+                float energyKev = 0.0f;
+                const double energyEv = static_cast<double>(single.energy);
+                if (std::isfinite(energyEv))
+                {
+                    rawEnergyMin = std::min(rawEnergyMin, energyEv);
+                    rawEnergyMax = std::max(rawEnergyMax, energyEv);
+                    rawEnergySum += energyEv;
+                    finiteRawCount++;
+                }
+                energyKev = static_cast<float>(energyEv * energyScale);
+                if (!std::isfinite(energyKev) || energyKev < 0.0f)
+                {
+                    energyKev = 0.0f;
+                    nonFiniteEnergy++;
+                }
+                else
+                {
+                    minEnergy = std::min(minEnergy, static_cast<double>(energyKev));
+                    maxEnergy = std::max(maxEnergy, static_cast<double>(energyKev));
+                }
+                evt.energy = energyKev;
+                evt.time = static_cast<double>(single.timevalue_pico);
+                buffer.push_back(evt);
+            }
+
+            if (!buffer.empty())
+            {
+                output.write(reinterpret_cast<const char *>(buffer.data()),
+                             static_cast<std::streamsize>(buffer.size() * sizeof(TargetListmodeEvent)));
+            }
+
+            if (!output)
+            {
+                std::cerr << "Error: Failed to write segment " << segIdx << " to " << outputPath << std::endl;
+                return false;
+            }
+
+            totalSingles += buffer.size();
+        }
+
+        const uint64_t dataBytes = totalSingles * sizeof(TargetListmodeEvent);
+        if (dataBytes > std::numeric_limits<uint32_t>::max())
+        {
+            std::cerr << "Error: DataLength overflow: " << dataBytes << std::endl;
+            return false;
+        }
+
+        output.seekp(dataLengthPos, std::ios::beg);
+        const uint32_t dataLength32 = static_cast<uint32_t>(dataBytes);
+        write_le(output, dataLength32);
+
+        std::cout << "Converted " << totalSingles << " singles to " << outputPath << std::endl;
+        std::cout << "[ConvertStats] skippedInvalid=" << skippedInvalid
+              << ", missingEnergy=" << missingEnergy
+              << ", nonFiniteEnergy=" << nonFiniteEnergy
+              << ", rawEnergyMin=" << (std::isfinite(rawEnergyMin) ? rawEnergyMin : 0.0)
+              << ", rawEnergyMax=" << (std::isfinite(rawEnergyMax) ? rawEnergyMax : 0.0)
+              << ", rawEnergyMean=" << (finiteRawCount > 0 ? static_cast<double>(rawEnergySum / static_cast<long double>(finiteRawCount)) : 0.0)
+              << ", energyScale=" << energyScale
+              << ", energyMinKeV=" << (std::isfinite(minEnergy) ? minEnergy : 0.0)
+              << ", energyMaxKeV=" << (std::isfinite(maxEnergy) ? maxEnergy : 0.0)
+              << std::endl;
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Exception in convert_single_to_target_listmode: " << e.what() << std::endl;
         return false;
     }
 }

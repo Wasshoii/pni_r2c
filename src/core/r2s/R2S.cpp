@@ -266,6 +266,8 @@ namespace openpni::distributed::r2s
             params.crossTalkEnabled = true;
             params.__deviceId = 0;
             params.crossTalkTimeWindow = 2.0f; 
+            params.energyThresholds = {60,  80, 100,    120,    140,   160,    180,
+                                         200, 0,  0.0454, 0.1111, 1.964, -0.0014};
             g50100->setParams(params);
             generator = g50100;
             break;
@@ -420,6 +422,12 @@ namespace openpni::distributed::r2s
 
         m_inputChannelNum = inputChannelNum;
 
+        if (m_config.useEnergyCut && m_config.energyCutHigh < m_config.energyCutLow)
+        {
+            LOG(WARNING) << "Energy window invalid: high < low, disabling energy cut";
+            m_config.useEnergyCut = false;
+        }
+
         try
         {
             const auto detectorTypeName = [this]() -> const char *
@@ -556,6 +564,19 @@ namespace openpni::distributed::r2s
             }
 
             auto &singlesSpan = r2sResults[m_config.r2sResultIndex];
+
+            if (m_config.useEnergyCut)
+            {
+                if (!singlesSpan.empty() && isDevicePointer(singlesSpan.data()))
+                {
+                    const uint64_t filteredCount = openpni::distributed::r2s::d_filterSinglesByEnergy_R2S(
+                        const_cast<Single *>(singlesSpan.data()),
+                        singlesSpan.size(),
+                        m_config.energyCutLow,
+                        m_config.energyCutHigh);
+                    singlesSpan = std::span<Single const>(singlesSpan.data(), filteredCount);
+                }
+            }
 
             if (m_config.sortDataByTime)
             {

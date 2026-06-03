@@ -17,6 +17,7 @@
 #include <pni/io/ListmodeIO.hpp>
 #include "core/io/IOAdapter.hpp"
 #include "core/merge-and-coin/MergeAndCoin.hpp"
+#include "core/r2s/R2S.hpp"
 //#include <pni/bdm_system/BDM50100Array.hpp>
 
 namespace fs = std::filesystem;
@@ -1548,6 +1549,7 @@ static std::streampos write_target_listmode_header(std::ofstream &out, const Tar
  * @param ipBase IP 起始值（默认 1）
  * @param chBase CH 起始值（默认 1）
  * @param energyScale 能量缩放系数（默认 0.001，把 eV 转为 keV）
+ * @param timeScale 时间缩放系数（默认 0.001，把 ps 转为 ns）
  * @return bool 成功返回 true，失败返回 false
  */
 bool convert_single_to_RS_listmode(const std::string &singlePath,
@@ -1555,7 +1557,8 @@ bool convert_single_to_RS_listmode(const std::string &singlePath,
                                        TargetListmodeHeader header = TargetListmodeHeader{},
                                        uint16_t ipBase = 1,
                                        uint16_t chBase = 1,
-                                       double energyScale = 0.001)
+                                       double energyScale = 1,
+                                       double timeScale = 0.001)
 {
     try
     {
@@ -1633,8 +1636,29 @@ bool convert_single_to_RS_listmode(const std::string &singlePath,
                 }
 
                 TargetListmodeEvent evt{};
-                evt.ip = static_cast<uint16_t>(single.channelIndex + ipBase);
-                evt.ch = static_cast<uint16_t>(single.crystalIndex + chBase);
+                // PNI BDM ID 映射到 RS IP：BDM ID 从 0 开始，每 48 个 BDM ID 映射到一个环，IP 从 2.1(ipv4 低16位，其中高8位为环数，低8为通道号) 开始
+                const uint16_t bdmId = single.channelIndex;
+                constexpr uint16_t kBdmPerRing = 48;
+                const uint16_t ring = static_cast<uint16_t>(bdmId / kBdmPerRing + 2);
+                const uint16_t ip = static_cast<uint16_t>(bdmId % kBdmPerRing + 1);
+                const uint16_t ipAddr = static_cast<uint16_t>(((ring & 0xFFu) << 8) | (ip & 0xFFu));
+                evt.ip = static_cast<uint16_t>(ipAddr + ipBase - 1);
+                
+                // PNI CH 映射到 RS CH：每 36 个 PNI CH 映射到 37 个 RS CH，分为 8 组，RS CH每一组最后一个为虚拟通道，不使用
+                const uint16_t pniCh = single.crystalIndex;
+                constexpr uint16_t kPniChannelsPerGroup = 36;
+                constexpr uint16_t kRsChannelsPerGroup = 37;
+                constexpr uint16_t kGroupCount = 8;
+                if (pniCh >= kPniChannelsPerGroup * kGroupCount)
+                {
+                    skippedInvalid++;
+                    continue;
+                }
+                const uint16_t group = static_cast<uint16_t>(pniCh / kPniChannelsPerGroup);
+                const uint16_t offset = static_cast<uint16_t>(pniCh % kPniChannelsPerGroup);
+                const uint16_t mappedCh = static_cast<uint16_t>(group * kRsChannelsPerGroup + offset);
+                evt.ch = static_cast<uint16_t>(mappedCh + chBase);
+
                 float energyKev = 0.0f;
                 const double energyEv = static_cast<double>(single.energy);
                 if (std::isfinite(energyEv))
@@ -1656,7 +1680,7 @@ bool convert_single_to_RS_listmode(const std::string &singlePath,
                     maxEnergy = std::max(maxEnergy, static_cast<double>(energyKev));
                 }
                 evt.energy = energyKev;
-                evt.time = static_cast<double>(single.timevalue_pico);
+                evt.time = static_cast<double>(single.timevalue_pico * timeScale);
                 buffer.push_back(evt);
             }
 
@@ -1702,6 +1726,255 @@ bool convert_single_to_RS_listmode(const std::string &singlePath,
     catch (const std::exception &e)
     {
         std::cerr << "Exception in convert_single_to_target_listmode: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+/**
+ * @brief 将 RS Listmode 单事件文件转换为 PNI singles (.lsingle)
+ *        Energy 从 keV 转换为 eV
+ *
+ * @param rsPath 输入 RS listmode 文件路径（16B/条：IP、CH、Energy、Time）
+ * @param outputPath 输出 PNI singles 文件路径
+ * @param totalCrystals PNI singles 总晶体数
+ * @param ipBase IP 起始值（默认 1）
+ * @param chBase CH 起始值（默认 1）
+ * @param energyScale 能量缩放系数（默认 1000，把 keV 转为 eV）
+ * @param timeScale 时间缩放系数（默认 1000，把 ns 转为 ps）
+ * @return bool 成功返回 true，失败返回 false
+ */
+bool convert_RS_listmode_to_single(const std::string &rsPath,
+                                   const std::string &outputPath,
+                                   uint32_t totalCrystals,
+                                   uint16_t ipBase = 1,
+                                   uint16_t chBase = 1,
+                                   double energyScale = 1.0,
+                                   double timeScale = 1000.0)
+{
+    struct RsListmodeEvent
+    {
+        uint16_t ip;
+        uint16_t ch;
+        float energy;
+        double time;
+    };
+
+    try
+    {
+        std::ifstream input(rsPath, std::ios::binary);
+        if (!input.is_open())
+        {
+            std::cerr << "Error: Failed to open RS listmode file: " << rsPath << std::endl;
+            return false;
+        }
+
+        auto read_exact = [&](char *dst, std::size_t size) -> bool {
+            input.read(dst, static_cast<std::streamsize>(size));
+            return static_cast<std::size_t>(input.gcount()) == size;
+        };
+
+        auto read_le = [&](auto &value) -> bool {
+            return read_exact(reinterpret_cast<char *>(&value), sizeof(value));
+        };
+
+        char magicBuf[16] = {};
+        if (!read_exact(magicBuf, sizeof(magicBuf)))
+        {
+            std::cerr << "Error: Failed to read RS magic: " << rsPath << std::endl;
+            return false;
+        }
+
+        uint16_t headCrc = 0;
+        uint32_t commonInfoLength = 0;
+        uint16_t type = 0;
+        char softVerBuf[16] = {};
+        uint32_t headLength = 0;
+
+        if (!read_le(headCrc) || !read_le(commonInfoLength) || !read_le(type))
+        {
+            std::cerr << "Error: Failed to read RS header fields: " << rsPath << std::endl;
+            return false;
+        }
+        if (!read_exact(softVerBuf, sizeof(softVerBuf)) || !read_le(headLength))
+        {
+            std::cerr << "Error: Failed to read RS header length: " << rsPath << std::endl;
+            return false;
+        }
+
+        const std::string magic(magicBuf, magicBuf + 16);
+        if (magic != "RRRRAAAAYYYYSSSS")
+        {
+            std::cerr << "Error: Invalid RS listmode magic: " << rsPath << std::endl;
+            return false;
+        }
+
+        constexpr uint32_t kHeaderPrefixBytes = 16 + 2 + 4 + 2 + 16 + 4;
+        if (headLength < kHeaderPrefixBytes)
+        {
+            std::cerr << "Error: Invalid RS header length: " << headLength << std::endl;
+            return false;
+        }
+
+        const auto fileSize = std::filesystem::file_size(rsPath);
+        if (fileSize < headLength)
+        {
+            std::cerr << "Error: RS file smaller than header: " << rsPath << std::endl;
+            return false;
+        }
+
+        const uint64_t dataBytes = static_cast<uint64_t>(fileSize) - static_cast<uint64_t>(headLength);
+        const uint64_t recordBytes = sizeof(RsListmodeEvent);
+        const uint64_t blockBytes = recordBytes * 2; // MATLAB: fix(len/size/2)*size*2
+        const uint64_t usableBytes = (dataBytes / blockBytes) * blockBytes;
+        if (usableBytes == 0)
+        {
+            std::cerr << "Error: RS listmode data is empty after alignment: " << rsPath << std::endl;
+            return false;
+        }
+
+        input.seekg(static_cast<std::streamoff>(headLength), std::ios::beg);
+        if (!input)
+        {
+            std::cerr << "Error: Failed to seek RS listmode data: " << rsPath << std::endl;
+            return false;
+        }
+
+        openpni::distributed::coreio::SingleWriterOptions opts;
+        opts.backend = openpni::distributed::coreio::IOBackendContext::Get().singlesWriter;
+        openpni::distributed::coreio::SinglesFileWriter writer(std::move(opts));
+        writer.Open(outputPath, totalCrystals);
+
+        constexpr std::size_t kSegmentEvents = 1024 * 1024;
+        std::vector<RsListmodeEvent> rsBuffer(kSegmentEvents);
+        std::vector<openpni::Single> pniBuffer;
+        pniBuffer.reserve(kSegmentEvents);
+
+        uint64_t totalEvents = 0;
+        uint64_t skippedInvalid = 0;
+        uint64_t nonFiniteEnergy = 0;
+        uint64_t nonFiniteTime = 0;
+        double minEnergyEv = std::numeric_limits<double>::infinity();
+        double maxEnergyEv = -std::numeric_limits<double>::infinity();
+
+        uint64_t remainingBytes = usableBytes;
+        while (input && remainingBytes > 0)
+        {
+            const uint64_t bytesToRead = std::min<uint64_t>(
+                remainingBytes,
+                static_cast<uint64_t>(kSegmentEvents) * sizeof(RsListmodeEvent));
+            input.read(reinterpret_cast<char *>(rsBuffer.data()),
+                       static_cast<std::streamsize>(bytesToRead));
+            const std::streamsize bytesRead = input.gcount();
+            if (bytesRead <= 0)
+            {
+                break;
+            }
+
+            const std::size_t count = static_cast<std::size_t>(bytesRead / static_cast<std::streamsize>(recordBytes));
+            if (count == 0)
+            {
+                continue;
+            }
+
+            pniBuffer.clear();
+            pniBuffer.reserve(count);
+
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                const auto &evt = rsBuffer[i];
+                if (evt.ip < ipBase || evt.ch < chBase)
+                {
+                    skippedInvalid++;
+                    continue;
+                }
+
+                openpni::Single s{};
+
+                const uint16_t ipAddr = static_cast<uint16_t>(evt.ip - ipBase + 1);
+                const uint16_t ring = static_cast<uint16_t>((ipAddr >> 8) & 0xFFu);
+                const uint16_t ip = static_cast<uint16_t>(ipAddr & 0xFFu);
+                constexpr uint16_t kBdmPerRing = 48;
+                if (ring < 2 || ip < 1 || ip > kBdmPerRing)
+                {
+                    skippedInvalid++;
+                    continue;
+                }
+                const uint16_t bdmId = static_cast<uint16_t>((ring - 2) * kBdmPerRing + (ip - 1));
+                s.channelIndex = bdmId;
+
+                const uint16_t rsCh = static_cast<uint16_t>(evt.ch - chBase);
+                constexpr uint16_t kPniChannelsPerGroup = 36;
+                constexpr uint16_t kRsChannelsPerGroup = 37;
+                constexpr uint16_t kGroupCount = 8;
+                if (rsCh >= kRsChannelsPerGroup * kGroupCount)
+                {
+                    skippedInvalid++;
+                    continue;
+                }
+                const uint16_t group = static_cast<uint16_t>(rsCh / kRsChannelsPerGroup);
+                const uint16_t offset = static_cast<uint16_t>(rsCh % kRsChannelsPerGroup);
+                if (offset >= kPniChannelsPerGroup)
+                {
+                    skippedInvalid++;
+                    continue;
+                }
+                const uint16_t pniCh = static_cast<uint16_t>(group * kPniChannelsPerGroup + offset);
+                s.crystalIndex = pniCh;
+
+                const double energyKev = static_cast<double>(evt.energy);
+                double energyEv = energyKev * energyScale;
+                if (!std::isfinite(energyEv) || energyEv < 0.0)
+                {
+                    energyEv = 0.0;
+                    nonFiniteEnergy++;
+                }
+                else
+                {
+                    minEnergyEv = std::min(minEnergyEv, energyEv);
+                    maxEnergyEv = std::max(maxEnergyEv, energyEv);
+                }
+                s.energy = static_cast<float>(energyEv);
+
+                const double timeVal = static_cast<double>(evt.time) * timeScale;
+                if (!std::isfinite(timeVal) || timeVal < 0.0)
+                {
+                    s.timevalue_pico = 0;
+                    nonFiniteTime++;
+                }
+                else
+                {
+                    s.timevalue_pico = static_cast<uint64_t>(std::llround(timeVal));
+                }
+
+                pniBuffer.push_back(s);
+            }
+
+            if (!openpni::distributed::r2s::appendSinglesToSingleFile(writer,
+                                                std::span<const openpni::Single>(pniBuffer.data(), pniBuffer.size()),
+                                                0,
+                                                0))
+            {
+                std::cerr << "Error: Failed to append singles: " << outputPath << std::endl;
+                return false;
+            }
+
+            totalEvents += pniBuffer.size();
+            remainingBytes -= static_cast<uint64_t>(count) * recordBytes;
+        }
+
+        std::cout << "Converted " << totalEvents << " RS events to PNI singles: " << outputPath << std::endl;
+        std::cout << "[RS->PNI] skippedInvalid=" << skippedInvalid
+                  << ", nonFiniteEnergy=" << nonFiniteEnergy
+                  << ", nonFiniteTime=" << nonFiniteTime
+                  << ", energyScale=" << energyScale
+                  << ", energyMinEv=" << (std::isfinite(minEnergyEv) ? minEnergyEv : 0.0)
+                  << ", energyMaxEv=" << (std::isfinite(maxEnergyEv) ? maxEnergyEv : 0.0)
+                  << std::endl;
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Exception in convert_RS_listmode_to_single: " << e.what() << std::endl;
         return false;
     }
 }

@@ -32,8 +32,8 @@ namespace
     constexpr int timeWindowPicosec = 2000;
     constexpr int delayTimePicosec = 100000;
 
-    const std::string kSinglesFile = "/media/lenovo/新加卷/PNI_rawdata/NECR20260520/20260520001/PET-WB-2026_05_20_10_38_31/0/pni_singles";
-    const std::string kCoinOutputDir = "/media/lenovo/新加卷/PNI_rawdata/NECR20260520/20260520001/PET-WB-2026_05_20_10_38_31/0/pni_lm";
+    const std::string kSinglesFile = "/media/lenovo/新加卷/PNI_rawdata/NECR20260520/20260520001/PET-WB-2026_05_20_10_38_31/0/pni_singles_from_rs";
+    const std::string kCoinOutputDir = "/media/lenovo/新加卷/PNI_rawdata/NECR20260520/20260520001/PET-WB-2026_05_20_10_38_31/0/rs_lm";
     const uint64_t kListmodeMaxBytes = 1300ull * 1024 * 1024; // 约 1.3G
     const std::string kPromptBaseName = "prompt";
     const std::string kDelayBaseName = "delay";
@@ -731,26 +731,26 @@ int main()
         return 1;
     }
 
-    const auto promptStats = analyzeLmf(promptPath);
-    const auto delayStats = analyzeLmf(delayPath);
+    // const auto promptStats = analyzeLmf(promptPath);
+    // const auto delayStats = analyzeLmf(delayPath);
 
-    if (runStats.inputSingles > 0)
-    {
-        const double energyRatio = 100.0 * static_cast<double>(runStats.energySelectedSingles) /
-                                   static_cast<double>(runStats.inputSingles);
-        const double promptRatio = 100.0 * static_cast<double>(promptStats.totalEvents) /
-                                   static_cast<double>(runStats.energySelectedSingles);
-        const double delayRatio = 100.0 * static_cast<double>(delayStats.totalEvents) /
-                                  static_cast<double>(runStats.energySelectedSingles);
+    // if (runStats.inputSingles > 0)
+    // {
+    //     const double energyRatio = 100.0 * static_cast<double>(runStats.energySelectedSingles) /
+    //                                static_cast<double>(runStats.inputSingles);
+    //     const double promptRatio = 100.0 * static_cast<double>(promptStats.totalEvents) /
+    //                                static_cast<double>(runStats.energySelectedSingles);
+    //     const double delayRatio = 100.0 * static_cast<double>(delayStats.totalEvents) /
+    //                               static_cast<double>(runStats.energySelectedSingles);
 
-        std::cout << std::fixed << std::setprecision(6);
-        std::cout << "\n=== Coincidence Summary ===" << std::endl;
-        std::cout << "Energy selected singles num / input singles num: " << energyRatio << "%" << std::endl;
-        std::cout << "Prompt coins num: " << promptStats.totalEvents << std::endl;
-        std::cout << "Prompt coins rate: " << promptRatio << "%" << std::endl;
-        std::cout << "Delay coins num: " << delayStats.totalEvents << std::endl;
-        std::cout << "Delay coins rate: " << delayRatio << "%" << std::endl;
-    }
+    //     std::cout << std::fixed << std::setprecision(6);
+    //     std::cout << "\n=== Coincidence Summary ===" << std::endl;
+    //     std::cout << "Energy selected singles num / input singles num: " << energyRatio << "%" << std::endl;
+    //     std::cout << "Prompt coins num: " << promptStats.totalEvents << std::endl;
+    //     std::cout << "Prompt coins rate: " << promptRatio << "%" << std::endl;
+    //     std::cout << "Delay coins num: " << delayStats.totalEvents << std::endl;
+    //     std::cout << "Delay coins rate: " << delayRatio << "%" << std::endl;
+    // }
 
     //printSampleCompare(promptStats, delayStats);
     //analyzeDistribution(promptStats, delayStats);

@@ -26,7 +26,11 @@
 
 using namespace openpni::distributed;
 
-std::string path_pre = "/media/lenovo/新加卷/PNI_rawdata/sensitivity/20260519005/PET-WB-2026_05_19_16_53_38/0";
+std::string path_pre = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/NECR20260520/20260520001/PET-WB-2026_05_20_12_06_28/0";
+std::string path_pre_out = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/50100NECR/3";
+std::string data_path = path_pre + "/RawData";
+std::string out_path = path_pre_out;
+std::string cali_path = "/media/lenovo/1TB/50100data/pni_res/caliFile";
 void test_bdm2_saveflie()
 {
     // BDM2
@@ -275,9 +279,9 @@ void test_50100_930_callback()
     std::cout << "\n========== Testing 50100 R2S Callback Mode ==========\n"
               << std::endl;
 
-    std::string resPath = path_pre + "/pni_singles";
+    std::string resPath = out_path + "/pni_singles";
     auto calibrationFilePaths = r2s::collectCalibrationFiles(
-        "/media/lenovo/1TB/50100data/pni_res/caliFile",
+        cali_path,
         {".bin"},
         true,
         "bdm_",
@@ -293,7 +297,7 @@ void test_50100_930_callback()
     constexpr std::size_t kMaxEnergySamplesPerCallback = 20000;
 
     namespace fs = std::filesystem;
-    const fs::path rawdataDir = path_pre + "/pni_raw";
+    const fs::path rawdataDir = out_path + "/pni_raw";
     const std::string rawPrefix = "pniRaw-";
     const std::string rawExt = ".bin";
 
@@ -585,8 +589,8 @@ void convert_50100_rawdata_batch_process()
 {
     namespace fs = std::filesystem;
 
-    const fs::path rawDir = path_pre +"/RawData";
-    const fs::path outDir = path_pre + "/pni_raw";
+    const fs::path rawDir = data_path;
+    const fs::path outDir = out_path + "/pni_raw";
     const std::string prefix = "done_";
     const std::string ext = ".bin";
 
@@ -683,8 +687,8 @@ void convert_50100_singles_batch_process()
 {
     namespace fs = std::filesystem;
 
-    const fs::path singlesDir = path_pre + "/pni_singles";
-    const fs::path outDir = path_pre + "/rs_singles";
+    const fs::path singlesDir = out_path + "/pni_singles";
+    const fs::path outDir = out_path + "/rs_singles";
     const std::string prefix = "singles_50100_part";
     const std::string ext = ".lsingle";
 
@@ -777,8 +781,370 @@ void convert_50100_singles_batch_process()
     }
 }
 
-int main()
+void convert_rs_singles_batch_process()
 {
+    namespace fs = std::filesystem;
+
+    const fs::path rsSinglesDir = out_path + "/Singles";
+    const fs::path outDir = out_path + "/pni_singles_from_rs";
+    const std::string prefix = "done_";
+    const std::string extNlm = ".nlm";
+
+    const uint32_t totalCrystals = 48 * 3 * (6 * 6 * 8);
+    const uint16_t ipBase = 1;
+    const uint16_t chBase = 1;
+    const double energyScale = 1; // keV -> eV?
+
+    if (!fs::exists(rsSinglesDir))
+    {
+        std::cerr << "RS singles directory not found: " << rsSinglesDir << std::endl;
+        return;
+    }
+    fs::create_directories(outDir);
+
+    struct RsEntry
+    {
+        uint64_t clock = 0;
+        fs::path path;
+    };
+
+    auto has_prefix = [](const std::string &value, const std::string &prefixValue) {
+        return value.rfind(prefixValue, 0) == 0;
+    };
+    auto has_suffix = [](const std::string &value, const std::string &suffix) {
+        return value.size() >= suffix.size() &&
+               value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+    };
+    auto parse_clock = [&](const std::string &name) -> std::optional<uint64_t> {
+        if (!has_prefix(name, prefix))
+        {
+            return std::nullopt;
+        }
+        std::string ext;
+        if (has_suffix(name, extNlm))
+        {
+            ext = extNlm;
+        }
+        else
+        {
+            return std::nullopt;
+        }
+
+        const size_t dashPos = name.rfind('-');
+        const size_t end = name.size() - ext.size();
+        if (dashPos == std::string::npos || dashPos + 1 >= end)
+        {
+            return std::nullopt;
+        }
+        try
+        {
+            return static_cast<uint64_t>(std::stoull(name.substr(dashPos + 1, end - dashPos - 1)));
+        }
+        catch (...)
+        {
+            return std::nullopt;
+        }
+    };
+
+    std::vector<RsEntry> entries;
+    for (const auto &entry : fs::directory_iterator(rsSinglesDir))
+    {
+        if (!entry.is_regular_file())
+        {
+            continue;
+        }
+        const std::string name = entry.path().filename().string();
+        auto clockOpt = parse_clock(name);
+        if (!clockOpt)
+        {
+            continue;
+        }
+        entries.push_back(RsEntry{*clockOpt, entry.path()});
+    }
+
+    if (entries.empty())
+    {
+        std::cerr << "No RS singles files found in: " << rsSinglesDir << std::endl;
+        return;
+    }
+
+    std::sort(entries.begin(), entries.end(),
+              [](const RsEntry &a, const RsEntry &b) {
+                  if (a.clock != b.clock)
+                  {
+                      return a.clock < b.clock;
+                  }
+                  return a.path.filename().string() < b.path.filename().string();
+              });
+
+    std::size_t outputIndex = 0;
+    for (const auto &entry : entries)
+    {
+        outputIndex++;
+        const fs::path outputPath = outDir / ("singles_50100_part" + std::to_string(outputIndex) + ".lsingle");
+        std::cout << "Converting: " << entry.path << " -> " << outputPath << std::endl;
+
+        const bool ok = convert_RS_listmode_to_single(
+            entry.path.string(),
+            outputPath.string(),
+            totalCrystals,
+            ipBase,
+            chBase,
+            energyScale);
+
+        if (!ok)
+        {
+            std::cerr << "Failed to convert: " << entry.path << std::endl;
+            break;
+        }
+    }
+}
+
+void analyze_first_pni_singles_in_folder(const std::string &singlesDirPath)
+{
+    namespace fs = std::filesystem;
+
+    if (!fs::exists(singlesDirPath))
+    {
+        std::cerr << "Singles directory not found: " << singlesDirPath << std::endl;
+        return;
+    }
+
+    std::vector<fs::path> files;
+    for (const auto &entry : fs::directory_iterator(singlesDirPath))
+    {
+        if (!entry.is_regular_file())
+        {
+            continue;
+        }
+        if (entry.path().extension() != ".lsingle")
+        {
+            continue;
+        }
+        files.push_back(entry.path());
+    }
+
+    if (files.empty())
+    {
+        std::cerr << "No .lsingle files found in: " << singlesDirPath << std::endl;
+        return;
+    }
+
+    std::sort(files.begin(), files.end(),
+              [](const fs::path &a, const fs::path &b) {
+                  return a.filename().string() < b.filename().string();
+              });
+
+    const fs::path inputPath = files.front();
+    std::cout << "Analyzing PNI singles: " << inputPath << std::endl;
+
+    struct RangeStats
+    {
+        uint64_t count = 0;
+        uint64_t nonFinite = 0;
+        long double sum = 0.0;
+        double min = std::numeric_limits<double>::infinity();
+        double max = -std::numeric_limits<double>::infinity();
+
+        void add(double value)
+        {
+            count++;
+            if (!std::isfinite(value))
+            {
+                nonFinite++;
+                return;
+            }
+            min = std::min(min, value);
+            max = std::max(max, value);
+            sum += value;
+        }
+
+        double mean() const
+        {
+            const uint64_t finiteCount = count - nonFinite;
+            return finiteCount > 0 ? static_cast<double>(sum / finiteCount) : 0.0;
+        }
+    };
+
+    auto collect_stats = [&](RangeStats &energyStats, RangeStats &timeStats) {
+        openpni::io::listmode::ListmodeFileInput input;
+        input.Open(inputPath.string());
+        const auto segmentNum = input.SegmentNum();
+        for (uint32_t segIdx = 0; segIdx < segmentNum; ++segIdx)
+        {
+            auto segment = input.ReadSegment(segIdx, segIdx + 1);
+            const auto singles = openpni::distributed::coin::readSinglesFromSegment(segment);
+            if (singles.empty())
+            {
+                continue;
+            }
+            for (const auto &single : singles)
+            {
+                energyStats.add(static_cast<double>(single.energy));
+                timeStats.add(static_cast<double>(single.timevalue_pico));
+            }
+        }
+    };
+
+    RangeStats energyStats;
+    RangeStats timeStats;
+    collect_stats(energyStats, timeStats);
+
+    std::cout << "Energy stats: count=" << energyStats.count
+              << ", nonFinite=" << energyStats.nonFinite
+              << ", min=" << (std::isfinite(energyStats.min) ? energyStats.min : 0.0)
+              << ", max=" << (std::isfinite(energyStats.max) ? energyStats.max : 0.0)
+              << ", mean=" << energyStats.mean() << std::endl;
+    std::cout << "Time stats (pico): count=" << timeStats.count
+              << ", nonFinite=" << timeStats.nonFinite
+              << ", min=" << (std::isfinite(timeStats.min) ? timeStats.min : 0.0)
+              << ", max=" << (std::isfinite(timeStats.max) ? timeStats.max : 0.0)
+              << ", mean=" << timeStats.mean() << std::endl;
+
+    constexpr std::size_t kBins = 20;
+    auto build_hist = [&](double minVal, double maxVal, auto valueGetter) {
+        std::vector<uint64_t> hist(kBins, 0);
+        if (!std::isfinite(minVal) || !std::isfinite(maxVal) || maxVal <= minVal)
+        {
+            return hist;
+        }
+        const double range = maxVal - minVal;
+
+        openpni::io::listmode::ListmodeFileInput input;
+        input.Open(inputPath.string());
+        const auto segmentNum = input.SegmentNum();
+        for (uint32_t segIdx = 0; segIdx < segmentNum; ++segIdx)
+        {
+            auto segment = input.ReadSegment(segIdx, segIdx + 1);
+            const auto singles = openpni::distributed::coin::readSinglesFromSegment(segment);
+            if (singles.empty())
+            {
+                continue;
+            }
+            for (const auto &single : singles)
+            {
+                const double value = valueGetter(single);
+                if (!std::isfinite(value))
+                {
+                    continue;
+                }
+                const double scaled = (value - minVal) / range;
+                const std::size_t bin = std::min<std::size_t>(kBins - 1, static_cast<std::size_t>(scaled * kBins));
+                hist[bin]++;
+            }
+        }
+        return hist;
+    };
+
+    const auto energyHist = build_hist(
+        energyStats.min,
+        energyStats.max,
+        [](const auto &single) { return static_cast<double>(single.energy); });
+
+    const auto timeHist = build_hist(
+        timeStats.min,
+        timeStats.max,
+        [](const auto &single) { return static_cast<double>(single.timevalue_pico); });
+
+    if (!energyHist.empty())
+    {
+        std::cout << "Energy histogram (" << kBins << " bins):";
+        for (const auto count : energyHist)
+        {
+            std::cout << " " << count;
+        }
+        std::cout << std::endl;
+    }
+
+    if (!timeHist.empty())
+    {
+        std::cout << "Time histogram (" << kBins << " bins, pico):";
+        for (const auto count : timeHist)
+        {
+            std::cout << " " << count;
+        }
+        std::cout << std::endl;
+    }
+}
+
+namespace
+{
+std::optional<std::string> parse_arg_value(const std::string &arg, const std::string &key)
+{
+    if (arg == key)
+    {
+        return std::nullopt;
+    }
+    const std::string prefix = key + "=";
+    if (arg.rfind(prefix, 0) == 0)
+    {
+        return arg.substr(prefix.size());
+    }
+    return std::nullopt;
+}
+
+void print_usage(const char *exe)
+{
+    std::cout << "Usage: " << exe << " [--cali_path PATH] [--data_path PATH] [--out_path PATH]" << std::endl;
+}
+}
+
+int main(int argc, char **argv)
+{
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string arg = argv[i];
+        if (arg == "--help" || arg == "-h")
+        {
+            print_usage(argv[0]);
+            return 0;
+        }
+
+        if (auto value = parse_arg_value(arg, "--cali_path"))
+        {
+            cali_path = *value;
+            continue;
+        }
+        if (auto value = parse_arg_value(arg, "--data_path"))
+        {
+            data_path = *value;
+            continue;
+        }
+        if (auto value = parse_arg_value(arg, "--out_path"))
+        {
+            out_path = *value;
+            continue;
+        }
+
+        if (arg == "--cali_path" || arg == "--data_path" || arg == "--out_path")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "Missing value for " << arg << std::endl;
+                print_usage(argv[0]);
+                return 1;
+            }
+            const std::string next = argv[++i];
+            if (arg == "--cali_path")
+            {
+                cali_path = next;
+            }
+            else if (arg == "--data_path")
+            {
+                data_path = next;
+            }
+            else
+            {
+                out_path = next;
+            }
+            continue;
+        }
+
+        std::cerr << "Unknown argument: " << arg << std::endl;
+        print_usage(argv[0]);
+        return 1;
+    }
+
     std::cout << "======================================" << std::endl;
     std::cout << "     PNI R2S Test Suite" << std::endl;
     std::cout << "======================================\n"
@@ -798,10 +1164,15 @@ int main()
     std::cout << "[Test 3] Testing 50100 callback mode..." << std::endl;
    test_50100_930_callback();
 
-    //export_singles_payload_only("/media/lenovo/1TB/50100data/pni_res/singles/singles_50100_part1.lsingle");
+//     //export_singles_payload_only("/media/lenovo/1TB/50100data/pni_res/singles/singles_50100_part1.lsingle");
 
     // 工具调用，批量转换50100单事件数据
     convert_50100_singles_batch_process();
+
+    // //工具调用，批量转换RS单事件数据为PNI singles
+    // convert_rs_singles_batch_process();
+
+    // analyze_first_pni_singles_in_folder(path_pre + "/pni_singles");
 
     // std::cout << "[Test 4] Splitting 50100 rawdatas channels..." << std::endl;
     // split_930_data();

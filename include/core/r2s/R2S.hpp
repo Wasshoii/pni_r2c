@@ -131,8 +131,8 @@ namespace openpni::distributed::r2s
         bool forceFullCalibrationLoad = false;     // 强制加载全部通道的校正文件（用于 50100 特殊处理）
 
         bool useEnergyCut = false;                   // 是否启用能量窗过滤
-        float energyCutLow = 0.0f;                    // 能量窗下限
-        float energyCutHigh = 0.0f;                   // 能量窗上限
+        float energyCutLow = 0.0f;                    // 能量窗下限 eV
+        float energyCutHigh = 0.0f;                   // 能量窗上限 eV
 
         // 分布式处理回调，使用时需设置（可与 saveData2SingleFile 同时使用，支持同时保存文件和流式传输）
         SinglesReadyCallback onSinglesReady = nullptr;         // 传输 host 侧 Single

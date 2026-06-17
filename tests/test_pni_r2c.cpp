@@ -26,8 +26,8 @@
 
 using namespace openpni::distributed;
 
-std::string path_pre = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/NECR20260520/20260520001/PET-WB-2026_05_20_12_06_28/0";
-std::string path_pre_out = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/50100NECR/3";
+std::string path_pre = "/run/user/1000/gvfs/smb-share:server=10.0.200.115,share=dpet/data2/New/sensitivity/20260519005/PET-WB-2026_05_19_15_41_11/0";
+std::string path_pre_out = "/media/lenovo/RoG1/PNI_rawdata/sensitivity/10";
 std::string data_path = path_pre + "/RawData";
 std::string out_path = path_pre_out;
 std::string cali_path = "/media/lenovo/1TB/50100data/pni_res/caliFile";
@@ -484,8 +484,8 @@ void test_50100_930_callback()
         config.saveData2SingleFile = false;
         config.asyncFileWrite = false;
         config.useEnergyCut = true;
-        config.energyCutLow = 421.0;
-        config.energyCutHigh = 1000.0;
+        config.energyCutLow = 421000.0;
+        config.energyCutHigh = 1000000.0;
 
         config.onSinglesSpanReady =
             [&](std::span<r2s::Single const> singles,
@@ -692,7 +692,7 @@ void convert_50100_singles_batch_process()
     const std::string prefix = "singles_50100_part";
     const std::string ext = ".lsingle";
 
-    const double energyScale = 1.0; // eV -> keV? keep same as main()
+    const double energyScale = 0.001; // eV -> keV? keep same as main()
 
     auto has_prefix = [](const std::string &value, const std::string &prefixValue) {
         return value.rfind(prefixValue, 0) == 0;
@@ -1158,16 +1158,16 @@ int main(int argc, char **argv)
     // std::cout << "[Test 2] Testing callback mode..." << std::endl;
     // test_bdm2_callback();
 
-   // 工具调用，批量转换50100原始数据
-   convert_50100_rawdata_batch_process();
+//    // 工具调用，批量转换50100原始数据
+//    convert_50100_rawdata_batch_process();
 
     std::cout << "[Test 3] Testing 50100 callback mode..." << std::endl;
    test_50100_930_callback();
 
 //     //export_singles_payload_only("/media/lenovo/1TB/50100data/pni_res/singles/singles_50100_part1.lsingle");
 
-    // 工具调用，批量转换50100单事件数据
-    convert_50100_singles_batch_process();
+    // //工具调用，批量转换50100单事件数据
+    // convert_50100_singles_batch_process();
 
     // //工具调用，批量转换RS单事件数据为PNI singles
     // convert_rs_singles_batch_process();

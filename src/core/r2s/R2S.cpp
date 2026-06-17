@@ -263,7 +263,7 @@ namespace openpni::distributed::r2s
             auto *g50100 = new openpni::device::bdm50100_v2::BDM50100R2S();
             openpni::device::bdm50100_v2::BDM50100R2SParams params{};
             params.matchXTalkEnabled = true;
-            params.crossTalkEnabled = false;
+            params.crossTalkEnabled = true;
             params.__deviceId = 0;
             params.crossTalkTimeWindow = 2.0f; 
             params.energyThresholds = {60,  80, 100,    120,    140,   160,    180,

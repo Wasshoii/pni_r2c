@@ -11,10 +11,12 @@
 #include <algorithm>
 #include <limits>
 #include <cmath>
+#include <iomanip>
 #include <filesystem>
 #include <map>
 #include <optional>
 #include <cstddef>
+#include <sstream>
 
 // PnI-Config.hpp 必须在其他 PNI 头文件之前，定义 __PNI_CUDA_MACRO__ 等宏
 #include <pni/PnI-Config.hpp>
@@ -26,8 +28,8 @@
 
 using namespace openpni::distributed;
 
-std::string path_pre = "/run/user/1000/gvfs/smb-share:server=10.0.200.115,share=dpet/data2/New/sensitivity/20260519005/PET-WB-2026_05_19_15_41_11/0";
-std::string path_pre_out = "/media/lenovo/RoG1/PNI_rawdata/sensitivity/10";
+std::string path_pre = "/media/lenovo/1TB/50100data/sensitivity/1";
+std::string path_pre_out = "/media/lenovo/1TB/50100data/sensitivity/1";
 std::string data_path = path_pre + "/RawData";
 std::string out_path = path_pre_out;
 std::string cali_path = "/media/lenovo/1TB/50100data/pni_res/caliFile";
@@ -220,7 +222,7 @@ void test_bdm2_callback()
                 std::cout << "  First single: channelIdx=" << singles[0].channelIndex
                           << ", crystalIdx=" << singles[0].crystalIndex
                           << ", energy=" << singles[0].energy
-                          << ", time_pico=" << singles[0].timevalue_pico << std::endl;
+                          << ", time_pico=" << singles[0].timevalue_100fs << std::endl;
             }
         }
 
@@ -274,12 +276,13 @@ void split_930_data()
     }
 
 }
-void test_50100_930_callback()
+void test_50100_930_callback(bool saveSinglesFile = true)
 {
     std::cout << "\n========== Testing 50100 R2S Callback Mode ==========\n"
               << std::endl;
 
     std::string resPath = out_path + "/pni_singles";
+    std::cout << "Mode: " << (saveSinglesFile ? "save singles file" : "r2s only") << std::endl;
     auto calibrationFilePaths = r2s::collectCalibrationFiles(
         cali_path,
         {".bin"},
@@ -297,7 +300,7 @@ void test_50100_930_callback()
     constexpr std::size_t kMaxEnergySamplesPerCallback = 20000;
 
     namespace fs = std::filesystem;
-    const fs::path rawdataDir = out_path + "/pni_raw";
+    const fs::path rawdataDir = path_pre + "/pni_raw";
     const std::string rawPrefix = "pniRaw-";
     const std::string rawExt = ".bin";
 
@@ -305,6 +308,8 @@ void test_50100_930_callback()
     const size_t maxRawFilesPerOutput = 0; // 0 表示不限
     const std::string outputBaseName = "singles_50100";
     constexpr uint64_t kBytesPerSingle = 16; // 16+16+32+64 bits
+    float enengy_low = 421000.0f;
+    float enengy_high = 1000000.0f;
 
     auto has_prefix = [](const std::string &value, const std::string &prefix) {
         return value.rfind(prefix, 0) == 0;
@@ -401,8 +406,9 @@ void test_50100_930_callback()
             currentBytes = 0;
             currentFiles = 0;
 
-            const std::string outputPath = resultPath + "/" + baseName + "_part" +
-                                           std::to_string(outputIndex) + ".lsingle";
+            std::ostringstream outputName;
+            outputName << baseName << "_part" << std::setw(5) << std::setfill('0') << outputIndex << ".lsingle";
+            const std::string outputPath = resultPath + "/" + outputName.str();
             writer->Open(outputPath, totalCrystals);
             std::cout << "Output singles: " << outputPath << std::endl;
             return true;
@@ -468,7 +474,7 @@ void test_50100_930_callback()
 
     for (const auto &rawEntry : rawFiles)
     {
-        if (!rotator.startRawFile())
+        if (saveSinglesFile && !rotator.startRawFile())
         {
             allSuccess = false;
             break;
@@ -484,8 +490,8 @@ void test_50100_930_callback()
         config.saveData2SingleFile = false;
         config.asyncFileWrite = false;
         config.useEnergyCut = true;
-        config.energyCutLow = 421000.0;
-        config.energyCutHigh = 1000000.0;
+        config.energyCutLow = enengy_low;
+        config.energyCutHigh = enengy_high;
 
         config.onSinglesSpanReady =
             [&](std::span<r2s::Single const> singles,
@@ -517,18 +523,21 @@ void test_50100_930_callback()
                 energySamples++;
             }
 
-            const uint64_t bytesNeeded = static_cast<uint64_t>(singles.size()) * kBytesPerSingle;
-            if (!rotator.rotateForSize(bytesNeeded))
+            if (saveSinglesFile)
             {
-                return false;
-            }
+                const uint64_t bytesNeeded = static_cast<uint64_t>(singles.size()) * kBytesPerSingle;
+                if (!rotator.rotateForSize(bytesNeeded))
+                {
+                    return false;
+                }
 
-            if (!r2s::appendSinglesToSingleFile(*rotator.writer, singles, clock_ms, duration_ms))
-            {
-                return false;
-            }
+                if (!r2s::appendSinglesToSingleFile(*rotator.writer, singles, clock_ms, duration_ms))
+                {
+                    return false;
+                }
 
-            rotator.currentBytes += bytesNeeded;
+                rotator.currentBytes += bytesNeeded;
+            }
 
             if (totalCallbacks % 2 == 0 || totalCallbacks == 1)
             {
@@ -541,7 +550,7 @@ void test_50100_930_callback()
                     std::cout << "  First single: channelIdx=" << singles[0].channelIndex
                               << ", crystalIdx=" << singles[0].crystalIndex
                               << ", energy=" << singles[0].energy
-                              << ", time_pico=" << singles[0].timevalue_pico << std::endl;
+                              << ", time_pico=" << singles[0].timevalue_100fs << std::endl;
                 }
 
                 if (energySamples > 0)
@@ -561,7 +570,10 @@ void test_50100_930_callback()
 
         std::cout << "Starting R2S processing: " << rawEntry.path << std::endl;
         const bool success = r2s::processR2S(config);
-        rotator.finishRawFile();
+        if (saveSinglesFile)
+        {
+            rotator.finishRawFile();
+        }
         if (!success)
         {
             allSuccess = false;
@@ -692,7 +704,8 @@ void convert_50100_singles_batch_process()
     const std::string prefix = "singles_50100_part";
     const std::string ext = ".lsingle";
 
-    const double energyScale = 0.001; // eV -> keV? keep same as main()
+    const double energyScale = 0.001; // eV -> keV
+    const double timeScale = 0.0001; // 100fs -> ns
 
     auto has_prefix = [](const std::string &value, const std::string &prefixValue) {
         return value.rfind(prefixValue, 0) == 0;
@@ -771,7 +784,8 @@ void convert_50100_singles_batch_process()
             TargetListmodeHeader{},
             1,
             1,
-            energyScale);
+            energyScale,
+            timeScale);
 
         if (!ok)
         {
@@ -981,7 +995,7 @@ void analyze_first_pni_singles_in_folder(const std::string &singlesDirPath)
             for (const auto &single : singles)
             {
                 energyStats.add(static_cast<double>(single.energy));
-                timeStats.add(static_cast<double>(single.timevalue_pico));
+                timeStats.add(static_cast<double>(single.timevalue_100fs));
             }
         }
     };
@@ -1044,8 +1058,7 @@ void analyze_first_pni_singles_in_folder(const std::string &singlesDirPath)
     const auto timeHist = build_hist(
         timeStats.min,
         timeStats.max,
-        [](const auto &single) { return static_cast<double>(single.timevalue_pico); });
-
+        [](const auto &single) { return static_cast<double>(single.timevalue_100fs); });
     if (!energyHist.empty())
     {
         std::cout << "Energy histogram (" << kBins << " bins):";
@@ -1161,13 +1174,18 @@ int main(int argc, char **argv)
 //    // 工具调用，批量转换50100原始数据
 //    convert_50100_rawdata_batch_process();
 
+    constexpr bool kSaveSinglesFile = true;
     std::cout << "[Test 3] Testing 50100 callback mode..." << std::endl;
-   test_50100_930_callback();
+    test_50100_930_callback(kSaveSinglesFile);
 
 //     //export_singles_payload_only("/media/lenovo/1TB/50100data/pni_res/singles/singles_50100_part1.lsingle");
 
-    // //工具调用，批量转换50100单事件数据
-    // convert_50100_singles_batch_process();
+    //工具调用，批量转换50100单事件数据
+    if (kSaveSinglesFile)
+    {
+        //工具调用，批量转换50100单事件数据
+        convert_50100_singles_batch_process();
+    }
 
     // //工具调用，批量转换RS单事件数据为PNI singles
     // convert_rs_singles_batch_process();

@@ -249,7 +249,8 @@ namespace openpni::distributed::r2s
     openpni::interface::ISingleGenerator *createSingleGenerator(
         DetectorType type,
         uint16_t channelIndex,
-        const std::string &calibrationFile)
+        const std::string &calibrationFile,
+        std::string rawdataPath)
     {
         openpni::interface::ISingleGenerator *generator = nullptr;
 
@@ -756,7 +757,8 @@ namespace openpni::distributed::r2s
                     auto generator = createSingleGenerator(
                         m_config.detectorType,
                         static_cast<uint16_t>(i),
-                        m_config.calibrationFiles[i]);
+                        m_config.calibrationFiles[i],
+                        m_config.rawdataPath);
                     m_generatorsVector.push_back(generator);
                 }
                 catch (const std::exception &e)
@@ -777,7 +779,8 @@ namespace openpni::distributed::r2s
                     auto generator = createSingleGenerator(
                         m_config.detectorType,
                         channelIndex,
-                        m_config.calibrationFiles[channelIndex]);
+                        m_config.calibrationFiles[channelIndex],
+                        m_config.rawdataPath);
                     m_generatorsVector.push_back(generator);
                 }
                 catch (const std::exception &e)

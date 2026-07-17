@@ -1341,7 +1341,7 @@ bool export_singles_payload_only(
         {
             auto segment = inputFile.ReadSegment(segIdx, segIdx + 1);
             const auto data = segment.GetHAnyData();
-            if (!data.channel_index1 || !data.local_crystal_index1 || !data.absolute_timestamp1)
+            if (!data.channel_index1 || !data.local_crystal_index1 || !data.absolute_timestamp1_100fs)
             {
                 std::cerr << "Error: Segment " << segIdx << " missing required single fields" << std::endl;
                 return false;
@@ -1359,7 +1359,7 @@ bool export_singles_payload_only(
                 auto &single = buffer[i];
                 single.channelIndex = data.channel_index1[i];
                 single.crystalIndex = data.local_crystal_index1[i];
-                single.timevalue_pico = data.absolute_timestamp1[i];
+                single.timevalue_100fs = data.absolute_timestamp1_100fs[i];
                 single.energy = data.energy1[i];
             }
 
@@ -1558,7 +1558,7 @@ bool convert_single_to_RS_listmode(const std::string &singlePath,
                                        uint16_t ipBase = 1,
                                        uint16_t chBase = 1,
                                        double energyScale = 1,
-                                       double timeScale = 0.001)
+                                       double timeScale = 0.0001)
 {
     try
     {
@@ -1680,7 +1680,7 @@ bool convert_single_to_RS_listmode(const std::string &singlePath,
                     maxEnergy = std::max(maxEnergy, static_cast<double>(energyKev));
                 }
                 evt.energy = energyKev;
-                evt.time = static_cast<double>(single.timevalue_pico * timeScale);
+                evt.time = static_cast<double>(single.timevalue_100fs * timeScale);
                 buffer.push_back(evt);
             }
 
@@ -1938,12 +1938,12 @@ bool convert_RS_listmode_to_single(const std::string &rsPath,
                 const double timeVal = static_cast<double>(evt.time) * timeScale;
                 if (!std::isfinite(timeVal) || timeVal < 0.0)
                 {
-                    s.timevalue_pico = 0;
+                    s.timevalue_100fs = 0;
                     nonFiniteTime++;
                 }
                 else
                 {
-                    s.timevalue_pico = static_cast<uint64_t>(std::llround(timeVal));
+                    s.timevalue_100fs = static_cast<uint64_t>(std::llround(timeVal));
                 }
 
                 pniBuffer.push_back(s);

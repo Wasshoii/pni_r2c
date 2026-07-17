@@ -38,7 +38,7 @@ constexpr float kEnergyUpper_eV = 650000.0f;
 std::vector<Single> readSinglesFromSegment(openpni::io::listmode::ListmodeFileSegment &segment)
 {
     const auto data = segment.GetHAnyData();
-    if (!data.local_crystal_index1 || !data.channel_index1 || !data.absolute_timestamp1)
+    if (!data.local_crystal_index1 || !data.channel_index1 || !data.absolute_timestamp1_100fs)
     {
         throw std::runtime_error("Single segment missing required fields");
     }
@@ -48,7 +48,7 @@ std::vector<Single> readSinglesFromSegment(openpni::io::listmode::ListmodeFileSe
     {
         singles[i].channelIndex = data.channel_index1[i];
         singles[i].crystalIndex = data.local_crystal_index1[i];
-        singles[i].timevalue_pico = data.absolute_timestamp1[i];
+        singles[i].timevalue_100fs = data.absolute_timestamp1_100fs[i];
         singles[i].energy = data.energy1 ? data.energy1[i] : 0.0f;
     }
     return singles;
@@ -284,7 +284,7 @@ std::vector<Single> generateMockSingles(
         s.channelIndex = 0;
         s.crystalIndex = static_cast<unsigned short>(crystalDist(rng));
         s.energy = energyDist(rng);
-        s.timevalue_pico = baseTime_pico + timeDist(rng);
+        s.timevalue_100fs = baseTime_pico + timeDist(rng);
         singles.push_back(s);
     }
 

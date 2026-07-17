@@ -143,7 +143,7 @@ namespace
 
             mix(static_cast<uint64_t>(s.channelIndex));
             mix(static_cast<uint64_t>(s.crystalIndex));
-            mix(static_cast<uint64_t>(s.timevalue_pico));
+            mix(static_cast<uint64_t>(s.timevalue_100fs));
             mix(static_cast<uint64_t>(energyBits));
             return h;
         }

@@ -47,13 +47,13 @@ namespace openpni::distributed::coin
             SupportedFields::local_crystal_index2 |
             SupportedFields::channel_index1 |
             SupportedFields::channel_index2 |
-            SupportedFields::time_of_flight);
+            SupportedFields::time_of_flight_100fs);
         header.SetFieldsInUse(fieldsInUse);
         header.SetBitsForStorage(SupportedFields::local_crystal_index1, 16);
         header.SetBitsForStorage(SupportedFields::local_crystal_index2, 16);
         header.SetBitsForStorage(SupportedFields::channel_index1, 16);
         header.SetBitsForStorage(SupportedFields::channel_index2, 16);
-        header.SetBitsForStorage(SupportedFields::time_of_flight, 16);
+        header.SetBitsForStorage(SupportedFields::time_of_flight_100fs, 16);
         header.SetFileTypeName(openpni::io::listmode::fields::file_type_coin_listmode);
         return header;
     }
@@ -65,12 +65,12 @@ namespace openpni::distributed::coin
             SupportedFields::local_crystal_index1 |
             SupportedFields::channel_index1 |
             SupportedFields::energy1 |
-            SupportedFields::absolute_timestamp1);
+            SupportedFields::absolute_timestamp1_100fs);
         header.SetFieldsInUse(fieldsInUse);
         header.SetBitsForStorage(SupportedFields::local_crystal_index1, 16);
         header.SetBitsForStorage(SupportedFields::channel_index1, 16);
         header.SetBitsForStorage(SupportedFields::energy1, 32);
-        header.SetBitsForStorage(SupportedFields::absolute_timestamp1, 64);
+        header.SetBitsForStorage(SupportedFields::absolute_timestamp1_100fs, 64);
         header.SetFileTypeName(openpni::io::listmode::fields::file_type_single_listmode);
         return header;
     }
@@ -221,7 +221,7 @@ namespace openpni::distributed::coin
     inline std::vector<Single> readSinglesFromSegment(ListmodeFileSegment &segment)
     {
         const auto data = segment.GetHAnyData();
-        if (!data.local_crystal_index1 || !data.channel_index1 || !data.absolute_timestamp1)
+        if (!data.local_crystal_index1 || !data.channel_index1 || !data.absolute_timestamp1_100fs)
         {
             throw std::runtime_error("Single segment missing required fields");
         }
@@ -231,7 +231,7 @@ namespace openpni::distributed::coin
         {
             singles[i].channelIndex = data.channel_index1[i];
             singles[i].crystalIndex = data.local_crystal_index1[i];
-            singles[i].timevalue_pico = data.absolute_timestamp1[i];
+            singles[i].timevalue_100fs = data.absolute_timestamp1_100fs[i];
             singles[i].energy = data.energy1 ? data.energy1[i] : 0.0f;
         }
         return singles;
@@ -240,7 +240,7 @@ namespace openpni::distributed::coin
     inline void fillSinglesFromSegment(ListmodeFileSegment &segment, Single *dest)
     {
         const auto data = segment.GetHAnyData();
-        if (!data.local_crystal_index1 || !data.channel_index1 || !data.absolute_timestamp1)
+        if (!data.local_crystal_index1 || !data.channel_index1 || !data.absolute_timestamp1_100fs)
         {
             throw std::runtime_error("Single segment missing required fields");
         }
@@ -249,7 +249,7 @@ namespace openpni::distributed::coin
         {
             dest[i].channelIndex = data.channel_index1[i];
             dest[i].crystalIndex = data.local_crystal_index1[i];
-            dest[i].timevalue_pico = data.absolute_timestamp1[i];
+            dest[i].timevalue_100fs = data.absolute_timestamp1_100fs[i];
             dest[i].energy = data.energy1 ? data.energy1[i] : 0.0f;
         }
     }
@@ -416,7 +416,7 @@ namespace openpni::distributed::coin
                 const int fields = static_cast<int>(header.FieldsInUse());
                 const int required = static_cast<int>(SupportedFields::local_crystal_index1 |
                                                      SupportedFields::channel_index1 |
-                                                     SupportedFields::absolute_timestamp1);
+                                                     SupportedFields::absolute_timestamp1_100fs);
                 if ((fields & required) != required)
                 {
                     std::cerr << "Error: Missing required fields in file: " << inputFiles[i] << std::endl;
@@ -643,7 +643,7 @@ namespace openpni::distributed::coin
                                   mergedSingles.begin(), mergedSingles.end(),
                                   [](const Single &a, const Single &b)
                                   {
-                                      return a.timevalue_pico < b.timevalue_pico;
+                                      return a.timevalue_100fs < b.timevalue_100fs;
                                   });
                         auto ts2 = std::chrono::high_resolution_clock::now();
                         t_sort += std::chrono::duration<double, std::milli>(ts2 - ts1).count();

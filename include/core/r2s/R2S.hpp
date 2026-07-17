@@ -8,7 +8,7 @@
 // #include <pni/node/BDMBiDR2S.hpp>
 
 #include <pni/node/raw2singles/BDM2R2S.hpp>
-#include <pni/detector/bdm50100/BDM50100R2S.hpp>
+#include <pni/node/raw2singles/BDM50100/BDM50100R2S.hpp>
 #include <pni/node/raw2singles/ConvergedR2S.hpp>
 #include <pni/node/Coincidence.hpp>
 #include "tools/SinglesProcess.hpp"

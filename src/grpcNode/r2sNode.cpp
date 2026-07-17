@@ -527,7 +527,7 @@ namespace openpni::distributed::grpcnode
                         event->set_channel_index(static_cast<uint32_t>(s.channelIndex));
                         event->set_crystal_index(static_cast<uint32_t>(s.crystalIndex));
                         event->set_energy(s.energy);
-                        event->set_time_pico(s.timevalue_pico);
+                        event->set_time_pico(s.timevalue_100fs);
                     }
 
                     singlesOffset += segmentSinglesU32;

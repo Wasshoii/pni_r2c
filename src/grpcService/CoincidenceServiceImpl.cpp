@@ -67,7 +67,7 @@ namespace openpni::distributed::streaming
                 single.channelIndex = static_cast<uint16_t>(s.channel_index());
                 single.crystalIndex = static_cast<uint16_t>(s.crystal_index());
                 single.energy = s.energy();
-                single.timevalue_pico = s.time_pico();
+                single.timevalue_100fs = s.time_pico();
                 out.push_back(single);
             };
 

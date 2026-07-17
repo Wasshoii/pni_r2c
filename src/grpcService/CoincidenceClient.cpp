@@ -124,7 +124,7 @@ namespace openpni::distributed::streaming
             event->set_channel_index(channelIndexToSend);
             event->set_crystal_index(crystalIndexToSend);
             event->set_energy(s.energy);
-            event->set_time_pico(s.timevalue_pico);
+            event->set_time_pico(s.timevalue_100fs);
         }
 
         {

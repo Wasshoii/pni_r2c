@@ -131,8 +131,8 @@ namespace openpni::distributed::streaming
         maxTime_pico = 0;
         for (const auto &s : singles)
         {
-            minTime_pico = std::min(minTime_pico, s.timevalue_pico);
-            maxTime_pico = std::max(maxTime_pico, s.timevalue_pico);
+            minTime_pico = std::min(minTime_pico, s.timevalue_100fs);
+            maxTime_pico = std::max(maxTime_pico, s.timevalue_100fs);
         }
     }
 
@@ -324,7 +324,7 @@ namespace openpni::distributed::streaming
                     boundary,
                     [](uint64_t bound, const Single &s)
                     {
-                        return bound < s.timevalue_pico;
+                        return bound < s.timevalue_100fs;
                     });
 
                 if (splitPoint != frontChunk.singles.begin())

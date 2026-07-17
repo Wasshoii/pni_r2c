@@ -113,8 +113,8 @@ namespace
                 std::cout << "  bits.channel_index1=" << header.BitsForStorage(openpni::io::listmode::SupportedFields::channel_index1) << std::endl;
             if (has(openpni::io::listmode::SupportedFields::energy1))
                 std::cout << "  bits.energy1=" << header.BitsForStorage(openpni::io::listmode::SupportedFields::energy1) << std::endl;
-            if (has(openpni::io::listmode::SupportedFields::absolute_timestamp1))
-                std::cout << "  bits.absolute_timestamp1=" << header.BitsForStorage(openpni::io::listmode::SupportedFields::absolute_timestamp1) << std::endl;
+            if (has(openpni::io::listmode::SupportedFields::absolute_timestamp1_100fs))
+                std::cout << "  bits.absolute_timestamp1=" << header.BitsForStorage(openpni::io::listmode::SupportedFields::absolute_timestamp1_100fs) << std::endl;
         }
 
         if (header.FileTypeName() != openpni::io::listmode::fields::file_type_single_listmode)
@@ -506,7 +506,7 @@ namespace
             auto segment = input.ReadSegment(segIdx);
             const auto data = segment.GetHAnyData();
             if (!data.local_crystal_index1 || !data.local_crystal_index2 ||
-                !data.channel_index1 || !data.channel_index2 || !data.time_of_flight)
+                !data.channel_index1 || !data.channel_index2 || !data.time_of_flight_100fs)
             {
                 std::cout << "  Segment " << segIdx << " missing listmode fields, skipping" << std::endl;
                 continue;
@@ -520,7 +520,7 @@ namespace
                 const uint16_t ch2 = data.channel_index2[i];
                 const uint32_t g1 = static_cast<uint32_t>(ch1) * kBdm50100CrystalsPerChannel + data.local_crystal_index1[i];
                 const uint32_t g2 = static_cast<uint32_t>(ch2) * kBdm50100CrystalsPerChannel + data.local_crystal_index2[i];
-                const int16_t dt = static_cast<int16_t>(data.time_of_flight[i]);
+                const int16_t dt = static_cast<int16_t>(data.time_of_flight_100fs[i]);
 
                 stats.checkedDtCount++;
                 if (dt < 0)

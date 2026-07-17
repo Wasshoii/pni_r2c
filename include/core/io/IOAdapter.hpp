@@ -348,14 +348,14 @@ namespace coreio
                 Fields::local_crystal_index1 |
                 Fields::channel_index1 |
                 Fields::energy1 |
-                Fields::absolute_timestamp1);
+                Fields::absolute_timestamp1_100fs);
 
             ::openpni::io::listmode::ListmodeFileHeader header;
             header.SetFieldsInUse(fieldsInUse);
             header.SetBitsForStorage(Fields::local_crystal_index1, 16);
             header.SetBitsForStorage(Fields::channel_index1, 16);
             header.SetBitsForStorage(Fields::energy1, 32);
-            header.SetBitsForStorage(Fields::absolute_timestamp1, 64);
+            header.SetBitsForStorage(Fields::absolute_timestamp1_100fs, 64);
             header.SetFileTypeName(::openpni::io::listmode::fields::file_type_single_listmode);
 
             output_ = std::make_unique<::openpni::io::ListmodeFileOutput>(std::move(header), std::move(ioOptions));
@@ -419,7 +419,7 @@ namespace coreio
                 Fields::local_crystal_index2 |
                 Fields::channel_index1 |
                 Fields::channel_index2 |
-                Fields::time_of_flight);
+                Fields::time_of_flight_100fs);
 
             ::openpni::io::listmode::ListmodeFileHeader header;
             header.SetFieldsInUse(fieldsInUse);
@@ -427,7 +427,7 @@ namespace coreio
             header.SetBitsForStorage(Fields::local_crystal_index2, 16);
             header.SetBitsForStorage(Fields::channel_index1, 16);
             header.SetBitsForStorage(Fields::channel_index2, 16);
-            header.SetBitsForStorage(Fields::time_of_flight, 16);
+            header.SetBitsForStorage(Fields::time_of_flight_100fs, 16);
             header.SetFileTypeName(::openpni::io::listmode::fields::file_type_coin_listmode);
 
             latestWriter_ = std::make_unique<::openpni::io::ListmodeFileOutput>(std::move(header), std::move(ioOptions));

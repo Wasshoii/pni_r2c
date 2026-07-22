@@ -979,6 +979,7 @@ if(R2C_BUILD_TOOL_SHARDED_RAW_MERGE)
   target_include_directories(tool_sharded_raw_merge
     PRIVATE
       "${CMAKE_CURRENT_BINARY_DIR}/generated"
+      "${R2C_PROTO_GEN_ROOT}"
       "${R2C_PROTO_GEN_DIR}"
       "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
       "${CMAKE_CURRENT_SOURCE_DIR}/include"

@@ -18,13 +18,6 @@ namespace openpni::distributed::coreio
 {
     using namespace std::chrono_literals;
 
-    static std::string MakeFilename(uint64_t timestamp, int seq)
-    {
-        std::ostringstream ss;
-        ss << "raw_" << timestamp << "_" << std::setfill('0') << std::setw(4) << seq << ".raw";
-        return ss.str();
-    }
-
     static bool extractUInt64(const std::string &line, const char *key, uint64_t *out)
     {
         const auto pos = line.find(key);
@@ -239,45 +232,38 @@ namespace openpni::distributed::coreio
 
     bool ShardedRawFileOutput::OpenNextFile(ShardState &shard, size_t shardIndex)
     {
+        // 文件名前缀带时间戳，分卷序号由 RollingFileWriter 自动追加；
+        // 后续的分卷（超过 max_file_size_mb 后滚动到下一个文件）由 writer 内部自动处理，
+        // 本函数只需在 shard 首次启动时调用一次。
         const auto now = std::chrono::system_clock::now();
         const auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-        std::string filename = MakeFilename(timestamp, static_cast<int>(shard.fileSeq++));
-        std::string sessionDir = shardRoots_[shardIndex] + "/" + cfg_.session_name;
-        std::error_code ec;
-        std::filesystem::create_directories(sessionDir, ec);
+        const std::string filePrefix = "raw_" + std::to_string(timestamp);
+        const std::string sessionDir = shardRoots_[shardIndex] + "/" + cfg_.session_name;
 
-        shard.currentPath = sessionDir + "/" + filename;
-        try
-        {
-            openpni::distributed::coreio::RawDataWriterOptions options;
-            options.channelNum = cfg_.channel_num;
-            options.io.reservedBytes = cfg_.total_reserved_gib * 1024ull * 1024ull * 1024ull;
-            options.backend = openpni::distributed::coreio::IOBackendContext::Get().rawdataWriter;
-            shard.writer = std::make_unique<openpni::distributed::coreio::RawDataFileWriter>(std::move(options));
-            shard.writer->Open(shard.currentPath);
-            shard.currentSize = 0;
-            return true;
-        }
-        catch (...)
-        {
-            shard.currentPath.clear();
-            shard.writer.reset();
-            return false;
-        }
+        openpni::distributed::coreio::RawDataWriterOptions options;
+        options.channelNum = cfg_.channel_num;
+        options.io.reservedBytes = cfg_.total_reserved_gib * 1024ull * 1024ull * 1024ull;
+        options.io.maxFileSizeBytes = cfg_.max_file_size_mb * 1024ull * 1024ull;
+        options.io.enableOverrideExistingFile = cfg_.overwrite_existing_file;
+
+        shard.writer.SetFileReadyCallback(callback_);
+        shard.opened = shard.writer.Open(
+            sessionDir, filePrefix, "raw", std::move(options),
+            [](openpni::distributed::coreio::RawDataFileWriter &w, const std::string &path)
+            {
+                w.Open(path);
+            });
+
+        return shard.opened;
     }
 
     void ShardedRawFileOutput::CloseShardFile(ShardState &shard)
     {
-        if (shard.writer)
+        if (shard.opened)
         {
-            shard.writer.reset();
+            shard.writer.Stop();
+            shard.opened = false;
         }
-        if (!shard.currentPath.empty() && callback_)
-        {
-            callback_(shard.currentPath);
-        }
-        shard.currentPath.clear();
-        shard.currentSize = 0;
     }
 
     void ShardedRawFileOutput::ShardWorkerLoop(size_t shardIndex)
@@ -308,7 +294,7 @@ namespace openpni::distributed::coreio
             if (!seg)
                 continue;
 
-            if (!shard.writer)
+            if (!shard.opened)
             {
                 if (!OpenNextFile(shard, shardIndex))
                 {
@@ -327,27 +313,21 @@ namespace openpni::distributed::coreio
             view.duration_ms = seg->duration_ms;
             view.channelNum = seg->channelNum;
 
-            const uint64_t segmentId = segmentCounter_.fetch_add(1, std::memory_order_relaxed);
-            WriteManifestPrepare(segmentId, *seg, shardIndex, shard.currentPath);
+            size_t sizeEstimate = 0;
+            for (auto l : seg->lengths) sizeEstimate += l + 32;
 
-            bool ok = shard.writer->AppendSegment(view);
+            // 分卷（若超过 maxFileSizeBytes）由 shard.writer 在 AppendSegment 内部自动处理，
+            // 因此 manifest 记录需要在写入之后，才能拿到数据实际落盘的文件路径。
+            const uint64_t segmentId = segmentCounter_.fetch_add(1, std::memory_order_relaxed);
+            const bool ok = shard.writer.AppendSegment(sizeEstimate, view);
             if (ok)
             {
-                // update size estimate
-                size_t added = 0;
-                for (auto l : seg->lengths) added += l + 32;
-                shard.currentSize += added;
-
+                WriteManifestPrepare(segmentId, *seg, shardIndex, shard.writer.CurrentPath());
                 WriteManifestCommit(segmentId);
             }
             else
             {
                 // write failed - consider requeue or mark
-            }
-
-            if (shard.currentSize > cfg_.max_file_size_mb * 1024ull * 1024ull)
-            {
-                CloseShardFile(shard);
             }
         }
 

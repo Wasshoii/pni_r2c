@@ -28,8 +28,8 @@
 
 using namespace openpni::distributed;
 
-std::string path_pre = "/media/lenovo/1TB/50100data/sensitivity/1";
-std::string path_pre_out = "/media/lenovo/1TB/50100data/sensitivity/1";
+std::string path_pre = "/media/lenovo/1TB/50100data/test_9120";
+std::string path_pre_out = "/media/lenovo/1TB/50100data/test_9120";
 std::string data_path = path_pre + "/RawData";
 std::string out_path = path_pre_out;
 std::string cali_path = "/media/lenovo/1TB/50100data/pni_res/caliFile";
@@ -394,24 +394,36 @@ void test_50100_930_callback(bool saveSinglesFile = true)
         uint64_t currentBytes = 0;
         size_t currentFiles = 0;
         bool inRawFile = false;
-        std::unique_ptr<openpni::distributed::coreio::SinglesFileWriter> writer;
+        std::unique_ptr<openpni::distributed::coreio::RollingFileWriter<
+            openpni::distributed::coreio::SinglesFileWriter,
+            openpni::distributed::coreio::SingleWriterOptions>>
+            writer;
 
         bool openNew()
         {
+            // 本结构体自行管理分卷（按 maxFiles/maxBytes 切换到新文件），因此这里始终以
+            // maxFileSizeBytes = 0（不自动分卷）的方式打开底层 RollingFileWriter，
+            // 只是借用它统一的 Open/AppendSegment 接口。
             openpni::distributed::coreio::SingleWriterOptions opts;
-            opts.backend = openpni::distributed::coreio::IOBackendContext::Get().singlesWriter;
-            writer = std::make_unique<openpni::distributed::coreio::SinglesFileWriter>(std::move(opts));
+            writer = std::make_unique<openpni::distributed::coreio::RollingFileWriter<
+                openpni::distributed::coreio::SinglesFileWriter,
+                openpni::distributed::coreio::SingleWriterOptions>>();
 
             outputIndex++;
             currentBytes = 0;
             currentFiles = 0;
 
             std::ostringstream outputName;
-            outputName << baseName << "_part" << std::setw(5) << std::setfill('0') << outputIndex << ".lsingle";
-            const std::string outputPath = resultPath + "/" + outputName.str();
-            writer->Open(outputPath, totalCrystals);
-            std::cout << "Output singles: " << outputPath << std::endl;
-            return true;
+            outputName << baseName << "_part" << std::setw(5) << std::setfill('0') << outputIndex;
+            const uint32_t crystalsForOpen = totalCrystals;
+            const bool opened = writer->Open(
+                resultPath, outputName.str(), "lsingle", opts,
+                [crystalsForOpen](openpni::distributed::coreio::SinglesFileWriter &w, const std::string &path)
+                {
+                    w.Open(path, crystalsForOpen);
+                });
+            std::cout << "Output singles: " << writer->CurrentPath() << std::endl;
+            return opened;
         }
 
         bool startRawFile()
@@ -597,12 +609,12 @@ void test_50100_930_callback(bool saveSinglesFile = true)
               << std::endl;
 }
 
-void convert_50100_rawdata_batch_process()
+void convert_50100_rawdata_batch_process(uint16_t ringOffset =0)
 {
     namespace fs = std::filesystem;
 
     const fs::path rawDir = data_path;
-    const fs::path outDir = out_path + "/pni_raw";
+    const fs::path outDir = out_path + "/pni_raw_ring" + std::to_string(ringOffset);
     const std::string prefix = "done_";
     const std::string ext = ".bin";
 
@@ -685,7 +697,9 @@ void convert_50100_rawdata_batch_process()
             0,
             144,
             "BDM50100",
-            true);
+            true,
+            1ull * 1024 * 1024,
+            ringOffset);
 
         if (!ok)
         {
@@ -914,172 +928,6 @@ void convert_rs_singles_batch_process()
     }
 }
 
-void analyze_first_pni_singles_in_folder(const std::string &singlesDirPath)
-{
-    namespace fs = std::filesystem;
-
-    if (!fs::exists(singlesDirPath))
-    {
-        std::cerr << "Singles directory not found: " << singlesDirPath << std::endl;
-        return;
-    }
-
-    std::vector<fs::path> files;
-    for (const auto &entry : fs::directory_iterator(singlesDirPath))
-    {
-        if (!entry.is_regular_file())
-        {
-            continue;
-        }
-        if (entry.path().extension() != ".lsingle")
-        {
-            continue;
-        }
-        files.push_back(entry.path());
-    }
-
-    if (files.empty())
-    {
-        std::cerr << "No .lsingle files found in: " << singlesDirPath << std::endl;
-        return;
-    }
-
-    std::sort(files.begin(), files.end(),
-              [](const fs::path &a, const fs::path &b) {
-                  return a.filename().string() < b.filename().string();
-              });
-
-    const fs::path inputPath = files.front();
-    std::cout << "Analyzing PNI singles: " << inputPath << std::endl;
-
-    struct RangeStats
-    {
-        uint64_t count = 0;
-        uint64_t nonFinite = 0;
-        long double sum = 0.0;
-        double min = std::numeric_limits<double>::infinity();
-        double max = -std::numeric_limits<double>::infinity();
-
-        void add(double value)
-        {
-            count++;
-            if (!std::isfinite(value))
-            {
-                nonFinite++;
-                return;
-            }
-            min = std::min(min, value);
-            max = std::max(max, value);
-            sum += value;
-        }
-
-        double mean() const
-        {
-            const uint64_t finiteCount = count - nonFinite;
-            return finiteCount > 0 ? static_cast<double>(sum / finiteCount) : 0.0;
-        }
-    };
-
-    auto collect_stats = [&](RangeStats &energyStats, RangeStats &timeStats) {
-        openpni::io::listmode::ListmodeFileInput input;
-        input.Open(inputPath.string());
-        const auto segmentNum = input.SegmentNum();
-        for (uint32_t segIdx = 0; segIdx < segmentNum; ++segIdx)
-        {
-            auto segment = input.ReadSegment(segIdx, segIdx + 1);
-            const auto singles = openpni::distributed::coin::readSinglesFromSegment(segment);
-            if (singles.empty())
-            {
-                continue;
-            }
-            for (const auto &single : singles)
-            {
-                energyStats.add(static_cast<double>(single.energy));
-                timeStats.add(static_cast<double>(single.timevalue_100fs));
-            }
-        }
-    };
-
-    RangeStats energyStats;
-    RangeStats timeStats;
-    collect_stats(energyStats, timeStats);
-
-    std::cout << "Energy stats: count=" << energyStats.count
-              << ", nonFinite=" << energyStats.nonFinite
-              << ", min=" << (std::isfinite(energyStats.min) ? energyStats.min : 0.0)
-              << ", max=" << (std::isfinite(energyStats.max) ? energyStats.max : 0.0)
-              << ", mean=" << energyStats.mean() << std::endl;
-    std::cout << "Time stats (pico): count=" << timeStats.count
-              << ", nonFinite=" << timeStats.nonFinite
-              << ", min=" << (std::isfinite(timeStats.min) ? timeStats.min : 0.0)
-              << ", max=" << (std::isfinite(timeStats.max) ? timeStats.max : 0.0)
-              << ", mean=" << timeStats.mean() << std::endl;
-
-    constexpr std::size_t kBins = 20;
-    auto build_hist = [&](double minVal, double maxVal, auto valueGetter) {
-        std::vector<uint64_t> hist(kBins, 0);
-        if (!std::isfinite(minVal) || !std::isfinite(maxVal) || maxVal <= minVal)
-        {
-            return hist;
-        }
-        const double range = maxVal - minVal;
-
-        openpni::io::listmode::ListmodeFileInput input;
-        input.Open(inputPath.string());
-        const auto segmentNum = input.SegmentNum();
-        for (uint32_t segIdx = 0; segIdx < segmentNum; ++segIdx)
-        {
-            auto segment = input.ReadSegment(segIdx, segIdx + 1);
-            const auto singles = openpni::distributed::coin::readSinglesFromSegment(segment);
-            if (singles.empty())
-            {
-                continue;
-            }
-            for (const auto &single : singles)
-            {
-                const double value = valueGetter(single);
-                if (!std::isfinite(value))
-                {
-                    continue;
-                }
-                const double scaled = (value - minVal) / range;
-                const std::size_t bin = std::min<std::size_t>(kBins - 1, static_cast<std::size_t>(scaled * kBins));
-                hist[bin]++;
-            }
-        }
-        return hist;
-    };
-
-    const auto energyHist = build_hist(
-        energyStats.min,
-        energyStats.max,
-        [](const auto &single) { return static_cast<double>(single.energy); });
-
-    const auto timeHist = build_hist(
-        timeStats.min,
-        timeStats.max,
-        [](const auto &single) { return static_cast<double>(single.timevalue_100fs); });
-    if (!energyHist.empty())
-    {
-        std::cout << "Energy histogram (" << kBins << " bins):";
-        for (const auto count : energyHist)
-        {
-            std::cout << " " << count;
-        }
-        std::cout << std::endl;
-    }
-
-    if (!timeHist.empty())
-    {
-        std::cout << "Time histogram (" << kBins << " bins, pico):";
-        for (const auto count : timeHist)
-        {
-            std::cout << " " << count;
-        }
-        std::cout << std::endl;
-    }
-}
-
 namespace
 {
 std::optional<std::string> parse_arg_value(const std::string &arg, const std::string &key)
@@ -1171,26 +1019,23 @@ int main(int argc, char **argv)
     // std::cout << "[Test 2] Testing callback mode..." << std::endl;
     // test_bdm2_callback();
 
-//    // 工具调用，批量转换50100原始数据
-//    convert_50100_rawdata_batch_process();
+   // 工具调用，批量转换50100原始数据
+   convert_50100_rawdata_batch_process(3);
 
-    constexpr bool kSaveSinglesFile = true;
-    std::cout << "[Test 3] Testing 50100 callback mode..." << std::endl;
-    test_50100_930_callback(kSaveSinglesFile);
+    // constexpr bool kSaveSinglesFile = true;
+    // std::cout << "[Test 3] Testing 50100 callback mode..." << std::endl;
+    // test_50100_930_callback(kSaveSinglesFile);
 
-//     //export_singles_payload_only("/media/lenovo/1TB/50100data/pni_res/singles/singles_50100_part1.lsingle");
 
-    //工具调用，批量转换50100单事件数据
-    if (kSaveSinglesFile)
-    {
-        //工具调用，批量转换50100单事件数据
-        convert_50100_singles_batch_process();
-    }
+    // //工具调用，批量转换50100单事件数据
+    // if (kSaveSinglesFile)
+    // {
+    //     //工具调用，批量转换50100单事件数据
+    //     convert_50100_singles_batch_process();
+    // }
 
     // //工具调用，批量转换RS单事件数据为PNI singles
     // convert_rs_singles_batch_process();
-
-    // analyze_first_pni_singles_in_folder(path_pre + "/pni_singles");
 
     // std::cout << "[Test 4] Splitting 50100 rawdatas channels..." << std::endl;
     // split_930_data();

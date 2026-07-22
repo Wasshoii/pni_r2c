@@ -114,6 +114,7 @@ namespace openpni::distributed::r2s
      */
     struct R2SProcessConfig
     {
+        //分布式处理配置
         std::string rawdataPath;                   // 原始数据文件路径
         std::string resultPath;                    // 结果输出路径
         std::vector<std::string> calibrationFiles; // 校准文件列表
@@ -130,9 +131,23 @@ namespace openpni::distributed::r2s
         uint32_t progressLogInterval = 50;         // 处理进度日志间隔，0 表示关闭
         bool forceFullCalibrationLoad = false;     // 强制加载全部通道的校正文件（用于 50100 特殊处理）
 
+        // Singles 输出写盘策略：maxFileSizeBytes 为 0 表示不分卷（单文件，默认行为，
+        // 与既有 930 R2S 验证行为保持一致）
+        uint64_t singlesMaxFileSizeBytes = 0;    // 单个 singles 文件的最大大小（字节），超过后自动分卷
+        bool singlesOverwriteExisting = true;    // 是否允许覆盖已存在的输出文件
+
+        // R2S算法参数配置
+        bool matchXTalkEnabled = false;   // 是否启用串扰匹配
+        float timeWindow = 25.0f;         // 时间窗口
+        float timeShift = 25.0f;          // 时间偏移
+        bool crossTalkEnabled = false;    // 是否启用串扰校正
+        float crossTalkTimeWindow = 2.0f; // 串扰时间窗口 (ns)
         bool useEnergyCut = false;                   // 是否启用能量窗过滤
         float energyCutLow = 0.0f;                    // 能量窗下限 eV
         float energyCutHigh = 0.0f;                   // 能量窗上限 eV
+        uint32_t __deviceId = 0; // CUDA设备ID
+
+        openpni::device::bdm50100_v2::caliCoef::EnergyThresholds_t energyThresholds = {60, 80, 100, 120, 140, 160, 180, 200, 0,  0.0454, 0.1111, 1.964, -0.0014}; // 能量阈值数组 for 50100
 
         // 分布式处理回调，使用时需设置（可与 saveData2SingleFile 同时使用，支持同时保存文件和流式传输）
         SinglesReadyCallback onSinglesReady = nullptr;         // 传输 host 侧 Single
@@ -168,8 +183,14 @@ namespace openpni::distributed::r2s
 
         /**
          * @brief 打开文件并启动写入线程
+         *
+         * @param sessionDir 输出目录
+         * @param filePrefix 文件名前缀（不含扩展名）；当 options.io.maxFileSizeBytes == 0 时，
+         *                   最终文件名为 "{sessionDir}/{filePrefix}.lsingle"（与历史行为一致）；
+         *                   > 0 时自动按 "{filePrefix}_{seq:04d}.lsingle" 分卷。
          */
-        bool open(const std::string &filePath, uint32_t totalCrystals);
+        bool open(const std::string &sessionDir, const std::string &filePrefix, uint32_t totalCrystals,
+                  openpni::distributed::coreio::SingleWriterOptions options = {});
 
         /**
          * @brief 异步提交写入任务
@@ -193,14 +214,23 @@ namespace openpni::distributed::r2s
         bool isRunning() const { return m_running.load(); }
 
         /**
-         * @brief 获取底层输出文件对象（用于同步写入模式）
+         * @brief 获取底层输出文件写入器（用于同步写入模式）
          */
-        openpni::distributed::coreio::SinglesFileWriter *getOutput() { return m_output.get(); }
+        openpni::distributed::coreio::RollingFileWriter<
+            openpni::distributed::coreio::SinglesFileWriter,
+            openpni::distributed::coreio::SingleWriterOptions> &
+        getOutput()
+        {
+            return m_output;
+        }
 
     private:
         void writerLoop();
 
-        std::unique_ptr<openpni::distributed::coreio::SinglesFileWriter> m_output;
+        openpni::distributed::coreio::RollingFileWriter<
+            openpni::distributed::coreio::SinglesFileWriter,
+            openpni::distributed::coreio::SingleWriterOptions>
+            m_output;
         std::thread m_writerThread;
         std::queue<AsyncWriteTask> m_queue;
         std::mutex m_mutex;
@@ -215,18 +245,31 @@ namespace openpni::distributed::r2s
 
     /**
      * @brief 追加单事件数据到 Single 文件（新 listmode 格式）
+     *
+     * @param outputFile 支持自动分卷的 Singles 写入器（maxFileSizeBytes == 0 时等价于单文件写入）
      */
     bool appendSinglesToSingleFile(
-        openpni::distributed::coreio::SinglesFileWriter &outputFile,
+        openpni::distributed::coreio::RollingFileWriter<
+            openpni::distributed::coreio::SinglesFileWriter,
+            openpni::distributed::coreio::SingleWriterOptions> &outputFile,
         std::span<Single const> singles,
         uint64_t clock_ms,
         uint32_t duration_ms);
 
     /**
      * @brief 创建指定类型的 SingleGenerator
+     *
+     * 通道无关的算法参数（如 BDM50100 的 matchXTalkEnabled/timeWindow/timeShift/
+     * crossTalkEnabled/crossTalkTimeWindow）统一从传入的完整 R2SProcessConfig 读取，
+     * 而不是在函数内部硬编码，以便不同的 create*Config 工厂函数（含未来针对
+     * 9120 各环的定制配置）可以各自控制这些参数。
+     *
+     * @param config 完整的 R2S 处理配置（提供 detectorType 及对应的算法参数）
+     * @param channelIndex 该 generator 对应的通道索引（本地/全局编号均可，取决于调用方约定）
+     * @param calibrationFile 该通道对应的校准文件路径
      */
     openpni::interface::ISingleGenerator *createSingleGenerator(
-        DetectorType type,
+        const R2SProcessConfig &config,
         uint16_t channelIndex,
         const std::string &calibrationFile);
 
@@ -485,7 +528,10 @@ namespace openpni::distributed::r2s
         std::vector<openpni::interface::ISingleGenerator *> m_generatorsVector;
         openpni::ConvergedR2S m_r2s;
 
-        std::unique_ptr<openpni::distributed::coreio::SinglesFileWriter> m_singleOutput;
+        openpni::distributed::coreio::RollingFileWriter<
+            openpni::distributed::coreio::SinglesFileWriter,
+            openpni::distributed::coreio::SingleWriterOptions>
+            m_singleOutput;
         std::unique_ptr<AsyncSingleFileWriter> m_asyncWriter;
         std::string m_outputFilePath;
 
@@ -589,6 +635,44 @@ namespace openpni::distributed::r2s
         const std::vector<std::string> &calibrationFiles,
         std::string outputFileName = "singles",
         const std::vector<uint16_t> &channelIndices = {});
+
+    /**
+     * @brief 创建 9120 处理配置
+     *
+     * 9120 每个环的构造和探测器型号均与 930（BDM50100）一致，区别仅在于环数：
+     * 930 为单环（144通道），9120 整机为 4 环（576通道）。该函数以
+     * createBDM50100Config 为基础，通过 ringCount 参数控制本次配置需要覆盖的环数
+     * （例如分布式部署中每个采集/R2S节点负责2环时传 ringCount=2），
+     * channelNums = 48*3*ringCount，crystalsPerChannel 与环数无关，保持 6*6*8 不变。
+     *
+     * @param calibrationFiles 校准文件列表，长度需 >= 48*3*ringCount；
+     *                         由于每环探测器构造一致，可用 duplicateCalibrationFilesForRings
+     *                         将930的单环（144份）校准文件复制拼接后传入。
+     * @param ringCount 本配置覆盖的环数，默认 1（等价于 createBDM50100Config）
+     */
+    R2SProcessConfig createBDM50100_9120Config(
+        const std::string &rawdataPath,
+        const std::string &resultPath,
+        const std::vector<std::string> &calibrationFiles,
+        std::string outputFileName = "singles",
+        const std::vector<uint16_t> &channelIndices = {},
+        uint16_t ringCount = 1);
+
+    /**
+     * @brief 将单环（144通道）校准文件列表按环数复制拼接
+     *
+     * 用于 9120 多环场景下复用 930 的单环校准文件：假设每个环的探测器构造和
+     * 校准均与930一致，直接将同一份校准文件列表按环数重复排列即可得到
+     * createBDM9120Config 所需的完整校准文件列表。
+     *
+     * @param singleRingCalibrationFiles 单环（144通道）的校准文件路径列表
+     * @param ringCount 目标环数
+     * @return std::vector<std::string> 长度为 singleRingCalibrationFiles.size() * ringCount 的列表，
+     *         依次为 [环0的144份, 环1的144份, ...]
+     */
+    std::vector<std::string> duplicateCalibrationFilesForRings(
+        const std::vector<std::string> &singleRingCalibrationFiles,
+        uint16_t ringCount);
 
     // /**
     //  * @brief 创建 BDMBiD 处理配置

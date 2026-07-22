@@ -679,6 +679,7 @@ namespace openpni::distributed::grpcnode
             storageConfig.session_name = makeSessionName(task.session_name(), command.message());
             storageConfig.max_file_size_mb =
                 task.max_file_size_mb() > 0 ? static_cast<size_t>(task.max_file_size_mb()) : init_.maxFileSizeMb;
+            storageConfig.overwrite_existing_file = init_.overwriteExisting;
             storageConfig.total_reserved_gib =
                 task.reserved_storage_gib() > 0 ? task.reserved_storage_gib() : init_.reservedStorageGiB;
             storageConfig.enable_raw_file_write = init_.enableRawFileWrite;

@@ -58,10 +58,7 @@ namespace
 
     struct FileCursor
     {
-        explicit FileCursor(coreio::IOBackend backend)
-            : reader(backend)
-        {
-        }
+        FileCursor() = default;
 
         coreio::RawDataFileReader reader;
         coreio::RawDataFileInfo info{};
@@ -92,7 +89,6 @@ int main(int argc, char **argv)
         return 3;
     }
 
-    const auto backendCfg = coreio::IOBackendContext::Get();
     std::unordered_map<std::string, FileCursor> cursors;
 
     coreio::RawDataFileWriter writer({});
@@ -110,7 +106,7 @@ int main(int argc, char **argv)
         auto it = cursors.find(rec.file);
         if (it == cursors.end())
         {
-            it = cursors.emplace(rec.file, FileCursor(backendCfg.rawdataReader)).first;
+            it = cursors.emplace(rec.file, FileCursor()).first;
         }
 
         FileCursor &cursor = it->second;
@@ -125,7 +121,6 @@ int main(int argc, char **argv)
         {
             outputInfo = cursor.info;
             coreio::RawDataWriterOptions options;
-            options.backend = backendCfg.rawdataWriter;
             options.channelNum = outputInfo.channelNum;
             options.channelTypeNames = outputInfo.channelTypeNames;
             writer = coreio::RawDataFileWriter(std::move(options));

@@ -104,7 +104,7 @@ namespace openpni::distributed::acquisition
     }
 
     RollingRawFileOutput::RollingRawFileOutput(const StorageConfig &config)
-        : config_(config), current_size_(0), file_seq_(0)
+        : config_(config)
     {
         session_dir_ = fs::path(config_.output_root) / config_.session_name;
         if (!fs::exists(session_dir_))
@@ -122,18 +122,18 @@ namespace openpni::distributed::acquisition
 
     RollingRawFileOutput::~RollingRawFileOutput()
     {
-        CloseCurrent();
+        Stop();
     }
 
     void RollingRawFileOutput::SetFileReadyCallback(FileReadyCallback cb)
     {
         callback_ = std::move(cb);
+        writer_.SetFileReadyCallback(callback_);
     }
 
     bool RollingRawFileOutput::Write(const openpni::RawDataView &data)
     {
         // 估算本次写入数据的大小 (byte)
-        size_t chunk_size = 0;
         // 注意：data.length 是每个包的有效负载长度。
         // 实际存储时，RawFileOutput 通常会添加包头（例如时间戳、长度等元信息）。
         // 根据 PnI 的实现习惯，RawData 存储格式通常包含一些头部开销。
@@ -141,6 +141,7 @@ namespace openpni::distributed::acquisition
         // 这样可以避免文件实际大小超过系统限制或预期过多。
         constexpr size_t ESTIMATED_PACKET_HEADER_SIZE = 32;
 
+        size_t chunk_size = 0;
         if (data.length)
         {
             for (size_t i = 0; i < data.count; ++i)
@@ -149,83 +150,59 @@ namespace openpni::distributed::acquisition
             }
         }
 
-        // 检查是否需要分卷
-        // 如果当前有打开的文件，且加上新数据后超过最大限制
-        if (writer_ && (current_size_ + chunk_size > config_.max_file_size_mb * 1024 * 1024))
-        {
-            Rotate();
-        }
-
-        // 如果没有打开的文件（刚开始或刚分卷），则新建
-        if (!writer_)
+        // 首次写入时打开文件；后续的分卷（滚动到下一个文件）由 writer_ 内部按
+        // maxFileSizeBytes 自动处理。
+        if (!opened_)
         {
             OpenNew();
         }
 
-        // 写入数据
-        if (writer_)
+        if (!opened_)
         {
-            if (writer_->AppendSegment(data))
-            {
-                current_size_ += chunk_size;
-                return true;
-            }
-
-            LOG(ERROR) << "RawFileOutput::appendSegment failed. Disk full?";
+            return false;
         }
+
+        if (writer_.AppendSegment(chunk_size, data))
+        {
+            return true;
+        }
+
+        LOG(ERROR) << "RawFileOutput::appendSegment failed. Disk full?";
         return false;
     }
 
     void RollingRawFileOutput::Stop()
     {
-        CloseCurrent();
-    }
-
-    void RollingRawFileOutput::Rotate()
-    {
-        CloseCurrent(); // 关闭旧文件，触发回调
-        OpenNew();      // 打开新文件
+        if (opened_)
+        {
+            writer_.Stop();
+            opened_ = false;
+        }
     }
 
     void RollingRawFileOutput::OpenNew()
     {
-        // 文件名格式：timestamp_sequence.raw
-        // 这样可以保证时间顺序，方便后续处理
+        // 文件名前缀带时间戳，分卷序号由 RollingFileWriter 自动追加
         const auto now = std::chrono::system_clock::now();
         const auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-
-        std::string filename = std::format("raw_{}_{:04d}.raw", timestamp, file_seq_++);
-        current_path_ = (session_dir_ / filename).string();
+        const std::string filePrefix = std::format("raw_{}", timestamp);
 
         openpni::distributed::coreio::RawDataWriterOptions options;
-        options.backend = openpni::distributed::coreio::IOBackendContext::Get().rawdataWriter;
         options.io.reservedBytes = config_.total_reserved_gib * 1024ull * 1024ull * 1024ull;
+        options.io.maxFileSizeBytes = config_.max_file_size_mb * 1024ull * 1024ull;
+        options.io.enableOverrideExistingFile = config_.overwrite_existing_file;
         options.channelNum = config_.channel_num;
-        writer_ = std::make_unique<openpni::distributed::coreio::RawDataFileWriter>(std::move(options));
 
-        try
-        {
-            writer_->Open(current_path_);
-            current_size_ = 0;
-        }
-        catch (const std::exception &e)
-        {
-            LOG(ERROR) << "Failed to open raw file " << current_path_ << ": " << e.what();
-            writer_.reset();
-        }
-    }
-
-    void RollingRawFileOutput::CloseCurrent()
-    {
-        if (writer_)
-        {
-            writer_.reset(); // unique_ptr 析构会自动关闭文件
-            // 触发回调，通知后续模块该文件已完成，可以处理
-            if (callback_ && !current_path_.empty())
+        opened_ = writer_.Open(
+            session_dir_.string(), filePrefix, "raw", std::move(options),
+            [](openpni::distributed::coreio::RawDataFileWriter &w, const std::string &path)
             {
-                callback_(current_path_);
-            }
-            current_path_.clear();
+                w.Open(path);
+            });
+
+        if (!opened_)
+        {
+            LOG(ERROR) << "Failed to open raw file with prefix " << filePrefix << " in " << session_dir_;
         }
     }
 

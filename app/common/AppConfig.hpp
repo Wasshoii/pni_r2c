@@ -17,6 +17,7 @@ namespace openpni::distributed::app
         std::string manifestFilename = "session_manifest.jsonl";
         std::string sessionNamePrefix = "acq_r2s_node";
         size_t maxFileSizeMb = 1024;
+        bool overwriteExisting = true;
         uint64_t reservedStorageGiB = 20;
         uint32_t statusIntervalMs = 500;
         bool enableRawFileWrite = false;
@@ -35,6 +36,8 @@ namespace openpni::distributed::app
         bool sortDataByTime = true;
         bool saveData2SingleFile = false;
         bool asyncFileWrite = false;
+        uint64_t maxFileSizeMb = 0;      // 0 表示不分卷（单文件，默认行为）
+        bool overwriteExisting = true;
     };
 
     struct BridgeSection
@@ -121,6 +124,8 @@ namespace openpni::distributed::app
         bool useMemoryPool = true;
         bool savePrompt = true;
         bool saveDelay = true;
+        uint64_t maxFileSizeMb = 0;      // 0 表示不分卷（单文件，默认行为），同时作用于 prompt.lmf / delay.lmf
+        bool overwriteExisting = true;
         CoinProtocolSection coinProtocol;
     };
 

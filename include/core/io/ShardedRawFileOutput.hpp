@@ -51,6 +51,8 @@ namespace openpni::distributed::coreio
             uint16_t channelNum = 0;
         };
 
+        using RawRollingWriter = RollingFileWriter<RawDataFileWriter, RawDataWriterOptions>;
+
         struct ShardState
         {
             std::mutex mutex;
@@ -60,10 +62,8 @@ namespace openpni::distributed::coreio
             size_t ring_tail = 0;
             size_t ring_count = 0;
             std::thread worker;
-            std::unique_ptr<RawDataFileWriter> writer;
-            std::string currentPath;
-            size_t currentSize = 0;
-            size_t fileSeq = 0;
+            RawRollingWriter writer;
+            bool opened = false;
             bool draining = false;
         };
 

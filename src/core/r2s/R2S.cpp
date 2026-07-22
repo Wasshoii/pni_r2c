@@ -216,7 +216,9 @@ namespace openpni::distributed::r2s
     }
 
     bool appendSinglesToSingleFile(
-        openpni::distributed::coreio::SinglesFileWriter &outputFile,
+        openpni::distributed::coreio::RollingFileWriter<
+            openpni::distributed::coreio::SinglesFileWriter,
+            openpni::distributed::coreio::SingleWriterOptions> &outputFile,
         std::span<Single const> singles,
         uint64_t clock_ms,
         uint32_t duration_ms)
@@ -226,18 +228,23 @@ namespace openpni::distributed::r2s
             return true;
         }
 
+        // 估算本次写入的字节数，用于分卷阈值判断（仅在 maxFileSizeBytes > 0 时生效）
+        constexpr size_t ESTIMATED_SINGLE_BYTES = 16;
+        const uint64_t sizeEstimate = singles.size() * ESTIMATED_SINGLE_BYTES;
+
         try
         {
             if (isDevicePointer(singles.data()))
             {
                 auto hostSingles = materializeSinglesOnHost(singles);
                 return outputFile.AppendSegment(
+                    sizeEstimate,
                     std::span<const Single>(hostSingles.data(), hostSingles.size()),
                     clock_ms,
                     duration_ms);
             }
 
-            return outputFile.AppendSegment(singles, clock_ms, duration_ms);
+            return outputFile.AppendSegment(sizeEstimate, singles, clock_ms, duration_ms);
         }
         catch (const std::exception &e)
         {
@@ -247,14 +254,12 @@ namespace openpni::distributed::r2s
     }
 
     openpni::interface::ISingleGenerator *createSingleGenerator(
-        DetectorType type,
-        uint16_t channelIndex,
-        const std::string &calibrationFile,
-        std::string rawdataPath)
+        const R2SProcessConfig &config,
+        uint16_t channelIndex)
     {
         openpni::interface::ISingleGenerator *generator = nullptr;
 
-        switch (type)
+        switch (config.detectorType)
         {
         case DetectorType::BDM2:
             generator = new openpni::BDM2R2S();
@@ -263,12 +268,13 @@ namespace openpni::distributed::r2s
         {
             auto *g50100 = new openpni::device::bdm50100_v2::BDM50100R2S();
             openpni::device::bdm50100_v2::BDM50100R2SParams params{};
-            params.matchXTalkEnabled = true;
-            params.crossTalkEnabled = true;
-            params.__deviceId = 0;
-            params.crossTalkTimeWindow = 2.0f; 
-            params.energyThresholds = {60,  80, 100,    120,    140,   160,    180,
-                                         200, 0,  0.0454, 0.1111, 1.964, -0.0014};
+            params.matchXTalkEnabled = config.matchXTalkEnabled;
+            params.timeWindow = config.timeWindow;
+            params.timeShift = config.timeShift;
+            params.crossTalkEnabled = config.crossTalkEnabled;
+            params.crossTalkTimeWindow = config.crossTalkTimeWindow;
+            params.__deviceId = config.__deviceId; // 使用默认设备ID
+            params.energyThresholds = config.energyThresholds; // 使用配置中的能量阈值数组
             g50100->setParams(params);
             generator = g50100;
             break;
@@ -278,7 +284,7 @@ namespace openpni::distributed::r2s
         }
 
         generator->SetChannelIndex(channelIndex);
-        generator->LoadCalibration(calibrationFile);
+        generator->LoadCalibration(config.calibrationFiles[channelIndex]);
 
         return generator;
     }
@@ -293,12 +299,23 @@ namespace openpni::distributed::r2s
         stop();
     }
 
-    bool AsyncSingleFileWriter::open(const std::string &filePath, uint32_t totalCrystals)
+    bool AsyncSingleFileWriter::open(const std::string &sessionDir, const std::string &filePrefix,
+                                      uint32_t totalCrystals,
+                                      openpni::distributed::coreio::SingleWriterOptions options)
     {
-        openpni::distributed::coreio::SingleWriterOptions opts;
-        opts.backend = openpni::distributed::coreio::IOBackendContext::Get().singlesWriter;
-        m_output = std::make_unique<openpni::distributed::coreio::SinglesFileWriter>(std::move(opts));
-        m_output->Open(filePath, totalCrystals);
+        const bool opened = m_output.Open(
+            sessionDir, filePrefix, "lsingle", std::move(options),
+            [totalCrystals](openpni::distributed::coreio::SinglesFileWriter &w, const std::string &path)
+            {
+                w.Open(path, totalCrystals);
+            });
+
+        if (!opened)
+        {
+            LOG(ERROR) << "[AsyncWriter] Failed to open output file with prefix " << filePrefix
+                       << " in " << sessionDir;
+            return false;
+        }
 
         m_running = true;
         m_writerThread = std::thread([this]
@@ -382,7 +399,9 @@ namespace openpni::distributed::r2s
 
             if (!task.singles.empty())
             {
-                bool success = m_output->AppendSegment(
+                constexpr size_t ESTIMATED_SINGLE_BYTES = 16;
+                bool success = m_output.AppendSegment(
+                    task.singles.size() * ESTIMATED_SINGLE_BYTES,
                     std::span<const Single>(task.singles.data(), task.singles.size()),
                     task.clock_ms,
                     task.duration_ms);
@@ -755,10 +774,8 @@ namespace openpni::distributed::r2s
                 try
                 {
                     auto generator = createSingleGenerator(
-                        m_config.detectorType,
-                        static_cast<uint16_t>(i),
-                        m_config.calibrationFiles[i],
-                        m_config.rawdataPath);
+                        m_config,
+                        static_cast<uint16_t>(i));
                     m_generatorsVector.push_back(generator);
                 }
                 catch (const std::exception &e)
@@ -777,10 +794,8 @@ namespace openpni::distributed::r2s
                 {
                     auto channelIndex = m_config.channelIndices[i];
                     auto generator = createSingleGenerator(
-                        m_config.detectorType,
-                        channelIndex,
-                        m_config.calibrationFiles[channelIndex],
-                        m_config.rawdataPath);
+                        m_config,
+                        channelIndex);
                     m_generatorsVector.push_back(generator);
                 }
                 catch (const std::exception &e)
@@ -811,20 +826,37 @@ namespace openpni::distributed::r2s
         if (m_config.saveData2SingleFile)
         {
             const uint32_t totalCrystals = m_config.channelNums * m_config.crystalsPerChannel;
+
+            openpni::distributed::coreio::SingleWriterOptions opts;
+            opts.io.maxFileSizeBytes = m_config.singlesMaxFileSizeBytes;
+            opts.io.enableOverrideExistingFile = m_config.singlesOverwriteExisting;
+
+            // maxFileSizeBytes == 0 时，RollingFileWriter 产出的文件名与历史行为完全一致：
+            // "{resultPath}/{outputFileName}.lsingle"
             m_outputFilePath = m_config.resultPath + "/" + m_config.outputFileName + ".lsingle";
 
             if (m_config.asyncFileWrite)
             {
                 m_asyncWriter = std::make_unique<AsyncSingleFileWriter>(m_config.asyncWriteQueueSize);
-                m_asyncWriter->open(m_outputFilePath, totalCrystals);
+                if (!m_asyncWriter->open(m_config.resultPath, m_config.outputFileName, totalCrystals, opts))
+                {
+                    return false;
+                }
                 LOG(INFO) << "Output file (async): " << m_outputFilePath;
             }
             else
             {
-                openpni::distributed::coreio::SingleWriterOptions opts;
-                opts.backend = openpni::distributed::coreio::IOBackendContext::Get().singlesWriter;
-                m_singleOutput = std::make_unique<openpni::distributed::coreio::SinglesFileWriter>(std::move(opts));
-                m_singleOutput->Open(m_outputFilePath, totalCrystals);
+                const bool opened = m_singleOutput.Open(
+                    m_config.resultPath, m_config.outputFileName, "lsingle", opts,
+                    [totalCrystals](openpni::distributed::coreio::SinglesFileWriter &w, const std::string &path)
+                    {
+                        w.Open(path, totalCrystals);
+                    });
+                if (!opened)
+                {
+                    LOG(ERROR) << "Failed to open singles output file: " << m_outputFilePath;
+                    return false;
+                }
                 LOG(INFO) << "Output file (sync): " << m_outputFilePath;
             }
 
@@ -891,7 +923,7 @@ namespace openpni::distributed::r2s
         }
 
         const bool fileSuccess = appendSinglesToSingleFile(
-            *m_singleOutput,
+            m_singleOutput,
             singles,
             clockMs,
             durationMs);
@@ -1070,8 +1102,7 @@ namespace openpni::distributed::r2s
     {
         try
         {
-            openpni::distributed::coreio::RawDataFileReader rawFileInput(
-                openpni::distributed::coreio::IOBackendContext::Get().rawdataReader);
+            openpni::distributed::coreio::RawDataFileReader rawFileInput;
             rawFileInput.Open(config.rawdataPath);
 
             const auto &info = rawFileInput.Info();
@@ -1147,7 +1178,81 @@ namespace openpni::distributed::r2s
         config.channelNums = 48 * 3;
         config.channelIndices = channelIndices;
         config.forceFullCalibrationLoad = true;
+        // 与原 createSingleGenerator 中的硬编码默认值保持一致，避免行为变化
+        config.matchXTalkEnabled = true;
+        config.crossTalkEnabled = true;
+        config.crossTalkTimeWindow = 2.0f;
         return config;
+    }
+
+    R2SProcessConfig createBDM50100_9120Config(
+        const std::string &rawdataPath,
+        const std::string &resultPath,
+        const std::vector<std::string> &calibrationFiles,
+        std::string outputFileName,
+        const std::vector<uint16_t> &channelIndices,
+        uint16_t ringCount)
+    {
+        constexpr uint16_t kChannelsPerRing = 48 * 3;         // 每环通道数，与930(BDM50100)一致
+        constexpr uint32_t kCrystalsPerChannel = 6 * 6 * 8;   // 每通道晶体数，与环数无关
+        constexpr uint16_t kMaxRingCount = std::numeric_limits<uint16_t>::max() / kChannelsPerRing;
+
+        if (ringCount == 0)
+        {
+            LOG(WARNING) << "createBDM50100_9120Config: ringCount must be >= 1, fallback to 1";
+            ringCount = 1;
+        }
+        else if (ringCount > kMaxRingCount)
+        {
+            LOG(ERROR) << "createBDM50100_9120Config: ringCount " << ringCount
+                       << " overflows channelNums (uint16_t), clamped to " << kMaxRingCount;
+            ringCount = kMaxRingCount;
+        }
+
+        R2SProcessConfig config;
+        config.rawdataPath = rawdataPath;
+        config.resultPath = resultPath;
+        config.calibrationFiles = calibrationFiles;
+        config.detectorType = DetectorType::BDM50100; // 每环探测器型号与930一致，复用同一套R2S生成器
+        config.crystalsPerChannel = kCrystalsPerChannel;
+        config.r2sResultIndex = 2;
+        config.outputFileName = outputFileName;
+        config.channelNums = static_cast<uint16_t>(kChannelsPerRing * ringCount); // 通道数随环数线性扩展
+        config.channelIndices = channelIndices;
+        config.forceFullCalibrationLoad = true;
+        // 每环探测器构造与930一致，算法参数默认沿用930已验证的取值；
+        // 如需针对某个节点/环单独调优，可在拿到 config 后按需覆盖这些字段
+        config.matchXTalkEnabled = true;
+        config.crossTalkEnabled = true;
+        config.crossTalkTimeWindow = 2.0f;
+
+        const size_t requiredCalibrationCount = static_cast<size_t>(config.channelNums);
+        if (config.calibrationFiles.size() < requiredCalibrationCount)
+        {
+            LOG(WARNING) << "createBDM50100_9120Config: calibration files (" << config.calibrationFiles.size()
+                         << ") fewer than required (" << requiredCalibrationCount << ") for ringCount="
+                         << ringCount << "; consider duplicateCalibrationFilesForRings()";
+        }
+
+        return config;
+    }
+
+    std::vector<std::string> duplicateCalibrationFilesForRings(
+        const std::vector<std::string> &singleRingCalibrationFiles,
+        uint16_t ringCount)
+    {
+        std::vector<std::string> files;
+        if (ringCount == 0 || singleRingCalibrationFiles.empty())
+        {
+            return files;
+        }
+
+        files.reserve(singleRingCalibrationFiles.size() * static_cast<size_t>(ringCount));
+        for (uint16_t ring = 0; ring < ringCount; ++ring)
+        {
+            files.insert(files.end(), singleRingCalibrationFiles.begin(), singleRingCalibrationFiles.end());
+        }
+        return files;
     }
 
 } // namespace openpni::distributed::r2s

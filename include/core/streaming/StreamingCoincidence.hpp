@@ -142,6 +142,11 @@ namespace openpni::distributed::streaming
         bool savePrompt = true;
         bool saveDelay = true;
 
+        // Listmode 输出（prompt.lmf / delay.lmf）写盘策略：maxFileSizeBytes 为 0 表示不分卷
+        // （单文件，默认行为，与既有 Coincidence 输出保持一致）
+        uint64_t listmodeMaxFileSizeBytes = 0;
+        bool listmodeOverwriteExisting = true;
+
         size_t maxChunksPerNode = 100;       // 每个节点的 RingBuffer 大小（单位：Chunk 数量）
         uint32_t processingIntervalMs = 200; // 处理循环的时间间隔，单位毫秒
 
@@ -188,7 +193,9 @@ namespace openpni::distributed::streaming
         void processingLoop();
         void processCoincidence(const std::vector<Single> &singles);
         void saveCoincidenceResult(
-            openpni::distributed::coreio::ListmodeFileWriter &output,
+            openpni::distributed::coreio::RollingFileWriter<
+                openpni::distributed::coreio::ListmodeFileWriter,
+                openpni::distributed::coreio::ListmodeWriterOptions> &output,
             std::span<Listmode const> coins);
         void flushRemaining();
 
@@ -201,8 +208,16 @@ namespace openpni::distributed::streaming
         openpni::tools::UniPtr<Single> m_singleBuffer{"StreamingTimeAligner_singles"};
         openpni::tools::UniPtr<Listmode> m_coinBuffer{"StreamingTimeAligner_coins"};
 
-        std::unique_ptr<openpni::distributed::coreio::ListmodeFileWriter> m_promptWriter;
-        std::unique_ptr<openpni::distributed::coreio::ListmodeFileWriter> m_delayWriter;
+        openpni::distributed::coreio::RollingFileWriter<
+            openpni::distributed::coreio::ListmodeFileWriter,
+            openpni::distributed::coreio::ListmodeWriterOptions>
+            m_promptWriter;
+        openpni::distributed::coreio::RollingFileWriter<
+            openpni::distributed::coreio::ListmodeFileWriter,
+            openpni::distributed::coreio::ListmodeWriterOptions>
+            m_delayWriter;
+        bool m_promptOpened = false;
+        bool m_delayOpened = false;
         std::mutex m_outputMutex;
 
         std::thread m_processorThread;

@@ -580,27 +580,41 @@ namespace openpni::distributed::streaming
         if (m_config.savePrompt)
         {
             openpni::distributed::coreio::ListmodeWriterOptions opts;
-            opts.backend = openpni::distributed::coreio::IOBackendContext::Get().listmodeWriter;
             opts.totalCrystals = totalCrystals;
-            m_promptWriter = std::make_unique<openpni::distributed::coreio::ListmodeFileWriter>(std::move(opts));
-            m_promptWriter->Open(m_config.outputDir + "/prompt.lmf");
+            opts.io.maxFileSizeBytes = m_config.listmodeMaxFileSizeBytes;
+            opts.io.enableOverrideExistingFile = m_config.listmodeOverwriteExisting;
+            // maxFileSizeBytes == 0 时文件名与历史行为完全一致："{outputDir}/prompt.lmf"
+            m_promptOpened = m_promptWriter.Open(
+                m_config.outputDir, "prompt", "lmf", opts,
+                [](openpni::distributed::coreio::ListmodeFileWriter &w, const std::string &path)
+                {
+                    w.Open(path);
+                });
         }
 
         if (m_config.saveDelay)
         {
             openpni::distributed::coreio::ListmodeWriterOptions opts;
-            opts.backend = openpni::distributed::coreio::IOBackendContext::Get().listmodeWriter;
             opts.totalCrystals = totalCrystals;
-            m_delayWriter = std::make_unique<openpni::distributed::coreio::ListmodeFileWriter>(std::move(opts));
-            m_delayWriter->Open(m_config.outputDir + "/delay.lmf");
+            opts.io.maxFileSizeBytes = m_config.listmodeMaxFileSizeBytes;
+            opts.io.enableOverrideExistingFile = m_config.listmodeOverwriteExisting;
+            // maxFileSizeBytes == 0 时文件名与历史行为完全一致："{outputDir}/delay.lmf"
+            m_delayOpened = m_delayWriter.Open(
+                m_config.outputDir, "delay", "lmf", opts,
+                [](openpni::distributed::coreio::ListmodeFileWriter &w, const std::string &path)
+                {
+                    w.Open(path);
+                });
         }
     }
 
     void StreamingTimeAligner::finalizeOutput()
     {
         std::lock_guard<std::mutex> lock(m_outputMutex);
-        m_promptWriter.reset();
-        m_delayWriter.reset();
+        m_promptWriter.Stop();
+        m_delayWriter.Stop();
+        m_promptOpened = false;
+        m_delayOpened = false;
     }
 
     uint64_t StreamingTimeAligner::calculateWatermark() const
@@ -712,15 +726,15 @@ namespace openpni::distributed::streaming
 
             auto [prompt, delay] = m_coinNode.getDListmode(inputList, m_config.coinProtocol);
 
-            if (!prompt.empty() && m_promptWriter)
+            if (!prompt.empty() && m_promptOpened)
             {
-                saveCoincidenceResult(*m_promptWriter, prompt);
+                saveCoincidenceResult(m_promptWriter, prompt);
                 m_stats.totalPromptPairs += prompt.size();
             }
 
-            if (!delay.empty() && m_delayWriter)
+            if (!delay.empty() && m_delayOpened)
             {
-                saveCoincidenceResult(*m_delayWriter, delay);
+                saveCoincidenceResult(m_delayWriter, delay);
                 m_stats.totalDelayPairs += delay.size();
             }
         }
@@ -731,7 +745,9 @@ namespace openpni::distributed::streaming
     }
 
     void StreamingTimeAligner::saveCoincidenceResult(
-        openpni::distributed::coreio::ListmodeFileWriter &output,
+        openpni::distributed::coreio::RollingFileWriter<
+            openpni::distributed::coreio::ListmodeFileWriter,
+            openpni::distributed::coreio::ListmodeWriterOptions> &output,
         std::span<Listmode const> coins)
     {
         if (coins.empty())
@@ -742,8 +758,12 @@ namespace openpni::distributed::streaming
         m_coinBuffer.CopyFromCuda(coins);
         auto hostBuf = m_coinBuffer.HostRStdSpan();
 
+        // 估算本次写入字节数，用于分卷阈值判断（仅在 listmodeMaxFileSizeBytes > 0 时生效）
+        constexpr size_t ESTIMATED_LISTMODE_BYTES = 16;
+        const uint64_t sizeEstimate = hostBuf.size() * ESTIMATED_LISTMODE_BYTES;
+
         std::lock_guard<std::mutex> lock(m_outputMutex);
-        output.AppendSegment(hostBuf, 0, 0);
+        output.AppendSegment(sizeEstimate, hostBuf, 0, 0);
     }
 
     void StreamingTimeAligner::flushRemaining()

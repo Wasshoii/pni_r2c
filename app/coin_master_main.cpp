@@ -348,6 +348,8 @@ int main(int argc, char **argv)
     alignerConfig.useMemoryPool = cfg.aligner.useMemoryPool;
     alignerConfig.savePrompt = cfg.aligner.savePrompt;
     alignerConfig.saveDelay = cfg.aligner.saveDelay;
+    alignerConfig.listmodeMaxFileSizeBytes = cfg.aligner.maxFileSizeMb * 1024ull * 1024ull;
+    alignerConfig.listmodeOverwriteExisting = cfg.aligner.overwriteExisting;
 
     alignerConfig.coinProtocol.timeWindow_ps = cfg.aligner.coinProtocol.timeWindowPs;
     alignerConfig.coinProtocol.delayTime_ps = cfg.aligner.coinProtocol.delayTimePs;

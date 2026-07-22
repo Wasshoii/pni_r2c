@@ -340,6 +340,10 @@ namespace openpni::distributed::app
                 {
                     return fail(err, "acqNode.maxFileSizeMb must be non-negative integer");
                 }
+                if (!readBool(*sec, "overwriteExisting", &cfg->acqNode.overwriteExisting))
+                {
+                    return fail(err, "acqNode.overwriteExisting must be bool");
+                }
                 if (!readUInt(*sec, "reservedStorageGiB", &cfg->acqNode.reservedStorageGiB))
                 {
                     return fail(err, "acqNode.reservedStorageGiB must be non-negative integer");
@@ -403,6 +407,14 @@ namespace openpni::distributed::app
                 if (!readBool(*sec, "asyncFileWrite", &cfg->r2s.asyncFileWrite))
                 {
                     return fail(err, "r2s.asyncFileWrite must be bool");
+                }
+                if (!readUInt(*sec, "maxFileSizeMb", &cfg->r2s.maxFileSizeMb))
+                {
+                    return fail(err, "r2s.maxFileSizeMb must be non-negative integer");
+                }
+                if (!readBool(*sec, "overwriteExisting", &cfg->r2s.overwriteExisting))
+                {
+                    return fail(err, "r2s.overwriteExisting must be bool");
                 }
             }
             return true;
@@ -648,6 +660,14 @@ namespace openpni::distributed::app
                 if (!readBool(*sec, "saveDelay", &cfg->aligner.saveDelay))
                 {
                     return fail(err, "aligner.saveDelay must be bool");
+                }
+                if (!readUInt(*sec, "maxFileSizeMb", &cfg->aligner.maxFileSizeMb))
+                {
+                    return fail(err, "aligner.maxFileSizeMb must be non-negative integer");
+                }
+                if (!readBool(*sec, "overwriteExisting", &cfg->aligner.overwriteExisting))
+                {
+                    return fail(err, "aligner.overwriteExisting must be bool");
                 }
 
                 if (const Struct *protoSec = findObject(*sec, "coinProtocol"))

@@ -278,6 +278,8 @@ int main(int argc, char **argv)
     r2sConfig.sortDataByTime = cfg.r2s.sortDataByTime;
     r2sConfig.saveData2SingleFile = cfg.r2s.saveData2SingleFile;
     r2sConfig.asyncFileWrite = cfg.r2s.asyncFileWrite;
+    r2sConfig.singlesMaxFileSizeBytes = cfg.r2s.maxFileSizeMb * 1024ull * 1024ull;
+    r2sConfig.singlesOverwriteExisting = cfg.r2s.overwriteExisting;
     r2sConfig.progressLogInterval = 0;
 
     if (cfg.coinClient.enabled)
@@ -326,6 +328,7 @@ int main(int argc, char **argv)
     nodeOpt.manifestFilename = cfg.acqNode.manifestFilename;
     nodeOpt.sessionNamePrefix = cfg.acqNode.sessionNamePrefix;
     nodeOpt.maxFileSizeMb = cfg.acqNode.maxFileSizeMb;
+    nodeOpt.overwriteExisting = cfg.acqNode.overwriteExisting;
     nodeOpt.reservedStorageGiB = cfg.acqNode.reservedStorageGiB;
     nodeOpt.statusIntervalMs = cfg.acqNode.statusIntervalMs;
     nodeOpt.enableRawFileWrite = cfg.acqNode.enableRawFileWrite;

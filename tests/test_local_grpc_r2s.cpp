@@ -593,8 +593,7 @@ namespace
         {
             try
             {
-                openpni::distributed::coreio::RawDataFileReader reader(
-                    openpni::distributed::coreio::IOBackend::Latest);
+                openpni::distributed::coreio::RawDataFileReader reader;
                 reader.Open(n.rawdataPath);
                 const auto &info = reader.Info();
                 if (info.channelNum != 144)

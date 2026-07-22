@@ -36,6 +36,7 @@ namespace openpni::distributed::grpcnode
             std::string manifestFilename = "session_manifest.jsonl";
             std::string sessionNamePrefix = "acq_session";
             size_t maxFileSizeMb = 1024;
+            bool overwriteExisting = true;
             uint64_t reservedStorageGiB = 20;
             bool enableRawFileWrite = true;
             size_t asyncQueueDepth = 1024;

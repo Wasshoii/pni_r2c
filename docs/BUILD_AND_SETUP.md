@@ -178,15 +178,25 @@ make test-acq-control-init
 说明：以上 make 命令会转发到 tests/Makefile，运行前请确保已执行 `./build.sh --tests` 完成构建。
 
 ## IO 配置
-若需要使用pni新版io接口，请在编译前运行：
-```bash
-export PNI_R2C_IO_BACKEND=latest
-```
 
-若需要切换回旧版（v1版），请运行：
-```bash
-export PNI_R2C_IO_BACKEND=v1
-```
+项目的 IO 层已完全收敛到 pni 的 Latest 实现（不再有 V1 分支，无需/不再支持通过
+`PNI_R2C_IO_BACKEND` 环境变量切换）。
+
+RawData / Singles（R2S）/ Listmode（Coincidence）三类输出统一支持"文件写盘策略"配置，
+包含两项：
+
+- **分卷阈值（maxFileSizeMb）**：单个输出文件累计写入超过该大小（MB）后自动滚动到下一个
+  序号文件（文件名形如 `{prefix}_{seq:04d}.{ext}`）。默认值 `0` 表示不分卷，行为与历史
+  单文件写入完全一致。
+- **是否覆盖已存在文件（overwriteExisting）**：默认 `true`。
+
+对应的配置字段：
+
+| 配置节 | 字段 | 作用 |
+| --- | --- | --- |
+| `acqNode` | `maxFileSizeMb` / `overwriteExisting` | 采集节点 RawData 输出分卷/覆盖策略 |
+| `r2s` | `maxFileSizeMb` / `overwriteExisting` | R2S Singles（`.lsingle`）输出分卷/覆盖策略 |
+| `aligner` | `maxFileSizeMb` / `overwriteExisting` | Coincidence Listmode（`prompt`/`delay`）输出分卷/覆盖策略 |
 
 ## 常见问题
 

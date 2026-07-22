@@ -15,6 +15,10 @@
 #include <pni/core/CommonDataType.hpp>
 #include <pni/detector/BDM50100.hpp>
 #include <pni/io/ListmodeIO.hpp>
+// 注意：getSingleFileInfo() 读取的是一种独立的旧版 "Single" 二进制格式（与 R2S/Coincidence
+// 主流程使用的 Listmode 格式无关），当前 pni 库只在 v1 命名空间下导出了该格式的实现，
+// 因此这里仍需直接使用 v1 头文件，与本文件其余部分已收敛到 Latest 的 IO 无关。
+#include <pni/io/v1/SingleIO_v1.hpp>
 #include "core/io/IOAdapter.hpp"
 #include "core/merge-and-coin/MergeAndCoin.hpp"
 #include "core/r2s/R2S.hpp"
@@ -38,8 +42,7 @@ bool extract_channel_from_rawdata(
     try
     {
         // 1. 打开输入文件
-        openpni::distributed::coreio::RawDataFileReader inputFile(
-            openpni::distributed::coreio::IOBackend::Latest);
+        openpni::distributed::coreio::RawDataFileReader inputFile;
         inputFile.Open(inputRawDataPath);
 
         const auto &info = inputFile.Info();
@@ -84,7 +87,6 @@ bool extract_channel_from_rawdata(
         fs::path outputPath = outputDir / outputFileName;
 
         openpni::distributed::coreio::RawDataWriterOptions options;
-        options.backend = openpni::distributed::coreio::IOBackend::Latest;
         options.channelNum = channelNum;
         options.channelTypeNames = info.channelTypeNames;
 
@@ -227,8 +229,7 @@ bool extract_multiple_channels_from_rawdata(
     try
     {
         // 1. 打开输入文件
-        openpni::distributed::coreio::RawDataFileReader inputFile(
-            openpni::distributed::coreio::IOBackend::Latest);
+        openpni::distributed::coreio::RawDataFileReader inputFile;
         inputFile.Open(inputRawDataPath);
 
         const auto &info = inputFile.Info();
@@ -286,7 +287,6 @@ bool extract_multiple_channels_from_rawdata(
         fs::path outputPath = outputDir / outputFileName;
 
         openpni::distributed::coreio::RawDataWriterOptions options;
-        options.backend = openpni::distributed::coreio::IOBackend::Latest;
         options.channelNum = channelNum;
         options.channelTypeNames = info.channelTypeNames;
 
@@ -443,10 +443,14 @@ struct PacketPositionInfo {
  * @param outputRawPath 输出标准 rawdata 路径
  * @param clock_ms 写入段头的时钟（毫秒）
  * @param packetsPerSegment 每段写入的包数量，0 表示一个文件一段
- * @param channelNum 通道数量（固定 144）
+ * @param channelNum 通道数量（930 单环为 144；9120 四环合并输出为 576）
  * @param channelTypeName 通道类型名称
  * @param forceReplace 输出文件存在时是否覆盖
  * @param reservedBytes 预留磁盘空间（必须大于0，否则不会写入）
+ * @param ringOffset BDM 硬件环号偏移量（默认为 0，表示不偏移），写入 UDP 包 srcChannel 高 8 位。
+ *                   930 单环数据内部占用硬件环 2/3/4（共 144 通道）；模拟 9120 第 k 个物理环时
+ *                   可设 ringOffset = k （k=0,1,2,3），使全局 bdmId 落在 [k*144, k*144+143]。
+ *                   合并四环数据时 channelNum 应设为 576。
  * @return bool 成功返回 true，失败返回 false
  */
 bool convert_50100_original_rawdata_to_standard(const std::string &inputRawPath,
@@ -456,7 +460,8 @@ bool convert_50100_original_rawdata_to_standard(const std::string &inputRawPath,
                                                 uint16_t channelNum = 144,
                                                 const std::string &channelTypeName = "BDM50100",
                                                 bool forceReplace = true,
-                                                uint64_t reservedBytes = 1ull * 1024 * 1024)
+                                                uint64_t reservedBytes = 1ull * 1024 * 1024,
+                                                uint16_t ringOffset = 0)
 {
     using openpni::device::bdm50100::UDP_PACKET_SIZE;
     using openpni::device::bdm50100::UDP_RAWDATA_SIZE;
@@ -480,6 +485,38 @@ bool convert_50100_original_rawdata_to_standard(const std::string &inputRawPath,
     {
         uint8_t data[UDP_RAWDATA_SIZE];
         uint16_t srcChannel;
+    };
+
+    constexpr int kBdmPerHardwareRing = 48;
+
+    auto mapSrcChannelToBdmId = [](uint16_t srcChannel) -> int {
+        const int ring = static_cast<int>(srcChannel >> 8);
+        const int ip = static_cast<int>(srcChannel & 0xFF);
+        return (ring - 2) * kBdmPerHardwareRing + (ip - 1);
+    };
+
+    auto applyRingOffset = [](uint16_t srcChannel, uint16_t ringOffset, uint16_t *outSrcChannel) -> bool {
+        const int ring = static_cast<int>(srcChannel >> 8);
+        const int ip = static_cast<int>(srcChannel & 0xFF);
+        if (ringOffset == 0)
+        {
+            *outSrcChannel = srcChannel;
+            return true;
+        }
+
+        const int newRing = ring + static_cast<int>(ringOffset) * 3;
+        if (newRing < 2 || newRing > 255)
+        {
+            std::cerr << "Ring offset overflow: ring=" << ring
+                      << ", ringOffset=" << ringOffset
+                      << ", newRing=" << newRing
+                      << ", srcChannel=" << srcChannel << std::endl;
+            return false;
+        }
+
+        *outSrcChannel = static_cast<uint16_t>((static_cast<uint16_t>(newRing) << 8) |
+                                               static_cast<uint16_t>(ip & 0xFF));
+        return true;
     };
 
     try
@@ -582,20 +619,27 @@ bool convert_50100_original_rawdata_to_standard(const std::string &inputRawPath,
                 const uint64_t packetOffset = i * UDP_PACKET_SIZE;
                 offset[i] = packetOffset;
 
+                uint16_t outSrcChannel = 0;
+                if (!applyRingOffset(frame.srcChannel, ringOffset, &outSrcChannel))
+                {
+                    std::cerr << "Failed to apply ringOffset at frame " << (processed + i) << std::endl;
+                    return false;
+                }
+
                 uint8_t *dst = data.data() + packetOffset;
                 std::memset(dst, 0, UDP_UNUSED_SIZE);
                 std::memcpy(dst + UDP_UNUSED_SIZE, frame.data, UDP_RAWDATA_SIZE);
-                std::memcpy(dst + UDP_UNUSED_SIZE + UDP_RAWDATA_SIZE, &frame.srcChannel, sizeof(uint16_t));
+                std::memcpy(dst + UDP_UNUSED_SIZE + UDP_RAWDATA_SIZE, &outSrcChannel, sizeof(uint16_t));
 
-                const int ring = static_cast<int>(frame.srcChannel >> 8);
-                const int ip = static_cast<int>(frame.srcChannel & 0xFF);
-                const int bdmId = (ring - 2) * 48 + (ip - 1);
+                const int bdmId = mapSrcChannelToBdmId(outSrcChannel);
 
-                if (bdmId < 0 || bdmId >= static_cast<int>(channelNum))
+                if (bdmId < 0 + ringOffset * channelNum || bdmId >= static_cast<int>(channelNum) + ringOffset * channelNum)
                 {
                     invalidChannel++;
                     std::cerr << "Invalid BDM ID: " << bdmId
                               << " (srcChannel=" << frame.srcChannel
+                              << ", outSrcChannel=" << outSrcChannel
+                              << ", ringOffset=" << ringOffset
                               << ") at frame " << (processed + i) << std::endl;
                     return false;
                 }
@@ -607,16 +651,21 @@ bool convert_50100_original_rawdata_to_standard(const std::string &inputRawPath,
             {
                 const std::size_t sampleCount = std::min<std::size_t>(3, channel.size());
                 std::cout << "Sample packets (input vs output)" << std::endl;
+                if (ringOffset != 0)
+                {
+                    std::cout << "  ringOffset=" << ringOffset << std::endl;
+                }
                 for (std::size_t i = 0; i < sampleCount; ++i)
                 {
                     const auto &frame = frames[i];
-                    const int ring = static_cast<int>(frame.srcChannel >> 8);
-                    const int ip = static_cast<int>(frame.srcChannel & 0xFF);
-                    const int bdmId = (ring - 2) * 48 + (ip - 1);
+                    uint16_t outSrcChannel = 0;
+                    applyRingOffset(frame.srcChannel, ringOffset, &outSrcChannel);
+                    const int bdmId = mapSrcChannelToBdmId(outSrcChannel);
                     const uint8_t *outPacket = data.data() + i * UDP_PACKET_SIZE;
 
                     std::cout << "  idx=" << (processed + i)
                               << ", srcChannel=" << frame.srcChannel
+                              << ", outSrcChannel=" << outSrcChannel
                               << ", bdmId=" << bdmId
                               << ", in[0:15]=";
                     dump_bytes(frame.data, 16);
@@ -1132,33 +1181,36 @@ RawDataFileInfo getRawDataFileInfo(const std::string &rawDataPath)
 
     try
     {
-        openpni::io::v1::RawFileInput inputFile;
-        inputFile.open(rawDataPath);
+        openpni::distributed::coreio::RawDataFileReader inputFile;
+        inputFile.Open(rawDataPath);
 
-        auto header = inputFile.header();
+        const auto &header = inputFile.Info();
         info.channelNum = header.channelNum;
         info.segmentNum = header.segmentNum;
 
+        uint32_t lastDuration_ms = 0;
         // 遍历所有段获取详细信息
         for (uint32_t i = 0; i < header.segmentNum; i++)
         {
-            auto segHeader = inputFile.segmentHeader(i);
+            auto segment = inputFile.ReadSegment(i, i + 1);
+            auto view = segment.View();
 
-            info.totalCount += segHeader.count;
-            info.totalDuration_ms += segHeader.duration;
+            info.totalCount += view.count;
+            info.totalDuration_ms += view.duration_ms;
 
             if (i == 0)
             {
-                info.firstClock_ms = segHeader.clock;
+                info.firstClock_ms = view.clock_ms;
             }
             if (i == header.segmentNum - 1)
             {
-                info.lastClock_ms = segHeader.clock;
+                info.lastClock_ms = view.clock_ms;
+                lastDuration_ms = view.duration_ms;
             }
         }
 
         info.totalClock_ms = info.lastClock_ms - info.firstClock_ms +
-                             (header.segmentNum > 0 ? inputFile.segmentHeader(header.segmentNum - 1).duration : 0);
+                             (header.segmentNum > 0 ? lastDuration_ms : 0);
     }
     catch (const std::exception &e)
     {
@@ -1840,9 +1892,26 @@ bool convert_RS_listmode_to_single(const std::string &rsPath,
         }
 
         openpni::distributed::coreio::SingleWriterOptions opts;
-        opts.backend = openpni::distributed::coreio::IOBackendContext::Get().singlesWriter;
-        openpni::distributed::coreio::SinglesFileWriter writer(std::move(opts));
-        writer.Open(outputPath, totalCrystals);
+        openpni::distributed::coreio::RollingFileWriter<
+            openpni::distributed::coreio::SinglesFileWriter,
+            openpni::distributed::coreio::SingleWriterOptions>
+            writer;
+        {
+            const fs::path outPath(outputPath);
+            const bool opened = writer.Open(
+                outPath.parent_path().string(), outPath.stem().string(),
+                outPath.extension().empty() ? "lsingle" : outPath.extension().string().substr(1),
+                opts,
+                [totalCrystals](openpni::distributed::coreio::SinglesFileWriter &w, const std::string &path)
+                {
+                    w.Open(path, totalCrystals);
+                });
+            if (!opened)
+            {
+                std::cerr << "Error: Failed to open output file: " << outputPath << std::endl;
+                return false;
+            }
+        }
 
         constexpr std::size_t kSegmentEvents = 1024 * 1024;
         std::vector<RsListmodeEvent> rsBuffer(kSegmentEvents);

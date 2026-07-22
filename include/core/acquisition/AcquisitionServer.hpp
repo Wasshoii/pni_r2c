@@ -34,6 +34,7 @@ namespace openpni::distributed::acquisition
         std::string output_root;           // 存储根目录
         std::string session_name;          // 本次采集的会话名（子目录）
         size_t max_file_size_mb = 512;     // 分卷大小阈值 (MB)
+        bool overwrite_existing_file = true; // 是否允许覆盖已存在的输出文件
         uint64_t total_reserved_gib = 20;  // 磁盘保留空间 (GiB)
         uint16_t channel_num = 0;          // 通道数（自动填充）
         bool enable_raw_file_write = true; // 是否写 raw 文件，false 时仅通过内存回调输出
@@ -121,16 +122,15 @@ namespace openpni::distributed::acquisition
         void Stop() override;
 
     private:
-        void Rotate();
         void OpenNew();
-        void CloseCurrent();
 
         StorageConfig config_;
         fs::path session_dir_;
-        std::unique_ptr<openpni::distributed::coreio::RawDataFileWriter> writer_;
-        size_t current_size_;
-        int file_seq_;
-        std::string current_path_;
+        openpni::distributed::coreio::RollingFileWriter<
+            openpni::distributed::coreio::RawDataFileWriter,
+            openpni::distributed::coreio::RawDataWriterOptions>
+            writer_;
+        bool opened_ = false;
         FileReadyCallback callback_;
     };
 

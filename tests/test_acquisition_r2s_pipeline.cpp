@@ -186,11 +186,11 @@ namespace
 
             try
             {
-                openpni::io::v1::RawFileInput input;
-                input.open(m_rawPath);
+                openpni::distributed::coreio::RawDataFileReader input;
+                input.Open(m_rawPath);
 
-                const auto header = input.header();
-                const uint32_t segmentsToReplay = std::min<uint32_t>(header.segmentNum, maxSegments);
+                const auto &info = input.Info();
+                const uint32_t segmentsToReplay = std::min<uint32_t>(info.segmentNum, maxSegments);
 
                 std::vector<int> sockets(m_channelCount, -1);
                 std::vector<sockaddr_in> destinations(m_channelCount);
@@ -203,9 +203,8 @@ namespace
 
                 for (uint32_t seg = 0; seg < segmentsToReplay; ++seg)
                 {
-                    auto segment = input.readSegment(seg, seg + 1);
-                    auto segHeader = input.segmentHeader(seg);
-                    auto view = segment.view(header, segHeader);
+                    auto segment = input.ReadSegment(seg, seg + 1);
+                    auto view = segment.View();
 
                     if (!view.data || !view.length || !view.offset || !view.channel)
                     {
@@ -461,9 +460,9 @@ namespace
 
         try
         {
-            openpni::io::v1::RawFileInput input;
-            input.open(rawPath);
-            auto header = input.header();
+            openpni::distributed::coreio::RawDataFileReader input;
+            input.Open(rawPath);
+            const auto &header = input.Info();
 
             SinglesAccumulator accumulator;
 
@@ -495,11 +494,8 @@ namespace
             const uint32_t targetSegments = std::min<uint32_t>(segmentLimit, header.segmentNum);
             for (uint32_t i = 0; i < targetSegments; ++i)
             {
-                auto segment = input.readSegment(i, i + 1);
-                auto segHeader = input.segmentHeader(i);
-                auto view = segment.view(header, segHeader);
-                view.clock_ms = segHeader.clock;
-                view.duration_ms = segHeader.duration;
+                auto segment = input.ReadSegment(i, i + 1);
+                auto view = segment.View();
 
                 result.processedPackets += view.count;
                 if (!processor.processSegment(view))

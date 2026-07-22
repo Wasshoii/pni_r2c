@@ -13,7 +13,8 @@
 #include <vector>
 
 #include <pni/io/IO.hpp>
-#include <pni/io/v1/V1.hpp>     //注意使用io v1时需包含此头 
+
+#include "core/io/IOAdapter.hpp"
 
 namespace
 {
@@ -55,11 +56,11 @@ namespace
 
             try
             {
-                openpni::io::v1::RawFileInput input;
-                input.open(m_opts.rawPath);
+                openpni::distributed::coreio::RawDataFileReader input;
+                input.Open(m_opts.rawPath);
 
-                const auto header = input.header();
-                const uint32_t segmentsToReplay = std::min<uint32_t>(header.segmentNum, m_opts.maxSegments);
+                const auto &info = input.Info();
+                const uint32_t segmentsToReplay = std::min<uint32_t>(info.segmentNum, m_opts.maxSegments);
 
                 std::vector<int> sockets(m_opts.channelCount, -1);
                 std::vector<sockaddr_in> destinations(m_opts.channelCount);
@@ -72,9 +73,8 @@ namespace
 
                 for (uint32_t seg = 0; seg < segmentsToReplay; ++seg)
                 {
-                    auto segment = input.readSegment(seg, seg + 1);
-                    auto segHeader = input.segmentHeader(seg);
-                    auto view = segment.view(header, segHeader);
+                    auto segment = input.ReadSegment(seg, seg + 1);
+                    auto view = segment.View();
 
                     if (!view.data || !view.length || !view.offset || !view.channel)
                     {

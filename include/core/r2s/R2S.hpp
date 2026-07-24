@@ -30,6 +30,8 @@
 #include <utility>
 #include <vector>
 #include <filesystem>
+#include <unordered_set>
+#include <optional>
 
 namespace openpni::distributed::r2s
 {
@@ -115,21 +117,21 @@ namespace openpni::distributed::r2s
     struct R2SProcessConfig
     {
         //分布式处理配置
-        std::string rawdataPath;                   // 原始数据文件路径
-        std::string resultPath;                    // 结果输出路径
-        std::vector<std::string> calibrationFiles; // 校准文件列表
+        std::string rawdataPath;                   // 原始数据文件路径（单文件；目录批处理请用 processR2SDirectory）
+        std::string resultPath;                    // 结果输出目录
+        std::vector<std::string> calibrationFiles; // 校准文件列表（按下标 = 全局通道号；未分配通道可为占位空串）
         DetectorType detectorType;                 // 探测器类型
         uint32_t crystalsPerChannel;               // 每个通道的晶体数
         uint32_t r2sResultIndex;                   // R2S结果数组中的目标索引（由 ConvergedR2S 注册顺序决定）
-        std::string outputFileName;                // 输出文件名
-        u_int16_t channelNums;                     // 通道总数
-        std::vector<uint16_t> channelIndices;      // 要处理的通道索引列表（空则处理所有通道）
+        std::string outputFileName;                // 输出文件名前缀（实际文件名可由批处理追加 inputClock 等后缀）
+        u_int16_t channelNums;                     // 整机通道总数上界（9120=576）；不表示本节点必处理 0..N-1
+        std::vector<uint16_t> channelIndices;      // 本节点分配处理的通道集合（空则处理 [0, channelNums)）
         bool sortDataByTime = true;                // 是否按时间排序输出数据
         bool saveData2SingleFile = true;           // 是否保存为 Single 文件格式
         bool asyncFileWrite = false;               // 是否异步写入文件（提高处理吞吐量）
         size_t asyncWriteQueueSize = 200;          // 异步写入队列大小
         uint32_t progressLogInterval = 50;         // 处理进度日志间隔，0 表示关闭
-        bool forceFullCalibrationLoad = false;     // 强制加载全部通道的校正文件（用于 50100 特殊处理）
+        bool forceFullCalibrationLoad = false;     // 历史标志：50100 默认打开；generator 实际只为 channelIndices（或全部）创建
 
         // Singles 输出写盘策略：maxFileSizeBytes 为 0 表示不分卷（单文件，默认行为，
         // 与既有 930 R2S 验证行为保持一致）
@@ -502,6 +504,11 @@ namespace openpni::distributed::r2s
 
         bool processSegment(const openpni::RawDataView &view);
 
+        /**
+         * @brief 关闭当前 singles 输出并按新前缀重新打开（用于目录批处理多文件切换输出名）
+         */
+        bool reopenOutput(const std::string &filePrefix);
+
         bool finalize();
 
     private:
@@ -510,6 +517,8 @@ namespace openpni::distributed::r2s
         bool prepareGenerators();
 
         bool prepareOutput();
+
+        bool openOutputWithPrefix(const std::string &filePrefix);
 
         bool dispatchSinglesToCallback(std::span<Single const> singles, uint64_t clockMs, uint32_t durationMs);
 
@@ -525,6 +534,8 @@ namespace openpni::distributed::r2s
         bool m_hadError = false;
 
         std::vector<uint16_t> m_channelsToProcess;
+        std::unordered_set<uint16_t> m_assignedChannelSet;
+        bool m_filterUnassignedChannels = false;
         std::vector<openpni::interface::ISingleGenerator *> m_generatorsVector;
         openpni::ConvergedR2S m_r2s;
 
@@ -617,6 +628,45 @@ namespace openpni::distributed::r2s
     bool processR2S(const R2SProcessConfig &config);
 
     /**
+     * @brief 目录中的 raw 文件条目（按 pniRaw-<clock>.bin 解析）
+     */
+    struct RawDataFileEntry
+    {
+        uint64_t startClock = 0;
+        std::string path;
+    };
+
+    /**
+     * @brief 扫描目录下的 raw 文件并按 startClock 排序
+     */
+    std::vector<RawDataFileEntry> collectRawDataFiles(
+        const std::string &directory,
+        const std::string &namePrefix = "pniRaw-",
+        const std::string &nameSuffix = ".bin");
+
+    /**
+     * @brief 构造 singles 输出文件名前缀：{base}_{inputClock}[_{runMs}]
+     */
+    std::string makeSinglesOutputPrefix(
+        const std::string &basePrefix,
+        uint64_t inputClock,
+        bool appendRunTimestamp = false);
+
+    /**
+     * @brief 目录批处理：一次 initialize，多文件复用 processor；每文件按 inputClock 切换输出前缀
+     *
+     * @param config 模板配置（rawdataPath 会被逐文件覆盖；outputFileName 作为前缀）
+     * @param rawdataDir raw 目录
+     * @param appendRunTimestamp 是否在输出名中追加系统时钟毫秒，避免覆盖
+     */
+    bool processR2SDirectory(
+        R2SProcessConfig config,
+        const std::string &rawdataDir,
+        bool appendRunTimestamp = false,
+        const std::string &rawNamePrefix = "pniRaw-",
+        const std::string &rawNameSuffix = ".bin");
+
+    /**
      * @brief 创建 BDM2 处理配置
      */
     R2SProcessConfig createBDM2Config(
@@ -639,61 +689,21 @@ namespace openpni::distributed::r2s
     /**
      * @brief 创建 9120 处理配置
      *
-     * 9120 每个环的构造和探测器型号均与 930（BDM50100）一致，区别仅在于环数：
-     * 930 为单环（144通道），9120 整机为 4 环（576通道）。该函数以
-     * createBDM50100Config 为基础，通过 ringCount 参数控制本次配置需要覆盖的环数
-     * （例如分布式部署中每个采集/R2S节点负责2环时传 ringCount=2），
-     * channelNums = 48*3*ringCount，crystalsPerChannel 与环数无关，保持 6*6*8 不变。
+     * channelNums 固定为整机通道数：48*3*instrumentRingCount（默认 576）。
+     * 本节点职责由 channelIndices 表达（例如 Node0: 0..287，Node1: 288..575）。
      *
-     * @param calibrationFiles 校准文件列表，长度需 >= 48*3*ringCount；
-     *                         由于每环探测器构造一致，可用 duplicateCalibrationFilesForRings
-     *                         将930的单环（144份）校准文件复制拼接后传入。
-     * @param ringCount 本配置覆盖的环数，默认 1（等价于 createBDM50100Config）
+     * 校正目录 calibrationDirs：
+     * - 若 size == instrumentRingCount：第 k 个目录对应环 k，空串表示该环不加载；
+     * - 若 channelIndices 非空且 size == 覆盖环数：按 channelIndices 推导环号升序，与目录一一对应；
+     * - 否则按环 0..dirs.size()-1 顺序落位。
+     * 文件按全局通道下标写入 calibrationFiles（环 k → [k*144, (k+1)*144)）。
      */
     R2SProcessConfig createBDM50100_9120Config(
         const std::string &rawdataPath,
         const std::string &resultPath,
-        const std::vector<std::string> &calibrationFiles,
+        const std::vector<std::string> &calibrationDirs,
         std::string outputFileName = "singles",
         const std::vector<uint16_t> &channelIndices = {},
-        uint16_t ringCount = 1);
+        uint16_t instrumentRingCount = 4);
 
-    /**
-     * @brief 将单环（144通道）校准文件列表按环数复制拼接
-     *
-     * 用于 9120 多环场景下复用 930 的单环校准文件：假设每个环的探测器构造和
-     * 校准均与930一致，直接将同一份校准文件列表按环数重复排列即可得到
-     * createBDM9120Config 所需的完整校准文件列表。
-     *
-     * @param singleRingCalibrationFiles 单环（144通道）的校准文件路径列表
-     * @param ringCount 目标环数
-     * @return std::vector<std::string> 长度为 singleRingCalibrationFiles.size() * ringCount 的列表，
-     *         依次为 [环0的144份, 环1的144份, ...]
-     */
-    std::vector<std::string> duplicateCalibrationFilesForRings(
-        const std::vector<std::string> &singleRingCalibrationFiles,
-        uint16_t ringCount);
-
-    // /**
-    //  * @brief 创建 BDMBiD 处理配置
-    //  */
-    // R2SProcessConfig createBDMBiDConfig(
-    //     const std::string &rawdataPath,
-    //     const std::string &resultPath,
-    //     const std::vector<std::string> &calibrationFiles,
-    //     std::string outputFileName = "singles",
-    //     const std::vector<uint16_t> &channelIndices = {})
-    // {
-    //     R2SProcessConfig config;
-    //     config.rawdataPath = rawdataPath;
-    //     config.resultPath = resultPath;
-    //     config.calibrationFiles = calibrationFiles;
-    //     config.detectorType = DetectorType::BDMBiD;
-    //     config.crystalsPerChannel = 400 * 8; // BDMBiD: 20x20 晶体阵列, 8个阵列
-    //     config.r2sResultIndex = 1;           // BDMBiD 数据在位置 1
-    //     config.outputFileName = outputFileName;
-    //     config.channelNums = 4;                 // BDMBiD 通道总数4
-    //     config.channelIndices = channelIndices; // 要处理的通道列表（空则处理所有）
-    //     return config;
-    // }
 } // namespace openpni::distributed::r2s

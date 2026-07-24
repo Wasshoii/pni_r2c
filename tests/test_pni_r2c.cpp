@@ -17,6 +17,7 @@
 #include <optional>
 #include <cstddef>
 #include <sstream>
+#include <chrono>
 
 // PnI-Config.hpp 必须在其他 PNI 头文件之前，定义 __PNI_CUDA_MACRO__ 等宏
 #include <pni/PnI-Config.hpp>
@@ -248,34 +249,6 @@ void test_bdm2_callback()
               << std::endl;
 }
 
-void split_930_data()
-{
-    const std::string rawdataPath = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/converted_rawData.bin";
-    const std::string outputFolderName = "splitdata";
-    constexpr uint16_t kTotalChannels = 144;
-    constexpr uint16_t kGroupCount = 4;
-    constexpr uint16_t kGroupSize = kTotalChannels / kGroupCount;
-
-    for (uint16_t groupIndex = 0; groupIndex < kGroupCount; ++groupIndex)
-    {
-        const uint16_t startChannel = static_cast<uint16_t>(groupIndex * kGroupSize);
-        const uint16_t endChannel = static_cast<uint16_t>(startChannel + kGroupSize);
-        std::vector<uint16_t> channels;
-        channels.reserve(kGroupSize);
-        for (uint16_t ch = startChannel; ch < endChannel; ++ch)
-        {
-            channels.push_back(ch);
-        }
-
-        std::cout << "Splitting channels [" << startChannel << "-" << (endChannel - 1) << "]" << std::endl;
-        if (!extract_multiple_channels_from_rawdata(rawdataPath, channels, outputFolderName))
-        {
-            std::cerr << "Failed to split channels [" << startChannel << "-" << (endChannel - 1) << "]" << std::endl;
-            break;
-        }
-    }
-
-}
 void test_50100_930_callback(bool saveSinglesFile = true)
 {
     std::cout << "\n========== Testing 50100 R2S Callback Mode ==========\n"
@@ -300,7 +273,7 @@ void test_50100_930_callback(bool saveSinglesFile = true)
     constexpr std::size_t kMaxEnergySamplesPerCallback = 20000;
 
     namespace fs = std::filesystem;
-    const fs::path rawdataDir = path_pre + "/pni_raw";
+    const fs::path rawdataDir = path_pre + "/pni_raw_ring0";
     const std::string rawPrefix = "pniRaw-";
     const std::string rawExt = ".bin";
 
@@ -605,6 +578,122 @@ void test_50100_930_callback(bool saveSinglesFile = true)
     std::cout << "Total singles received: " << totalSinglesReceived << std::endl;
     std::cout << "Processing time: " << elapsed_ms << " ms" << std::endl;
     std::cout << "Throughput: " << (elapsed_ms > 0 ? (double)totalSinglesReceived / elapsed_ms * 1000 : 0) << " singles/s" << std::endl;
+    std::cout << "================================================\n"
+              << std::endl;
+}
+
+/**
+ * @brief 合并 9120 前两环 raw（ring0+ring1）到 pni_raw_node0
+ *
+ * 仅做目录合并，不跑 R2S。可与 test_9120_two_ring_r2s 分开调用。
+ *
+ * @return bool 合并成功返回 true
+ */
+bool merge_9120_two_ring_rawdata()
+{
+    const std::string ring0Dir = path_pre + "/pni_raw_ring0";
+    const std::string ring1Dir = path_pre + "/pni_raw_ring1";
+    const std::string mergedDir = out_path + "/pni_raw_node0";
+
+    std::cout << "\n========== Merge 9120 Two-Ring Raw (0+1) ==========\n"
+              << std::endl;
+    std::cout << "Ring0:  " << ring0Dir << std::endl;
+    std::cout << "Ring1:  " << ring1Dir << std::endl;
+    std::cout << "Output: " << mergedDir << std::endl;
+
+    const bool ok = merge_rawdata_dirs_by_clock({ring0Dir, ring1Dir}, mergedDir, 576);
+    std::cout << "Merge result: " << (ok ? "OK" : "FAILED") << std::endl;
+    std::cout << "================================================\n"
+              << std::endl;
+    return ok;
+}
+
+/**
+ * @brief 9120 前两环（ring0+ring1）R2S 实验（读取已合并的 pni_raw_node0）
+ *
+ * 前置：请先调用 merge_9120_two_ring_rawdata()（或等价合并）。
+ * 校正：两个大环均复用 cali_path（930 单环校正）。
+ * 通道：channelIndices = 0..287，channelNums = 576。
+ */
+void test_9120_two_ring_r2s(bool saveSinglesFile = true)
+{
+    namespace fs = std::filesystem;
+
+    std::cout << "\n========== Testing 9120 Two-Ring (0+1) R2S ==========\n"
+              << std::endl;
+
+    const std::string mergedDir = out_path + "/pni_raw_node0";
+    const std::string resultDir = out_path + "/pni_singles_node0";
+
+    std::cout << "Merged raw: " << mergedDir << std::endl;
+    std::cout << "Result:     " << resultDir << std::endl;
+    std::cout << "Cali (both rings): " << cali_path << std::endl;
+    std::cout << "Mode: " << (saveSinglesFile ? "save singles file" : "r2s only") << std::endl;
+
+    if (!fs::exists(mergedDir) || !fs::is_directory(mergedDir))
+    {
+        std::cerr << "Merged raw dir not found: " << mergedDir
+                  << "\nPlease run merge_9120_two_ring_rawdata() first." << std::endl;
+        return;
+    }
+
+    std::vector<uint16_t> channelIndices;
+    channelIndices.reserve(288);
+    for (uint16_t ch = 0; ch < 288; ++ch)
+    {
+        channelIndices.push_back(ch);
+    }
+
+    auto config = r2s::createBDM50100_9120Config(
+        "",
+        resultDir,
+        {cali_path, cali_path},
+        "singles_9120_node0",
+        channelIndices,
+        4);
+
+    config.saveData2SingleFile = saveSinglesFile;
+    config.asyncFileWrite = false;
+    config.useEnergyCut = true;
+    config.energyCutLow = 421000.0f;
+    config.energyCutHigh = 1000000.0f;
+    config.progressLogInterval = 50;
+
+    uint64_t totalSinglesReceived = 0;
+    uint64_t totalCallbacks = 0;
+    if (!saveSinglesFile)
+    {
+        config.onSinglesSpanReady =
+            [&](std::span<r2s::Single const> singles, uint64_t, uint32_t) -> bool
+        {
+            std::vector<r2s::Single> hostSingles;
+            if (r2s::isDevicePointer(singles.data()))
+            {
+                hostSingles = r2s::materializeSinglesOnHost(singles);
+                singles = std::span<const r2s::Single>(hostSingles.data(), hostSingles.size());
+            }
+            totalSinglesReceived += singles.size();
+            ++totalCallbacks;
+            return true;
+        };
+    }
+
+    fs::create_directories(resultDir);
+
+    auto start = std::chrono::steady_clock::now();
+    const bool ok = r2s::processR2SDirectory(config, mergedDir, false);
+    auto end = std::chrono::steady_clock::now();
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+    std::cout << "\n========== 9120 Two-Ring R2S Results ==========" << std::endl;
+    std::cout << "Success: " << (ok ? "Yes" : "No") << std::endl;
+    std::cout << "Processing time: " << elapsed_ms << " ms" << std::endl;
+    if (!saveSinglesFile)
+    {
+        std::cout << "Total callbacks: " << totalCallbacks << std::endl;
+        std::cout << "Total singles received: " << totalSinglesReceived << std::endl;
+    }
+    std::cout << "Result dir: " << resultDir << std::endl;
     std::cout << "================================================\n"
               << std::endl;
 }
@@ -1019,12 +1108,19 @@ int main(int argc, char **argv)
     // std::cout << "[Test 2] Testing callback mode..." << std::endl;
     // test_bdm2_callback();
 
-   // 工具调用，批量转换50100原始数据
-   convert_50100_rawdata_batch_process(3);
+    // // 工具调用，批量转换50100原始数据
+    // convert_50100_rawdata_batch_process(3);
 
-    // constexpr bool kSaveSinglesFile = true;
-    // std::cout << "[Test 3] Testing 50100 callback mode..." << std::endl;
-    // test_50100_930_callback(kSaveSinglesFile);
+     constexpr bool kSaveSinglesFile = false;
+    std::cout << "[Test 3] Testing 50100 callback mode..." << std::endl;
+    test_50100_930_callback(kSaveSinglesFile);
+
+    // 9120：合并与 R2S 分开调用（合并只需跑一次，之后可反复跑 R2S）
+    // std::cout << "[Tool 9120] Merge ring0+ring1 rawdata..." << std::endl;
+    // merge_9120_two_ring_rawdata();
+
+    std::cout << "[Test 9120] Two-ring (0+1) R2S..." << std::endl;
+    test_9120_two_ring_r2s(kSaveSinglesFile);
 
 
     // //工具调用，批量转换50100单事件数据

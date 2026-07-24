@@ -1,7 +1,10 @@
 #include "core/r2s/R2S.hpp"
 
 #include <cctype>
+#include <chrono>
 #include <glog/logging.h>
+#include <set>
+#include <sstream>
 
 namespace openpni::distributed::r2s
 {
@@ -533,24 +536,62 @@ namespace openpni::distributed::r2s
             return true;
         }
 
-        m_totalRawPackets += view.count;
+        openpni::RawDataView effectiveView = view;
+        std::vector<uint64_t> filteredOffset;
+        std::vector<uint16_t> filteredLength;
+        std::vector<uint16_t> filteredChannel;
 
-        const uint64_t clockMs = view.clock_ms;
+        if (m_filterUnassignedChannels && view.channel != nullptr)
+        {
+            filteredOffset.reserve(static_cast<size_t>(view.count));
+            filteredLength.reserve(static_cast<size_t>(view.count));
+            filteredChannel.reserve(static_cast<size_t>(view.count));
+            for (uint64_t i = 0; i < view.count; ++i)
+            {
+                const uint16_t ch = view.channel[i];
+                if (m_assignedChannelSet.find(ch) == m_assignedChannelSet.end())
+                {
+                    continue;
+                }
+                filteredOffset.push_back(view.offset ? view.offset[i] : 0);
+                filteredLength.push_back(view.length ? view.length[i] : 0);
+                filteredChannel.push_back(ch);
+            }
+
+            if (filteredChannel.empty())
+            {
+                if (needPerfLog)
+                {
+                    LOG(INFO) << "Segment " << segmentId
+                              << ": No packets for assigned channels, skipping";
+                }
+                return true;
+            }
+
+            effectiveView.offset = filteredOffset.data();
+            effectiveView.length = filteredLength.data();
+            effectiveView.channel = filteredChannel.data();
+            effectiveView.count = filteredChannel.size();
+        }
+
+        m_totalRawPackets += effectiveView.count;
+
+        const uint64_t clockMs = effectiveView.clock_ms;
         const uint32_t durationMs =
-            view.duration_ms > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())
+            effectiveView.duration_ms > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())
                 ? std::numeric_limits<uint32_t>::max()
-                : static_cast<uint32_t>(view.duration_ms);
+                : static_cast<uint32_t>(effectiveView.duration_ms);
 
         const auto perfStart = needPerfLog ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 
         try
         {
             auto d_data = openpni::DPackets::FromHost(
-                view.data,
-                view.offset,
-                view.length,
-                view.channel,
-                view.count);
+                effectiveView.data,
+                effectiveView.offset,
+                effectiveView.length,
+                effectiveView.channel,
+                effectiveView.count);
 
             auto r2sResults = m_r2s.R2S_CUDA(
                 d_data.raw,
@@ -619,13 +660,13 @@ namespace openpni::distributed::r2s
                 const auto timeMs = std::chrono::duration_cast<std::chrono::milliseconds>(perfEnd - perfStart).count();
 
                 LOG(INFO) << "Segment " << segmentId
-                          << ": Processed " << view.count << " packets, generated "
+                          << ": Processed " << effectiveView.count << " packets, generated "
                           << singlesSpan.size() << " singles";
 
                 if (timeMs > 0)
                 {
                     const double speedMbPerSec =
-                        static_cast<double>(view.count * 1024ULL) / 1024.0 / 1024.0 /
+                        static_cast<double>(effectiveView.count * 1024ULL) / 1024.0 / 1024.0 /
                         (static_cast<double>(timeMs) / 1000.0);
                     LOG(INFO) << " speed = " << speedMbPerSec << " MB/s";
                 }
@@ -698,6 +739,8 @@ namespace openpni::distributed::r2s
     bool R2SStreamProcessor::prepareChannelsToProcess()
     {
         m_channelsToProcess.clear();
+        m_assignedChannelSet.clear();
+        m_filterUnassignedChannels = false;
 
         if (m_config.channelIndices.empty())
         {
@@ -705,110 +748,141 @@ namespace openpni::distributed::r2s
             {
                 m_channelsToProcess.push_back(i);
             }
-            LOG(INFO) << "Processing all channels";
+            LOG(INFO) << "Processing all channels [0, " << m_config.channelNums << ")";
         }
         else
         {
             m_channelsToProcess = m_config.channelIndices;
-            LOG(INFO) << "Processing selected channels: ";
+            LOG(INFO) << "Processing assigned channels (" << m_channelsToProcess.size() << "): ";
             for (auto ch : m_channelsToProcess)
             {
                 LOG(INFO) << ch << " ";
             }
             LOG(INFO) << "";
 
-            const uint16_t validateRange = std::max<uint16_t>(m_config.channelNums, m_inputChannelNum);
+            // 整机上界用 channelNums；若已知 raw 头通道数，再核对文件头是否覆盖分配通道
             for (auto ch : m_channelsToProcess)
             {
-                if (ch >= validateRange)
+                if (ch >= m_config.channelNums)
                 {
-                    LOG(ERROR) << "Error: Channel index " << ch
-                               << " is out of range (0-" << (validateRange - 1) << ")";
+                    LOG(ERROR) << "Error: Assigned channel index " << ch
+                               << " exceeds instrument channelNums=" << m_config.channelNums;
                     return false;
                 }
+                if (m_inputChannelNum > 0 && ch >= m_inputChannelNum)
+                {
+                    LOG(ERROR) << "Error: Assigned channel index " << ch
+                               << " exceeds raw file channelNum=" << m_inputChannelNum;
+                    return false;
+                }
+            }
+
+            m_filterUnassignedChannels = true;
+        }
+
+        m_assignedChannelSet.insert(m_channelsToProcess.begin(), m_channelsToProcess.end());
+        return true;
+    }
+
+    bool R2SStreamProcessor::prepareGenerators()
+    {
+        if (m_config.forceFullCalibrationLoad && m_config.detectorType == DetectorType::BDM50100)
+        {
+            LOG(INFO) << "BDM50100 calibration mode: loading generators for assigned channels only"
+                      << " (count=" << m_channelsToProcess.size() << ")";
+        }
+
+        for (auto channelIndex : m_channelsToProcess)
+        {
+            if (static_cast<size_t>(channelIndex) >= m_config.calibrationFiles.size() ||
+                m_config.calibrationFiles[channelIndex].empty())
+            {
+                LOG(ERROR) << "Error: Missing calibration file for assigned channel " << channelIndex
+                           << " (calibrationFiles.size=" << m_config.calibrationFiles.size() << ")";
+                return false;
+            }
+        }
+
+        LOG(INFO) << "Loading " << m_channelsToProcess.size() << " channels' calibration data...";
+
+        for (auto channelIndex : m_channelsToProcess)
+        {
+            try
+            {
+                auto generator = createSingleGenerator(m_config, channelIndex);
+                m_generatorsVector.push_back(generator);
+            }
+            catch (const std::exception &e)
+            {
+                LOG(ERROR) << "Error creating generator for channel " << channelIndex << ": " << e.what();
+                cleanupGenerators();
+                return false;
             }
         }
 
         return true;
     }
 
-    bool R2SStreamProcessor::prepareGenerators()
+    bool R2SStreamProcessor::openOutputWithPrefix(const std::string &filePrefix)
     {
-        const bool useFullCalibrationLoad =
-            m_config.forceFullCalibrationLoad && m_config.detectorType == DetectorType::BDM50100;
+        const uint32_t totalCrystals = m_config.channelNums * m_config.crystalsPerChannel;
 
-        if (useFullCalibrationLoad)
-        {
-            LOG(INFO) << "Full calibration load enabled for BDM50100";
-        }
+        openpni::distributed::coreio::SingleWriterOptions opts;
+        opts.io.maxFileSizeBytes = m_config.singlesMaxFileSizeBytes;
+        opts.io.enableOverrideExistingFile = m_config.singlesOverwriteExisting;
 
-        size_t requiredCalibrationCount = 0;
-        if (m_config.channelIndices.empty() || useFullCalibrationLoad)
+        m_outputFilePath = m_config.resultPath + "/" + filePrefix + ".lsingle";
+
+        if (m_config.asyncFileWrite)
         {
-            requiredCalibrationCount = m_config.channelNums;
+            m_asyncWriter = std::make_unique<AsyncSingleFileWriter>(m_config.asyncWriteQueueSize);
+            if (!m_asyncWriter->open(m_config.resultPath, filePrefix, totalCrystals, opts))
+            {
+                return false;
+            }
+            LOG(INFO) << "Output file (async): " << m_outputFilePath;
         }
         else
         {
-            uint16_t maxChannelIndex = 0;
-            for (auto channelIndex : m_config.channelIndices)
+            const bool opened = m_singleOutput.Open(
+                m_config.resultPath, filePrefix, "lsingle", opts,
+                [totalCrystals](openpni::distributed::coreio::SinglesFileWriter &w, const std::string &path)
+                {
+                    w.Open(path, totalCrystals);
+                });
+            if (!opened)
             {
-                maxChannelIndex = std::max<uint16_t>(maxChannelIndex, channelIndex);
+                LOG(ERROR) << "Failed to open singles output file: " << m_outputFilePath;
+                return false;
             }
-            requiredCalibrationCount = static_cast<size_t>(maxChannelIndex) + 1;
+            LOG(INFO) << "Output file (sync): " << m_outputFilePath;
         }
 
-        if (m_config.calibrationFiles.size() < requiredCalibrationCount)
-        {
-            LOG(ERROR) << "Error: Not enough calibration files. Need at least " << requiredCalibrationCount
-                       << ", got " << m_config.calibrationFiles.size();
-            return false;
-        }
-
-        
-        LOG(INFO) << "Loading " << m_channelsToProcess.size() << " channels' calibration data...";
-
-        if (m_config.channelIndices.empty() || useFullCalibrationLoad)
-        {
-            for (size_t i = 0; i < m_config.channelNums; i++)
-            {
-                try
-                {
-                    auto generator = createSingleGenerator(
-                        m_config,
-                        static_cast<uint16_t>(i));
-                    m_generatorsVector.push_back(generator);
-                }
-                catch (const std::exception &e)
-                {
-                    LOG(ERROR) << "Error creating generator for channel " << i << ": " << e.what();
-                    cleanupGenerators();
-                    return false;
-                }
-            }
-        }
-        else
-        {
-            for (size_t i = 0; i < m_config.channelIndices.size(); i++)
-            {
-                try
-                {
-                    auto channelIndex = m_config.channelIndices[i];
-                    auto generator = createSingleGenerator(
-                        m_config,
-                        channelIndex);
-                    m_generatorsVector.push_back(generator);
-                }
-                catch (const std::exception &e)
-                {
-                    LOG(ERROR) << "Error creating generator for channel " << m_config.channelIndices[i]
-                               << ": " << e.what();
-                    cleanupGenerators();
-                    return false;
-                }
-            }
-        }
-
+        LOG(INFO) << "Total crystals: " << totalCrystals;
         return true;
+    }
+
+    bool R2SStreamProcessor::reopenOutput(const std::string &filePrefix)
+    {
+        if (!m_config.saveData2SingleFile)
+        {
+            m_config.outputFileName = filePrefix;
+            return true;
+        }
+
+        if (m_asyncWriter)
+        {
+            m_asyncWriter->flush();
+            m_asyncWriter->stop();
+            m_asyncWriter.reset();
+        }
+        else
+        {
+            m_singleOutput.Stop();
+        }
+
+        m_config.outputFileName = filePrefix;
+        return openOutputWithPrefix(filePrefix);
     }
 
     bool R2SStreamProcessor::prepareOutput()
@@ -825,49 +899,17 @@ namespace openpni::distributed::r2s
 
         if (m_config.saveData2SingleFile)
         {
-            const uint32_t totalCrystals = m_config.channelNums * m_config.crystalsPerChannel;
-
-            openpni::distributed::coreio::SingleWriterOptions opts;
-            opts.io.maxFileSizeBytes = m_config.singlesMaxFileSizeBytes;
-            opts.io.enableOverrideExistingFile = m_config.singlesOverwriteExisting;
-
-            // maxFileSizeBytes == 0 时，RollingFileWriter 产出的文件名与历史行为完全一致：
-            // "{resultPath}/{outputFileName}.lsingle"
-            m_outputFilePath = m_config.resultPath + "/" + m_config.outputFileName + ".lsingle";
-
-            if (m_config.asyncFileWrite)
+            if (!openOutputWithPrefix(m_config.outputFileName))
             {
-                m_asyncWriter = std::make_unique<AsyncSingleFileWriter>(m_config.asyncWriteQueueSize);
-                if (!m_asyncWriter->open(m_config.resultPath, m_config.outputFileName, totalCrystals, opts))
-                {
-                    return false;
-                }
-                LOG(INFO) << "Output file (async): " << m_outputFilePath;
+                return false;
             }
-            else
-            {
-                const bool opened = m_singleOutput.Open(
-                    m_config.resultPath, m_config.outputFileName, "lsingle", opts,
-                    [totalCrystals](openpni::distributed::coreio::SinglesFileWriter &w, const std::string &path)
-                    {
-                        w.Open(path, totalCrystals);
-                    });
-                if (!opened)
-                {
-                    LOG(ERROR) << "Failed to open singles output file: " << m_outputFilePath;
-                    return false;
-                }
-                LOG(INFO) << "Output file (sync): " << m_outputFilePath;
-            }
-
-            LOG(INFO) << "Total crystals: " << totalCrystals;
         }
 
         if (m_config.saveData2SingleFile && m_hasStreamingCallback)
         {
             LOG(INFO) << "Dual mode: data will be saved to file AND sent via callback";
         }
-        else if (m_hasStreamingCallback)
+        else if (!m_config.saveData2SingleFile && m_hasStreamingCallback)
         {
             LOG(INFO) << "Streaming mode: data will be sent via callback only";
         }
@@ -1098,6 +1140,70 @@ namespace openpni::distributed::r2s
         }
     }
 
+    namespace
+    {
+        std::optional<uint64_t> tryParseRawStartClock(
+            const std::string &filename,
+            const std::string &namePrefix,
+            const std::string &nameSuffix)
+        {
+            if (filename.size() < namePrefix.size() + nameSuffix.size())
+            {
+                return std::nullopt;
+            }
+            if (filename.compare(0, namePrefix.size(), namePrefix) != 0)
+            {
+                return std::nullopt;
+            }
+            if (filename.compare(filename.size() - nameSuffix.size(), nameSuffix.size(), nameSuffix) != 0)
+            {
+                return std::nullopt;
+            }
+            const size_t start = namePrefix.size();
+            const size_t end = filename.size() - nameSuffix.size();
+            if (end <= start)
+            {
+                return std::nullopt;
+            }
+            try
+            {
+                return static_cast<uint64_t>(std::stoull(filename.substr(start, end - start)));
+            }
+            catch (...)
+            {
+                return std::nullopt;
+            }
+        }
+
+        bool placeRingCalibrationFiles(
+            std::vector<std::string> &calibrationFiles,
+            uint16_t ringIndex,
+            uint16_t channelsPerRing,
+            const std::string &dir)
+        {
+            if (dir.empty())
+            {
+                return true;
+            }
+
+            auto ringFiles = collectCalibrationFiles(dir, {".bin"}, true, "bdm_", ".bin");
+            if (ringFiles.size() < static_cast<size_t>(channelsPerRing))
+            {
+                LOG(WARNING) << "createBDM50100_9120Config: ring " << ringIndex
+                             << " calibration dir \"" << dir << "\" has " << ringFiles.size()
+                             << " files, expected >= " << channelsPerRing;
+            }
+
+            const size_t base = static_cast<size_t>(ringIndex) * static_cast<size_t>(channelsPerRing);
+            const size_t n = std::min(ringFiles.size(), static_cast<size_t>(channelsPerRing));
+            for (size_t i = 0; i < n; ++i)
+            {
+                calibrationFiles[base + i] = ringFiles[i];
+            }
+            return true;
+        }
+    } // namespace
+
     bool processR2S(const R2SProcessConfig &config)
     {
         try
@@ -1112,7 +1218,17 @@ namespace openpni::distributed::r2s
             LOG(INFO) << "Channels: " << channelNum;
             LOG(INFO) << "Segments: " << segmentNum;
 
-            R2SStreamProcessor processor(config);
+            R2SProcessConfig runtimeConfig = config;
+            const auto parsedClock = tryParseRawStartClock(
+                std::filesystem::path(config.rawdataPath).filename().string(),
+                "pniRaw-",
+                ".bin");
+            if (parsedClock)
+            {
+                runtimeConfig.outputFileName = makeSinglesOutputPrefix(config.outputFileName, *parsedClock, false);
+            }
+
+            R2SStreamProcessor processor(runtimeConfig);
             if (!processor.initialize(channelNum))
             {
                 return false;
@@ -1136,6 +1252,155 @@ namespace openpni::distributed::r2s
         catch (const std::exception &e)
         {
             LOG(ERROR) << "Error in processR2S: " << e.what();
+            return false;
+        }
+    }
+
+    std::vector<RawDataFileEntry> collectRawDataFiles(
+        const std::string &directory,
+        const std::string &namePrefix,
+        const std::string &nameSuffix)
+    {
+        std::vector<RawDataFileEntry> entries;
+        if (directory.empty())
+        {
+            return entries;
+        }
+
+        std::error_code ec;
+        const std::filesystem::path dirPath(directory);
+        if (!std::filesystem::exists(dirPath, ec) || !std::filesystem::is_directory(dirPath, ec))
+        {
+            LOG(ERROR) << "Rawdata directory not found: " << directory;
+            return entries;
+        }
+
+        for (const auto &entry : std::filesystem::directory_iterator(dirPath, ec))
+        {
+            if (ec || !entry.is_regular_file(ec))
+            {
+                continue;
+            }
+            const std::string name = entry.path().filename().string();
+            auto clockOpt = tryParseRawStartClock(name, namePrefix, nameSuffix);
+            if (!clockOpt)
+            {
+                continue;
+            }
+            entries.push_back(RawDataFileEntry{*clockOpt, entry.path().string()});
+        }
+
+        std::sort(entries.begin(), entries.end(),
+                  [](const RawDataFileEntry &a, const RawDataFileEntry &b)
+                  {
+                      if (a.startClock != b.startClock)
+                      {
+                          return a.startClock < b.startClock;
+                      }
+                      return a.path < b.path;
+                  });
+
+        LOG(INFO) << "Collected " << entries.size() << " rawdata files from: " << directory;
+        return entries;
+    }
+
+    std::string makeSinglesOutputPrefix(
+        const std::string &basePrefix,
+        uint64_t inputClock,
+        bool appendRunTimestamp)
+    {
+        std::ostringstream oss;
+        oss << basePrefix << '_' << inputClock;
+        if (appendRunTimestamp)
+        {
+            const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::system_clock::now().time_since_epoch())
+                                   .count();
+            oss << '_' << nowMs;
+        }
+        return oss.str();
+    }
+
+    bool processR2SDirectory(
+        R2SProcessConfig config,
+        const std::string &rawdataDir,
+        bool appendRunTimestamp,
+        const std::string &rawNamePrefix,
+        const std::string &rawNameSuffix)
+    {
+        const auto files = collectRawDataFiles(rawdataDir, rawNamePrefix, rawNameSuffix);
+        if (files.empty())
+        {
+            LOG(ERROR) << "processR2SDirectory: no raw files in " << rawdataDir;
+            return false;
+        }
+
+        const std::string outputPrefixBase = config.outputFileName;
+        bool openedFirst = false;
+        uint16_t inputChannelNum = 0;
+        std::unique_ptr<R2SStreamProcessor> processor;
+
+        try
+        {
+            for (const auto &file : files)
+            {
+                openpni::distributed::coreio::RawDataFileReader rawFileInput;
+                rawFileInput.Open(file.path);
+                const auto &info = rawFileInput.Info();
+                if (!openedFirst)
+                {
+                    inputChannelNum = info.channelNum;
+                    config.outputFileName = makeSinglesOutputPrefix(
+                        outputPrefixBase, file.startClock, appendRunTimestamp);
+                    processor = std::make_unique<R2SStreamProcessor>(config);
+                    if (!processor->initialize(inputChannelNum))
+                    {
+                        return false;
+                    }
+                    openedFirst = true;
+                }
+                else
+                {
+                    if (info.channelNum != inputChannelNum)
+                    {
+                        LOG(WARNING) << "processR2SDirectory: channelNum mismatch for "
+                                     << file.path << " (" << info.channelNum
+                                     << " vs " << inputChannelNum << ")";
+                    }
+                    const std::string nextPrefix = makeSinglesOutputPrefix(
+                        outputPrefixBase, file.startClock, appendRunTimestamp);
+                    if (!processor->reopenOutput(nextPrefix))
+                    {
+                        LOG(ERROR) << "processR2SDirectory: failed to reopen output for " << file.path;
+                        processor->finalize();
+                        return false;
+                    }
+                }
+
+                LOG(INFO) << "Processing raw file: " << file.path
+                          << " segments=" << info.segmentNum;
+                for (uint32_t i = 0; i < info.segmentNum; ++i)
+                {
+                    auto segment = rawFileInput.ReadSegment(i, i + 1);
+                    if (!processor->processSegment(segment.View()))
+                    {
+                        LOG(ERROR) << "processR2SDirectory: failed at " << file.path
+                                   << " segment " << i;
+                        processor->finalize();
+                        return false;
+                    }
+                }
+            }
+
+            return processor ? processor->finalize() : false;
+        }
+        catch (const std::exception &e)
+        {
+            LOG(ERROR) << "Error in processR2SDirectory: " << e.what();
+            if (processor)
+            {
+                processor->finalize();
+            }
             return false;
         }
     }
@@ -1188,71 +1453,118 @@ namespace openpni::distributed::r2s
     R2SProcessConfig createBDM50100_9120Config(
         const std::string &rawdataPath,
         const std::string &resultPath,
-        const std::vector<std::string> &calibrationFiles,
+        const std::vector<std::string> &calibrationDirs,
         std::string outputFileName,
         const std::vector<uint16_t> &channelIndices,
-        uint16_t ringCount)
+        uint16_t instrumentRingCount)
     {
-        constexpr uint16_t kChannelsPerRing = 48 * 3;         // 每环通道数，与930(BDM50100)一致
-        constexpr uint32_t kCrystalsPerChannel = 6 * 6 * 8;   // 每通道晶体数，与环数无关
+        constexpr uint16_t kChannelsPerRing = 48 * 3;
+        constexpr uint32_t kCrystalsPerChannel = 6 * 6 * 8;
         constexpr uint16_t kMaxRingCount = std::numeric_limits<uint16_t>::max() / kChannelsPerRing;
 
-        if (ringCount == 0)
+        if (instrumentRingCount == 0)
         {
-            LOG(WARNING) << "createBDM50100_9120Config: ringCount must be >= 1, fallback to 1";
-            ringCount = 1;
+            LOG(WARNING) << "createBDM50100_9120Config: instrumentRingCount must be >= 1, fallback to 4";
+            instrumentRingCount = 4;
         }
-        else if (ringCount > kMaxRingCount)
+        else if (instrumentRingCount > kMaxRingCount)
         {
-            LOG(ERROR) << "createBDM50100_9120Config: ringCount " << ringCount
-                       << " overflows channelNums (uint16_t), clamped to " << kMaxRingCount;
-            ringCount = kMaxRingCount;
+            LOG(ERROR) << "createBDM50100_9120Config: instrumentRingCount " << instrumentRingCount
+                       << " overflows channelNums, clamped to " << kMaxRingCount;
+            instrumentRingCount = kMaxRingCount;
+        }
+
+        const uint16_t channelNums = static_cast<uint16_t>(kChannelsPerRing * instrumentRingCount);
+        std::vector<std::string> calibrationFiles(static_cast<size_t>(channelNums));
+
+        std::vector<uint16_t> ringsToLoad;
+        if (calibrationDirs.size() == static_cast<size_t>(instrumentRingCount))
+        {
+            for (uint16_t ring = 0; ring < instrumentRingCount; ++ring)
+            {
+                ringsToLoad.push_back(ring);
+            }
+            for (size_t i = 0; i < ringsToLoad.size(); ++i)
+            {
+                placeRingCalibrationFiles(
+                    calibrationFiles, ringsToLoad[i], kChannelsPerRing, calibrationDirs[i]);
+            }
+        }
+        else if (!channelIndices.empty())
+        {
+            std::set<uint16_t> ringSet;
+            for (auto ch : channelIndices)
+            {
+                ringSet.insert(static_cast<uint16_t>(ch / kChannelsPerRing));
+            }
+            ringsToLoad.assign(ringSet.begin(), ringSet.end());
+            if (calibrationDirs.size() != ringsToLoad.size())
+            {
+                LOG(WARNING) << "createBDM50100_9120Config: calibrationDirs.size()=" << calibrationDirs.size()
+                             << " != covered ring count=" << ringsToLoad.size()
+                             << "; pairing by min size in ring-index order";
+            }
+            const size_t n = std::min(calibrationDirs.size(), ringsToLoad.size());
+            for (size_t i = 0; i < n; ++i)
+            {
+                placeRingCalibrationFiles(
+                    calibrationFiles, ringsToLoad[i], kChannelsPerRing, calibrationDirs[i]);
+            }
+        }
+        else
+        {
+            const size_t n = std::min(calibrationDirs.size(), static_cast<size_t>(instrumentRingCount));
+            for (size_t i = 0; i < n; ++i)
+            {
+                placeRingCalibrationFiles(
+                    calibrationFiles, static_cast<uint16_t>(i), kChannelsPerRing, calibrationDirs[i]);
+            }
         }
 
         R2SProcessConfig config;
         config.rawdataPath = rawdataPath;
         config.resultPath = resultPath;
-        config.calibrationFiles = calibrationFiles;
-        config.detectorType = DetectorType::BDM50100; // 每环探测器型号与930一致，复用同一套R2S生成器
+        config.calibrationFiles = std::move(calibrationFiles);
+        config.detectorType = DetectorType::BDM50100;
         config.crystalsPerChannel = kCrystalsPerChannel;
         config.r2sResultIndex = 2;
         config.outputFileName = outputFileName;
-        config.channelNums = static_cast<uint16_t>(kChannelsPerRing * ringCount); // 通道数随环数线性扩展
+        config.channelNums = channelNums;
         config.channelIndices = channelIndices;
         config.forceFullCalibrationLoad = true;
-        // 每环探测器构造与930一致，算法参数默认沿用930已验证的取值；
-        // 如需针对某个节点/环单独调优，可在拿到 config 后按需覆盖这些字段
         config.matchXTalkEnabled = true;
         config.crossTalkEnabled = true;
         config.crossTalkTimeWindow = 2.0f;
 
-        const size_t requiredCalibrationCount = static_cast<size_t>(config.channelNums);
-        if (config.calibrationFiles.size() < requiredCalibrationCount)
+        size_t missing = 0;
+        if (config.channelIndices.empty())
         {
-            LOG(WARNING) << "createBDM50100_9120Config: calibration files (" << config.calibrationFiles.size()
-                         << ") fewer than required (" << requiredCalibrationCount << ") for ringCount="
-                         << ringCount << "; consider duplicateCalibrationFilesForRings()";
+            for (uint16_t ch = 0; ch < channelNums; ++ch)
+            {
+                if (config.calibrationFiles[ch].empty())
+                {
+                    ++missing;
+                }
+            }
+        }
+        else
+        {
+            for (auto ch : config.channelIndices)
+            {
+                if (ch >= config.calibrationFiles.size() || config.calibrationFiles[ch].empty())
+                {
+                    ++missing;
+                }
+            }
+        }
+        if (missing > 0)
+        {
+            LOG(WARNING) << "createBDM50100_9120Config: " << missing
+                         << " assigned channels lack calibration files "
+                         << "(instrument channelNums=" << channelNums << ")";
         }
 
         return config;
-    }
-
-    std::vector<std::string> duplicateCalibrationFilesForRings(
-        const std::vector<std::string> &singleRingCalibrationFiles,
-        uint16_t ringCount)
-    {
-        std::vector<std::string> files;
-        if (ringCount == 0 || singleRingCalibrationFiles.empty())
-        {
-            return files;
-        }
-
-        files.reserve(singleRingCalibrationFiles.size() * static_cast<size_t>(ringCount));
-        for (uint16_t ring = 0; ring < ringCount; ++ring)
-        {
-            files.insert(files.end(), singleRingCalibrationFiles.begin(), singleRingCalibrationFiles.end());
-        }
-        return files;
     }
 
 } // namespace openpni::distributed::r2s

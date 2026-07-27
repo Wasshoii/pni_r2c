@@ -583,35 +583,56 @@ void test_50100_930_callback(bool saveSinglesFile = true)
 }
 
 /**
- * @brief 合并 9120 前两环 raw（ring0+ring1）到 pni_raw_node0
+ * @brief 合并 9120 两环 raw 到指定节点目录（每个 clock 生成与输入环数相同的输出文件）
  *
- * 仅做目录合并，不跑 R2S。可与 test_9120_two_ring_r2s 分开调用。
+ * 例如合并 ring0+ring1 同一 clock 的两个文件 → pniRaw-<clock>_0.bin、pniRaw-<clock>_1.bin，
+ * 体量接近单环源文件，包按采集时间（T0）排序后切分写入。
  *
+ * @param ringA 第一环目录名后缀（如 0 → pni_raw_ring0）
+ * @param ringB 第二环目录名后缀
+ * @param outNodeDirName 输出目录名（如 pni_raw_node0）
  * @return bool 合并成功返回 true
  */
-bool merge_9120_two_ring_rawdata()
+bool merge_9120_two_ring_rawdata(int ringA, int ringB, const std::string &outNodeDirName)
 {
-    const std::string ring0Dir = path_pre + "/pni_raw_ring2";
-    const std::string ring1Dir = path_pre + "/pni_raw_ring3";
-    const std::string mergedDir = out_path + "/pni_raw_node1";
+    const std::string ring0Dir = path_pre + "/pni_raw_ring" + std::to_string(ringA);
+    const std::string ring1Dir = path_pre + "/pni_raw_ring" + std::to_string(ringB);
+    const std::string mergedDir = out_path + "/" + outNodeDirName;
 
-    std::cout << "\n========== Merge 9120 Two-Ring Raw (0+1) ==========\n"
+    std::cout << "\n========== Merge 9120 Two-Ring Raw ("
+              << ringA << "+" << ringB << ") ==========\n"
               << std::endl;
-    std::cout << "Ring0:  " << ring0Dir << std::endl;
-    std::cout << "Ring1:  " << ring1Dir << std::endl;
+    std::cout << "Ring" << ringA << ":  " << ring0Dir << std::endl;
+    std::cout << "Ring" << ringB << ":  " << ring1Dir << std::endl;
     std::cout << "Output: " << mergedDir << std::endl;
+    std::cout << "Strategy: 2 input files per clock -> 2 output files (~single-ring size)" << std::endl;
 
-    const bool ok = merge_rawdata_dirs_by_clock({ring0Dir, ring1Dir}, mergedDir, 576);
+    const bool ok = merge_rawdata_dirs_by_clock(
+        {ring0Dir, ring1Dir},
+        mergedDir,
+        576,
+        "pniRaw-",
+        ".bin",
+        true,
+        2);
     std::cout << "Merge result: " << (ok ? "OK" : "FAILED") << std::endl;
     std::cout << "================================================\n"
               << std::endl;
     return ok;
 }
 
+/** @brief 合并 Node0（ring0+ring1 → pni_raw_node0）与 Node1（ring2+ring3 → pni_raw_node1） */
+bool merge_9120_both_nodes_rawdata()
+{
+    const bool ok0 = merge_9120_two_ring_rawdata(0, 1, "pni_raw_node0");
+    const bool ok1 = merge_9120_two_ring_rawdata(2, 3, "pni_raw_node1");
+    return ok0 && ok1;
+}
+
 /**
  * @brief 9120 前两环（ring0+ring1）R2S 实验（读取已合并的 pni_raw_node0）
  *
- * 前置：请先调用 merge_9120_two_ring_rawdata()（或等价合并）。
+ * 前置：请先调用 merge_9120_two_ring_rawdata(ringA, ringB, outDir)（或 merge_9120_both_nodes_rawdata）。
  * 校正：两个大环均复用 cali_path（930 单环校正）。
  * 通道：channelIndices = 0..287，channelNums = 576。
  */
@@ -622,8 +643,8 @@ void test_9120_two_ring_r2s(bool saveSinglesFile = true)
     std::cout << "\n========== Testing 9120 Two-Ring (0+1) R2S ==========\n"
               << std::endl;
 
-    const std::string mergedDir = out_path + "/pni_raw_node1";
-    const std::string resultDir = out_path + "/pni_singles_node1";
+    const std::string mergedDir = out_path + "/pni_raw_node0";
+    const std::string resultDir = out_path + "/pni_singles_node0";
 
     std::cout << "Merged raw: " << mergedDir << std::endl;
     std::cout << "Result:     " << resultDir << std::endl;
@@ -633,13 +654,13 @@ void test_9120_two_ring_r2s(bool saveSinglesFile = true)
     if (!fs::exists(mergedDir) || !fs::is_directory(mergedDir))
     {
         std::cerr << "Merged raw dir not found: " << mergedDir
-                  << "\nPlease run merge_9120_two_ring_rawdata() first." << std::endl;
+                  << "\nPlease run merge_9120_two_ring_rawdata(ringA, ringB, outDir) first." << std::endl;
         return;
     }
 
     std::vector<uint16_t> channelIndices;
     channelIndices.reserve(288);
-    for (uint16_t ch = 288; ch < 576; ++ch)
+    for (uint16_t ch = 0; ch < 288; ++ch)
     {
         channelIndices.push_back(ch);
     }
@@ -648,7 +669,7 @@ void test_9120_two_ring_r2s(bool saveSinglesFile = true)
         "",
         resultDir,
         {cali_path, cali_path},
-        "singles_9120_node1",
+        "singles_9120_node0",
         channelIndices,
         4);
 
@@ -1111,14 +1132,14 @@ int main(int argc, char **argv)
     // // 工具调用，批量转换50100原始数据
     // convert_50100_rawdata_batch_process(3);
 
-     constexpr bool kSaveSinglesFile = false;
+     constexpr bool kSaveSinglesFile = true;
     // //单环测试（930） 
     // std::cout << "[Test 3] Testing 50100 callback mode..." << std::endl;
     // test_50100_930_callback(kSaveSinglesFile);
 
     // //9120：合并与 R2S 分开调用（合并只需跑一次，之后可反复跑 R2S）
-    // std::cout << "[Tool 9120] Merge ring0+ring1 rawdata..." << std::endl;
-    // merge_9120_two_ring_rawdata();
+    // std::cout << "[Tool 9120] Merge both nodes rawdata..." << std::endl;
+    // merge_9120_both_nodes_rawdata();
 
     // 9120： 两环R2S 测试
     std::cout << "[Test 9120] Two-ring (0+1) R2S..." << std::endl;

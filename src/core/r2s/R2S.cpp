@@ -1204,9 +1204,18 @@ namespace openpni::distributed::r2s
             {
                 return std::nullopt;
             }
+            const std::string clockBody = filename.substr(start, end - start);
+            const size_t partSep = clockBody.find_first_of("_-");
+            const std::string clockDigits = partSep == std::string::npos
+                                                ? clockBody
+                                                : clockBody.substr(0, partSep);
+            if (clockDigits.empty())
+            {
+                return std::nullopt;
+            }
             try
             {
-                return static_cast<uint64_t>(std::stoull(filename.substr(start, end - start)));
+                return static_cast<uint64_t>(std::stoull(clockDigits));
             }
             catch (...)
             {

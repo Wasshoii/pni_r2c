@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <deque>
 #include <exception>
+#include <filesystem>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -117,8 +118,9 @@ namespace openpni::distributed::grpcnode
                 }
 
                 grpc::ChannelArguments channelArgs;
-                channelArgs.SetInt("grpc.max_receive_message_length", 100 * 1024 * 1024);
-                channelArgs.SetInt("grpc.max_send_message_length", 100 * 1024 * 1024);
+                // Allow large singles chunks (still chunked in sendBatch to stay under this).
+                channelArgs.SetInt("grpc.max_receive_message_length", 256 * 1024 * 1024);
+                channelArgs.SetInt("grpc.max_send_message_length", 256 * 1024 * 1024);
                 channelArgs.SetInt("grpc.http2.bdp_probe", 1);
                 channelArgs.SetString("grpc.optimization_target", "throughput");
                 channelArgs.SetInt("grpc.keepalive_time_ms", 20000);
@@ -439,6 +441,7 @@ namespace openpni::distributed::grpcnode
                             return;
                         }
                     }
+                    return;
                 }
                 catch (const std::exception &e)
                 {
@@ -459,6 +462,46 @@ namespace openpni::distributed::grpcnode
             }
 
             bool sendBatch(const std::vector<SegmentPayload> &batch)
+            {
+                if (batch.empty())
+                {
+                    return true;
+                }
+
+                // 9120 two-ring nodes can emit tens of millions of singles per segment.
+                // Keep each gRPC message under the configured max (~100MiB default).
+                constexpr size_t kMaxSinglesPerMessage = 400000;
+
+                for (const auto &payload : batch)
+                {
+                    const size_t total = payload.singles.size();
+                    if (total == 0)
+                    {
+                        continue;
+                    }
+
+                    size_t offset = 0;
+                    while (offset < total)
+                    {
+                        const size_t count = std::min(kMaxSinglesPerMessage, total - offset);
+                        SegmentPayload chunk;
+                        chunk.clockMs = payload.clockMs;
+                        chunk.durationMs = payload.durationMs;
+                        chunk.singles.assign(
+                            payload.singles.begin() + static_cast<std::ptrdiff_t>(offset),
+                            payload.singles.begin() + static_cast<std::ptrdiff_t>(offset + count));
+
+                        if (!sendOneMessage({std::move(chunk)}))
+                        {
+                            return false;
+                        }
+                        offset += count;
+                    }
+                }
+                return true;
+            }
+
+            bool sendOneMessage(const std::vector<SegmentPayload> &batch)
             {
                 if (batch.empty())
                 {
@@ -717,7 +760,18 @@ namespace openpni::distributed::grpcnode
 #ifdef DEBUG
         const auto t0 = std::chrono::steady_clock::now();
 #endif
-        const bool r2sSuccess = r2s::processR2S(config);
+        bool r2sSuccess = false;
+        if (std::filesystem::is_directory(config.rawdataPath))
+        {
+            const std::string rawDir = config.rawdataPath;
+            LOG(INFO) << "[Node " << m_init.nodeId
+                      << "] rawdataPath is directory, using processR2SDirectory: " << rawDir;
+            r2sSuccess = r2s::processR2SDirectory(config, rawDir, false);
+        }
+        else
+        {
+            r2sSuccess = r2s::processR2S(config);
+        }
         const bool streamSuccess = sender.stop();
 #ifdef DEBUG
         const auto t1 = std::chrono::steady_clock::now();

@@ -1592,10 +1592,14 @@ bool convert_RS_listmode_to_single(const std::string &rsPath,
 }
 
 /**
- * @brief 将多个环目录中同 clock 的 pniRaw-<clock>.bin 合并为整机通道头的单文件
+ * @brief 将多个环目录中同 clock 的 pniRaw-<clock>.bin 合并为整机通道头的多个输出文件
  *
- * 对每个共同的 startClock：按 segment 下标对齐，把各输入文件同一段的包拼接成一个输出段。
+ * 对每个共同的 startClock：读取各输入文件全部 segment 的包，按包内时间戳（T0）与采集顺序排序，
+ * 再均匀切分为 outputPartsPerClock 个输出文件（默认与输入目录数相同，合并两环即生成两个文件）。
+ * 每个输出文件体量尽量接近单环源文件（约 1:1 拆分合并后的总包数）。
  * 输出文件头 channelNum 使用 outputChannelNum（9120 推荐 576），包内全局通道号保持不变。
+ *
+ * 输出命名：单文件时为 pniRaw-<clock>.bin；多文件时为 pniRaw-<clock>_<part>.bin（part 从 0 起）。
  *
  * @param inputDirs 输入目录列表（例如 ring0、ring1）
  * @param outputDir 输出目录（例如 pni_raw_node0）
@@ -1603,6 +1607,7 @@ bool convert_RS_listmode_to_single(const std::string &rsPath,
  * @param namePrefix 文件名前缀（默认 "pniRaw-"）
  * @param nameSuffix 文件名后缀（默认 ".bin"）
  * @param forceReplace 输出已存在时是否覆盖
+ * @param outputPartsPerClock 每个 clock 切分的输出文件数；0 表示与 inputDirs.size() 相同
  */
 bool merge_rawdata_dirs_by_clock(
     const std::vector<std::string> &inputDirs,
@@ -1610,8 +1615,22 @@ bool merge_rawdata_dirs_by_clock(
     uint16_t outputChannelNum = 576,
     const std::string &namePrefix = "pniRaw-",
     const std::string &nameSuffix = ".bin",
-    bool forceReplace = true)
+    bool forceReplace = true,
+    uint32_t outputPartsPerClock = 0)
 {
+    using openpni::device::bdm50100::UDP_UNUSED_SIZE;
+
+    struct MergedPacketRecord
+    {
+        uint64_t sortKey = 0;
+        uint32_t sortSub = 0;
+        uint64_t segmentClockMs = 0;
+        uint64_t segmentDurationMs = 0;
+        uint16_t length = 0;
+        uint16_t channel = 0;
+        std::vector<uint8_t> bytes;
+    };
+
     auto parse_clock = [&](const std::string &name) -> std::optional<uint64_t> {
         if (name.size() < namePrefix.size() + nameSuffix.size())
         {
@@ -1631,9 +1650,18 @@ bool merge_rawdata_dirs_by_clock(
         {
             return std::nullopt;
         }
+        const std::string clockBody = name.substr(start, end - start);
+        const size_t partSep = clockBody.find('_');
+        const std::string clockDigits = partSep == std::string::npos
+                                            ? clockBody
+                                            : clockBody.substr(0, partSep);
+        if (clockDigits.empty())
+        {
+            return std::nullopt;
+        }
         try
         {
-            return static_cast<uint64_t>(std::stoull(name.substr(start, end - start)));
+            return static_cast<uint64_t>(std::stoull(clockDigits));
         }
         catch (...)
         {
@@ -1641,26 +1669,103 @@ bool merge_rawdata_dirs_by_clock(
         }
     };
 
-    auto append_view_packets = [](const openpni::RawDataView &view,
-                                  std::vector<uint8_t> &data,
-                                  std::vector<uint16_t> &length,
-                                  std::vector<uint64_t> &offset,
-                                  std::vector<uint16_t> &channel) {
-        if (!view.count || !view.data || !view.offset || !view.length || !view.channel)
+    auto packet_sort_key_from_udp = [](const uint8_t *packet, uint16_t packetLen) -> uint64_t {
+        if (!packet || packetLen < UDP_UNUSED_SIZE + 8)
         {
-            return;
+            return 0;
         }
-        for (uint64_t i = 0; i < view.count; ++i)
+        const uint8_t *raw = packet + UDP_UNUSED_SIZE;
+        uint64_t t0 = 0;
+        for (int i = 2; i <= 7; ++i)
         {
-            const uint64_t packetStart = view.offset[i];
-            const uint16_t packetLength = view.length[i];
+            t0 = (t0 << 8) | static_cast<uint64_t>(raw[i]);
+        }
+        return t0;
+    };
+
+    auto count_packets_in_file = [](const std::string &path) -> uint64_t {
+        openpni::distributed::coreio::RawDataFileReader reader;
+        reader.Open(path);
+        const auto &info = reader.Info();
+        uint64_t total = 0;
+        for (uint32_t segIdx = 0; segIdx < info.segmentNum; ++segIdx)
+        {
+            auto segment = reader.ReadSegment(segIdx, segIdx + 1);
+            total += segment.View().count;
+        }
+        return total;
+    };
+
+    auto make_output_path = [&](uint64_t clock, uint32_t part, uint32_t parts) -> fs::path {
+        std::ostringstream oss;
+        oss << namePrefix << clock;
+        if (parts > 1)
+        {
+            oss << '_' << part;
+        }
+        oss << nameSuffix;
+        return fs::path(outputDir) / oss.str();
+    };
+
+    auto write_packet_range = [&](const std::vector<MergedPacketRecord> &records,
+                                  size_t begin,
+                                  size_t end,
+                                  const fs::path &outputPath,
+                                  uint64_t defaultClockMs) -> bool {
+        if (begin >= end)
+        {
+            return true;
+        }
+
+        std::vector<uint8_t> data;
+        std::vector<uint16_t> length;
+        std::vector<uint64_t> offset;
+        std::vector<uint16_t> channel;
+
+        uint64_t clockMs = defaultClockMs;
+        uint64_t durationMs = 0;
+        for (size_t i = begin; i < end; ++i)
+        {
+            const auto &rec = records[i];
+            if (rec.segmentClockMs != 0)
+            {
+                clockMs = rec.segmentClockMs;
+            }
+            durationMs = std::max(durationMs, rec.segmentDurationMs);
+
             offset.push_back(data.size());
-            length.push_back(packetLength);
-            channel.push_back(view.channel[i]);
-            data.insert(data.end(),
-                        view.data + packetStart,
-                        view.data + packetStart + packetLength);
+            length.push_back(rec.length);
+            channel.push_back(rec.channel);
+            data.insert(data.end(), rec.bytes.begin(), rec.bytes.end());
         }
+
+        openpni::distributed::coreio::RawDataWriterOptions options;
+        options.channelNum = outputChannelNum;
+        options.channelTypeNames.assign(outputChannelNum, "BDM50100");
+        options.io.enableOverrideExistingFile = forceReplace;
+
+        openpni::distributed::coreio::RawDataFileWriter writer(std::move(options));
+        writer.Open(outputPath.string());
+
+        openpni::RawDataView mergedView;
+        mergedView.data = data.data();
+        mergedView.length = length.data();
+        mergedView.offset = offset.data();
+        mergedView.channel = channel.data();
+        mergedView.count = channel.size();
+        mergedView.clock_ms = clockMs;
+        mergedView.duration_ms = durationMs;
+        mergedView.channelNum = outputChannelNum;
+
+        if (!writer.AppendSegment(mergedView))
+        {
+            std::cerr << "Failed to write merged file " << outputPath << std::endl;
+            return false;
+        }
+
+        std::cout << "  -> " << outputPath << " packets=" << channel.size()
+                  << " clock=" << clockMs << " duration_ms=" << durationMs << std::endl;
+        return true;
     };
 
     try
@@ -1675,6 +1780,9 @@ bool merge_rawdata_dirs_by_clock(
             std::cerr << "merge_rawdata_dirs_by_clock: outputChannelNum must be > 0" << std::endl;
             return false;
         }
+
+        const uint32_t partsPerClock =
+            outputPartsPerClock > 0 ? outputPartsPerClock : static_cast<uint32_t>(inputDirs.size());
 
         // clock -> 各目录下的文件路径（与 inputDirs 对齐，缺失则为空）
         std::map<uint64_t, std::vector<std::string>> clockToPaths;
@@ -1717,7 +1825,8 @@ bool merge_rawdata_dirs_by_clock(
 
         fs::create_directories(outputDir);
 
-        size_t mergedFiles = 0;
+        size_t mergedClockGroups = 0;
+        size_t mergedOutputFiles = 0;
         size_t skippedIncomplete = 0;
         for (const auto &[clock, paths] : clockToPaths)
         {
@@ -1737,96 +1846,136 @@ bool merge_rawdata_dirs_by_clock(
                 continue;
             }
 
-            const fs::path outputPath = fs::path(outputDir) / (namePrefix + std::to_string(clock) + nameSuffix);
-            if (fs::exists(outputPath) && !forceReplace)
+            std::vector<MergedPacketRecord> records;
+            for (size_t dirIdx = 0; dirIdx < paths.size(); ++dirIdx)
             {
-                std::cerr << "Output exists, skip: " << outputPath << std::endl;
+                openpni::distributed::coreio::RawDataFileReader reader;
+                reader.Open(paths[dirIdx]);
+                const auto &info = reader.Info();
+                for (uint32_t segIdx = 0; segIdx < info.segmentNum; ++segIdx)
+                {
+                    auto segment = reader.ReadSegment(segIdx, segIdx + 1);
+                    auto view = segment.View();
+                    if (!view.count || !view.data || !view.offset || !view.length || !view.channel)
+                    {
+                        continue;
+                    }
+
+                    const uint64_t segClockMs = view.clock_ms != 0 ? view.clock_ms : clock;
+                    const uint64_t segDurationMs = view.duration_ms;
+
+                    for (uint64_t pktIdx = 0; pktIdx < view.count; ++pktIdx)
+                    {
+                        const uint64_t packetStart = view.offset[pktIdx];
+                        const uint16_t packetLength = view.length[pktIdx];
+
+                        MergedPacketRecord rec;
+                        rec.segmentClockMs = segClockMs;
+                        rec.segmentDurationMs = segDurationMs;
+                        rec.length = packetLength;
+                        rec.channel = view.channel[pktIdx];
+                        rec.bytes.assign(view.data + packetStart,
+                                         view.data + packetStart + packetLength);
+
+                        const uint64_t t0Key = packet_sort_key_from_udp(rec.bytes.data(), rec.length);
+                        rec.sortKey = t0Key != 0 ? t0Key : segClockMs;
+                        rec.sortSub = static_cast<uint32_t>(dirIdx * 1000000U + segIdx * 1000U +
+                                                            static_cast<uint32_t>(pktIdx));
+
+                        records.push_back(std::move(rec));
+                    }
+                }
+            }
+
+            if (records.empty())
+            {
+                std::cerr << "Skip clock=" << clock << ": no packets collected" << std::endl;
                 continue;
             }
 
-            std::vector<openpni::distributed::coreio::RawDataFileReader> readers(paths.size());
-            uint32_t maxSegments = 0;
-            for (size_t i = 0; i < paths.size(); ++i)
+            std::sort(records.begin(), records.end(),
+                      [](const MergedPacketRecord &a, const MergedPacketRecord &b)
+                      {
+                          if (a.sortKey != b.sortKey)
+                          {
+                              return a.sortKey < b.sortKey;
+                          }
+                          return a.sortSub < b.sortSub;
+                      });
+
+            const uint64_t referencePacketsPerInput = count_packets_in_file(paths.front());
+            const uint64_t totalPackets = records.size();
+            const uint32_t effectiveParts = std::max<uint32_t>(
+                1U,
+                partsPerClock > 0 ? partsPerClock
+                                  : static_cast<uint32_t>(inputDirs.size()));
+
+            std::cout << "Merge clock=" << clock
+                      << " inputPackets~=" << referencePacketsPerInput
+                      << " mergedPackets=" << totalPackets
+                      << " outputParts=" << effectiveParts << std::endl;
+
+            size_t begin = 0;
+            for (uint32_t part = 0; part < effectiveParts; ++part)
             {
-                readers[i].Open(paths[i]);
-                maxSegments = std::max(maxSegments, readers[i].Info().segmentNum);
-            }
-
-            openpni::distributed::coreio::RawDataWriterOptions options;
-            options.channelNum = outputChannelNum;
-            options.channelTypeNames.assign(outputChannelNum, "BDM50100");
-            options.io.enableOverrideExistingFile = forceReplace;
-
-            openpni::distributed::coreio::RawDataFileWriter writer(std::move(options));
-            writer.Open(outputPath.string());
-
-            uint64_t totalPackets = 0;
-            for (uint32_t segIdx = 0; segIdx < maxSegments; ++segIdx)
-            {
-                std::vector<uint8_t> data;
-                std::vector<uint16_t> length;
-                std::vector<uint64_t> offset;
-                std::vector<uint16_t> channel;
-                uint64_t clockMs = clock;
-                uint64_t durationMs = 0;
-                bool any = false;
-
-                for (size_t i = 0; i < readers.size(); ++i)
+                const size_t remaining = records.size() - begin;
+                const size_t partsLeft = static_cast<size_t>(effectiveParts - part);
+                size_t chunkSize = remaining / partsLeft;
+                if (referencePacketsPerInput > 0 && part + 1 < effectiveParts)
                 {
-                    if (segIdx >= readers[i].Info().segmentNum)
-                    {
-                        continue;
-                    }
-                    auto segment = readers[i].ReadSegment(segIdx, segIdx + 1);
-                    auto view = segment.View();
-                    if (!view.count || !view.data)
-                    {
-                        continue;
-                    }
-                    if (!any)
-                    {
-                        clockMs = view.clock_ms != 0 ? view.clock_ms : clock;
-                        durationMs = view.duration_ms;
-                        any = true;
-                    }
-                    append_view_packets(view, data, length, offset, channel);
+                    chunkSize = std::min(chunkSize, static_cast<size_t>(referencePacketsPerInput));
+                }
+                if (chunkSize == 0 && remaining > 0)
+                {
+                    chunkSize = remaining;
                 }
 
-                if (!any || channel.empty())
+                const size_t end = std::min(begin + chunkSize, records.size());
+                const fs::path outputPath = make_output_path(clock, part, effectiveParts);
+                if (fs::exists(outputPath) && !forceReplace)
                 {
+                    std::cerr << "Output exists, skip: " << outputPath << std::endl;
+                    begin = end;
                     continue;
                 }
 
-                openpni::RawDataView mergedView;
-                mergedView.data = data.data();
-                mergedView.length = length.data();
-                mergedView.offset = offset.data();
-                mergedView.channel = channel.data();
-                mergedView.count = channel.size();
-                mergedView.clock_ms = clockMs;
-                mergedView.duration_ms = durationMs;
-                mergedView.channelNum = outputChannelNum;
-
-                if (!writer.AppendSegment(mergedView))
+                if (!write_packet_range(records, begin, end, outputPath, clock))
                 {
-                    std::cerr << "Failed to write merged segment " << segIdx
-                              << " for clock=" << clock << std::endl;
                     return false;
                 }
-                totalPackets += channel.size();
+                begin = end;
+                ++mergedOutputFiles;
             }
 
-            std::cout << "Merged clock=" << clock
-                      << " segments<=" << maxSegments
-                      << " packets=" << totalPackets
-                      << " -> " << outputPath << std::endl;
-            ++mergedFiles;
+            if (begin != records.size())
+            {
+                std::cerr << "Warning: clock=" << clock << " leftover packets after split: "
+                          << (records.size() - begin) << std::endl;
+            }
+
+            if (effectiveParts > 1)
+            {
+                const fs::path legacyPath = fs::path(outputDir) / (namePrefix + std::to_string(clock) + nameSuffix);
+                std::error_code removeEc;
+                if (fs::exists(legacyPath, removeEc))
+                {
+                    fs::remove(legacyPath, removeEc);
+                    if (!removeEc)
+                    {
+                        std::cout << "  removed legacy merged file: " << legacyPath << std::endl;
+                    }
+                }
+            }
+
+            ++mergedClockGroups;
         }
 
-        std::cout << "merge_rawdata_dirs_by_clock done: merged=" << mergedFiles
+        std::cout << "merge_rawdata_dirs_by_clock done: clockGroups=" << mergedClockGroups
+                  << ", outputFiles=" << mergedOutputFiles
                   << ", skippedIncomplete=" << skippedIncomplete
+                  << ", partsPerClock=" << partsPerClock
                   << ", outputDir=" << outputDir << std::endl;
-        return mergedFiles > 0;
+        return mergedClockGroups > 0;
     }
     catch (const std::exception &e)
     {

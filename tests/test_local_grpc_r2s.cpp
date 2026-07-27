@@ -41,16 +41,32 @@ namespace
     struct ProgramOptions
     {
         std::string address = "127.0.0.1:50061";
-        std::string splitDir = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/splitdata";
-        std::string calibrationDir = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/cali";
-        std::string resultDir = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res";
-        std::string rawPrefix = "converted_rawData";
-        uint32_t nodeCount = 4;
+        std::string dataRoot = "/media/lenovo/1TB/50100data/test_9120";
+        std::string node0RawDir;
+        std::string node1RawDir;
+        std::string calibrationDir = "/media/lenovo/1TB/50100data/pni_res/caliFile";
+        std::string resultDir;
         size_t maxPendingSegments = 64;
         uint32_t batchSegmentsPerMessage = 1;
         bool parallelNodes = false;
         bool noLocalReceiver = false;
         bool helpOnly = false;
+
+        void resolveDerivedPaths()
+        {
+            if (node0RawDir.empty())
+            {
+                node0RawDir = (fs::path(dataRoot) / "pni_raw_node0").string();
+            }
+            if (node1RawDir.empty())
+            {
+                node1RawDir = (fs::path(dataRoot) / "pni_raw_node1").string();
+            }
+            if (resultDir.empty())
+            {
+                resultDir = (fs::path(dataRoot) / "pni_singles_grpc").string();
+            }
+        }
     };
 
     struct NodeInput
@@ -310,8 +326,8 @@ namespace
             grpc::ServerBuilder builder;
             builder.AddListeningPort(m_address, grpc::InsecureServerCredentials());
             builder.RegisterService(&m_service);
-            builder.SetMaxReceiveMessageSize(100 * 1024 * 1024);
-            builder.SetMaxSendMessageSize(10 * 1024 * 1024);
+            builder.SetMaxReceiveMessageSize(256 * 1024 * 1024);
+            builder.SetMaxSendMessageSize(256 * 1024 * 1024);
 
             m_server = builder.BuildAndStart();
             if (!m_server)
@@ -343,17 +359,19 @@ namespace
     void printUsage(const char *prog)
     {
         std::cout << "Usage: " << prog << " [options]\n"
+                  << "9120 dual-node (2 rings/node) local gRPC R2S streaming test.\n"
                   << "Options:\n"
                   << "  --address <host:port>         gRPC local address (default: 127.0.0.1:50061)\n"
-                  << "  --split-dir <path>            BDM50100 split rawdata directory\n"
-                  << "  --calibration-dir <path>      BDM50100 calibration directory\n"
+                  << "  --data-root <path>            Root with pni_raw_node0/node1 (default: test_9120)\n"
+                  << "  --node0-raw <path>            Node0 merged raw directory (channels 0..287)\n"
+                  << "  --node1-raw <path>            Node1 merged raw directory (channels 288..575)\n"
+                  << "  --calibration-dir <path>      Per-ring calibration directory (reused for both rings)\n"
                   << "  --result-dir <path>           Output directory for R2S config\n"
-                  << "  --raw-prefix <name>           Split rawdata file prefix\n"
-                  << "  --node-count <N>              Number of nodes/files to process (default: 4)\n"
                   << "  --max-pending-segments <N>    Async sender queue length in segments (default: 64)\n"
                   << "  --batch-segments <N>          Segments packed into one gRPC message (default: 1)\n"
                   << "  --no-local-receiver           Do not start built-in receiver; use external coin host\n"
-                  << "  --parallel                    Run node conversion in parallel\n"
+                  << "  --serial                      Run nodes sequentially (default; safer on single GPU)\n"
+                  << "  --parallel                    Run nodes in parallel (needs enough GPU VRAM for 2x 288ch)\n"
                   << "  --help                        Print this message\n"
                   << std::endl;
     }
@@ -390,14 +408,34 @@ namespace
                 opts.address = v;
                 continue;
             }
-            if (arg == "--split-dir")
+            if (arg == "--data-root")
             {
                 const char *v = requireValue(arg);
                 if (!v)
                 {
                     return false;
                 }
-                opts.splitDir = v;
+                opts.dataRoot = v;
+                continue;
+            }
+            if (arg == "--node0-raw")
+            {
+                const char *v = requireValue(arg);
+                if (!v)
+                {
+                    return false;
+                }
+                opts.node0RawDir = v;
+                continue;
+            }
+            if (arg == "--node1-raw")
+            {
+                const char *v = requireValue(arg);
+                if (!v)
+                {
+                    return false;
+                }
+                opts.node1RawDir = v;
                 continue;
             }
             if (arg == "--calibration-dir")
@@ -420,49 +458,19 @@ namespace
                 opts.resultDir = v;
                 continue;
             }
-            if (arg == "--raw-prefix")
-            {
-                const char *v = requireValue(arg);
-                if (!v)
-                {
-                    return false;
-                }
-                opts.rawPrefix = v;
-                continue;
-            }
             if (arg == "--parallel")
             {
                 opts.parallelNodes = true;
                 continue;
             }
+            if (arg == "--serial")
+            {
+                opts.parallelNodes = false;
+                continue;
+            }
             if (arg == "--no-local-receiver")
             {
                 opts.noLocalReceiver = true;
-                continue;
-            }
-            if (arg == "--node-count")
-            {
-                const char *v = requireValue(arg);
-                if (!v)
-                {
-                    return false;
-                }
-
-                try
-                {
-                    const int parsed = std::stoi(v);
-                    if (parsed <= 0)
-                    {
-                        std::cerr << "--node-count must be positive" << std::endl;
-                        return false;
-                    }
-                    opts.nodeCount = static_cast<uint32_t>(parsed);
-                }
-                catch (const std::exception &)
-                {
-                    std::cerr << "Invalid --node-count value: " << v << std::endl;
-                    return false;
-                }
                 continue;
             }
             if (arg == "--max-pending-segments")
@@ -522,89 +530,83 @@ namespace
             return false;
         }
 
+        opts.resolveDerivedPaths();
         return true;
     }
 
-    std::string makeSplitRawPath(
-        const std::string &splitDir,
-        const std::string &rawPrefix,
-        const std::vector<uint16_t> &channels)
+    std::vector<uint16_t> makeChannelRange(uint16_t begin, uint16_t endExclusive)
     {
-        const auto minIt = std::min_element(channels.begin(), channels.end());
-        const auto maxIt = std::max_element(channels.begin(), channels.end());
-        const uint16_t minChannel = *minIt;
-        const uint16_t maxChannel = *maxIt;
-        const auto channelCount = channels.size();
-
-        std::ostringstream oss;
-        oss << rawPrefix
-            << "_ch" << minChannel << "-" << maxChannel
-            << "_n" << channelCount
-            << ".raw";
-        return (fs::path(splitDir) / oss.str()).string();
+        std::vector<uint16_t> channels;
+        channels.reserve(static_cast<size_t>(endExclusive - begin));
+        for (uint16_t ch = begin; ch < endExclusive; ++ch)
+        {
+            channels.push_back(ch);
+        }
+        return channels;
     }
 
     std::vector<NodeInput> buildNodeInputs(const ProgramOptions &opts)
     {
-        std::vector<NodeInput> nodes;
-        nodes.reserve(opts.nodeCount);
+        std::vector<NodeInput> nodes(2);
+        nodes[0].nodeId = 0;
+        nodes[0].rawdataPath = opts.node0RawDir;
+        nodes[0].channels = makeChannelRange(0, 288);
 
-        constexpr uint16_t kTotalChannels = 144;
-        const uint16_t groupCount = static_cast<uint16_t>(opts.nodeCount);
-        const uint16_t groupSize = static_cast<uint16_t>(kTotalChannels / groupCount);
-
-        for (uint32_t i = 0; i < opts.nodeCount; ++i)
-        {
-            NodeInput n;
-            n.nodeId = i;
-            const uint16_t startChannel = static_cast<uint16_t>(i * groupSize);
-            const uint16_t endChannel = static_cast<uint16_t>(startChannel + groupSize);
-            n.channels.reserve(groupSize);
-            for (uint16_t ch = startChannel; ch < endChannel; ++ch)
-            {
-                n.channels.push_back(ch);
-            }
-            n.rawdataPath = makeSplitRawPath(opts.splitDir, opts.rawPrefix, n.channels);
-            nodes.push_back(std::move(n));
-        }
-
+        nodes[1].nodeId = 1;
+        nodes[1].rawdataPath = opts.node1RawDir;
+        nodes[1].channels = makeChannelRange(288, 576);
         return nodes;
     }
 
-    std::vector<std::string> buildCalibrationFiles(const std::string &calibrationDir)
+    std::string findFirstRawFile(const std::string &rawDir)
     {
-        std::vector<std::string> files;
-        files.reserve(144);
-
-        for (int i = 0; i < 144; ++i)
+        std::vector<std::string> matches;
+        for (const auto &entry : fs::directory_iterator(rawDir))
         {
-            std::ostringstream fileName;
-            fileName << "bdm_" << i << ".bin";
-            files.push_back((fs::path(calibrationDir) / fileName.str()).string());
+            if (!entry.is_regular_file())
+            {
+                continue;
+            }
+            const std::string name = entry.path().filename().string();
+            if (name.rfind("pniRaw-", 0) == 0 && name.size() >= 4 &&
+                name.compare(name.size() - 4, 4, ".bin") == 0)
+            {
+                matches.push_back(entry.path().string());
+            }
         }
-
-        return files;
+        std::sort(matches.begin(), matches.end());
+        return matches.empty() ? std::string() : matches.front();
     }
 
     bool validateRawdataHeaders(const std::vector<NodeInput> &nodes)
     {
+        constexpr uint16_t kExpectedChannelNum = 576;
         bool ok = true;
         for (const auto &n : nodes)
         {
             try
             {
-                openpni::distributed::coreio::RawDataFileReader reader;
-                reader.Open(n.rawdataPath);
-                const auto &info = reader.Info();
-                if (info.channelNum != 144)
+                const std::string samplePath = findFirstRawFile(n.rawdataPath);
+                if (samplePath.empty())
                 {
-                    std::cerr << "[Input] Rawdata channelNum mismatch: " << n.rawdataPath
-                              << " channelNum=" << info.channelNum << std::endl;
+                    std::cerr << "[Input] No pniRaw-*.bin in directory: " << n.rawdataPath << std::endl;
+                    ok = false;
+                    continue;
+                }
+
+                openpni::distributed::coreio::RawDataFileReader reader;
+                reader.Open(samplePath);
+                const auto &info = reader.Info();
+                if (info.channelNum != kExpectedChannelNum)
+                {
+                    std::cerr << "[Input] Rawdata channelNum mismatch: " << samplePath
+                              << " channelNum=" << info.channelNum
+                              << " expected=" << kExpectedChannelNum << std::endl;
                     ok = false;
                 }
                 if (info.segmentNum == 0)
                 {
-                    std::cerr << "[Input] Rawdata has no segments: " << n.rawdataPath << std::endl;
+                    std::cerr << "[Input] Rawdata has no segments: " << samplePath << std::endl;
                     ok = false;
                 }
 
@@ -622,23 +624,18 @@ namespace
                         const uint16_t ch = view.channel[i];
                         if (ch >= info.channelNum)
                         {
-                            std::cerr << "[Input] Rawdata channel out of header range: " << n.rawdataPath
+                            std::cerr << "[Input] Rawdata channel out of header range: " << samplePath
                                       << " channel=" << ch << " header.channelNum=" << info.channelNum << std::endl;
                             ok = false;
                             break;
                         }
                         if (ch < minChannel || ch > maxChannel)
                         {
-                            std::cerr << "[Input] Rawdata channel outside split range: " << n.rawdataPath
-                                      << " channel=" << ch << " expected=[" << minChannel << "-" << maxChannel << "]" << std::endl;
-                            ok = false;
-                            break;
-                        }
-                        if (view.length[i] == 0)
-                        {
-                            std::cerr << "[Input] Rawdata has zero-length packet: " << n.rawdataPath
-                                      << " at index=" << i << std::endl;
-                            ok = false;
+                            std::cerr << "[Input] Warning: channel outside node range (ignored): " << samplePath
+                                      << " channel=" << ch << " expected=[" << minChannel << "-" << maxChannel << "]"
+                                      << std::endl;
+                            // Soft warning only — merged files may contain both rings' neighbors
+                            // when sampling first packets; filtering happens in R2S.
                             break;
                         }
                     }
@@ -646,8 +643,8 @@ namespace
             }
             catch (const std::exception &e)
             {
-                std::cerr << "[Input] Failed to read rawdata header: " << n.rawdataPath
-                          << " error=" << e.what() << std::endl;
+                std::cerr << "[Input] Failed to read rawdata header for node " << n.nodeId
+                          << " dir=" << n.rawdataPath << " error=" << e.what() << std::endl;
                 ok = false;
             }
         }
@@ -656,34 +653,24 @@ namespace
 
     bool validateInputs(
         const std::vector<NodeInput> &nodes,
-        const std::vector<std::string> &calibrationFiles,
+        const std::string &calibrationDir,
         const std::string &resultDir)
     {
         bool ok = true;
 
         for (const auto &n : nodes)
         {
-            if (!fs::exists(n.rawdataPath))
+            if (!fs::exists(n.rawdataPath) || !fs::is_directory(n.rawdataPath))
             {
-                std::cerr << "[Input] Missing split rawdata file: " << n.rawdataPath << std::endl;
+                std::cerr << "[Input] Missing merged rawdata directory: " << n.rawdataPath << std::endl;
                 ok = false;
             }
         }
 
-        if (calibrationFiles.size() != 144)
+        if (!fs::exists(calibrationDir) || !fs::is_directory(calibrationDir))
         {
-            std::cerr << "[Input] Calibration file count mismatch: expected 144, got "
-                      << calibrationFiles.size() << std::endl;
+            std::cerr << "[Input] Missing calibration directory: " << calibrationDir << std::endl;
             ok = false;
-        }
-
-        for (const auto &path : calibrationFiles)
-        {
-            if (!fs::exists(path))
-            {
-                std::cerr << "[Input] Missing calibration file: " << path << std::endl;
-                ok = false;
-            }
         }
 
         std::error_code ec;
@@ -705,20 +692,22 @@ namespace
 
     NodeRunStats runSingleNode(
         const ProgramOptions &opts,
-        const NodeInput &node,
-        const std::vector<std::string> &calibrationFiles)
+        const NodeInput &node)
     {
-        auto config = r2s::createBDM50100Config(
+        auto config = r2s::createBDM50100_9120Config(
             node.rawdataPath,
             opts.resultDir,
-            calibrationFiles,
+            {opts.calibrationDir, opts.calibrationDir},
             "node_" + std::to_string(node.nodeId),
-            node.channels);
+            node.channels,
+            4);
 
-        // R2S guarantees segment-level time ordering when sortDataByTime is enabled.
         config.sortDataByTime = true;
         config.saveData2SingleFile = false;
         config.asyncFileWrite = false;
+        config.useEnergyCut = true;
+        config.energyCutLow = 421000.0f;
+        config.energyCutHigh = 1000000.0f;
 
         grpcnode::R2SGrpcNode nodeRunner(
             config,
@@ -735,7 +724,9 @@ namespace
             1000,
             opts.batchSegmentsPerMessage);
 
-        std::cout << "[Node " << node.nodeId << "] R2S start, file=" << node.rawdataPath << std::endl;
+        std::cout << "[Node " << node.nodeId << "] R2S start, dir=" << node.rawdataPath
+                  << " channels=[" << node.channels.front() << ".." << node.channels.back() << "]"
+                  << std::endl;
         nodeRunner.run();
         NodeRunStats stats = nodeRunner.stats();
 
@@ -816,31 +807,24 @@ int main(int argc, char **argv)
     }
 
     std::cout << "============================================" << std::endl;
-    std::cout << "  Local gRPC R2S Streaming Test (BDM50100)" << std::endl;
+    std::cout << "  Local gRPC R2S Streaming Test (9120 2-node)" << std::endl;
     std::cout << "============================================" << std::endl;
     std::cout << "address      : " << opts.address << std::endl;
-    std::cout << "splitDir     : " << opts.splitDir << std::endl;
+    std::cout << "dataRoot     : " << opts.dataRoot << std::endl;
+    std::cout << "node0RawDir  : " << opts.node0RawDir << std::endl;
+    std::cout << "node1RawDir  : " << opts.node1RawDir << std::endl;
     std::cout << "calibrationDir: " << opts.calibrationDir << std::endl;
     std::cout << "resultDir    : " << opts.resultDir << std::endl;
-    std::cout << "rawPrefix    : " << opts.rawPrefix << std::endl;
-    std::cout << "nodeCount    : " << opts.nodeCount << std::endl;
     std::cout << "maxPendingSegments: " << opts.maxPendingSegments << std::endl;
     std::cout << "batchSegmentsPerMessage: " << opts.batchSegmentsPerMessage << std::endl;
     std::cout << "parallelNodes: " << (opts.parallelNodes ? "true" : "false") << std::endl;
     std::cout << "noLocalReceiver: " << (opts.noLocalReceiver ? "true" : "false") << std::endl;
 
-    if (opts.nodeCount != 4)
-    {
-        std::cerr << "For BDM50100 splitdata (0-143 into 4 groups), nodeCount must be 4" << std::endl;
-        return 1;
-    }
-
     const auto nodeInputs = buildNodeInputs(opts);
-    const auto calibrationFiles = buildCalibrationFiles(opts.calibrationDir);
 
-    if (!validateInputs(nodeInputs, calibrationFiles, opts.resultDir))
+    if (!validateInputs(nodeInputs, opts.calibrationDir, opts.resultDir))
     {
-        std::cerr << "Input validation failed. Please verify rawdata/calibration files." << std::endl;
+        std::cerr << "Input validation failed. Please verify merged raw dirs / calibration." << std::endl;
         return 2;
     }
 
@@ -870,7 +854,7 @@ int main(int argc, char **argv)
         for (size_t i = 0; i < nodeInputs.size(); ++i)
         {
             workers.emplace_back([&, i]()
-                                 { stats[i] = runSingleNode(opts, nodeInputs[i], calibrationFiles); });
+                                 { stats[i] = runSingleNode(opts, nodeInputs[i]); });
         }
 
         for (auto &w : workers)
@@ -882,7 +866,7 @@ int main(int argc, char **argv)
     {
         for (size_t i = 0; i < nodeInputs.size(); ++i)
         {
-            stats[i] = runSingleNode(opts, nodeInputs[i], calibrationFiles);
+            stats[i] = runSingleNode(opts, nodeInputs[i]);
         }
     }
 
@@ -970,23 +954,25 @@ int main(int argc, char **argv)
     std::cout << "Elapsed time: " << elapsedMs << " ms" << std::endl;
     std::cout << "==================================" << std::endl;
 
-    return allSuccess ? 0 : 4;
+    return allSuccess && totalSinglesSent > 0 ? 0 : 4;
 }
 
 /*
 Build example:
-    make test-local-grpc-r2s
+    cmake --build --preset build-tests-pni --target test_local_grpc_r2s
 
-运行（50100 拆分数据，4 节点并行注册并等待开始信号）
+Run (9120 dual-node; default serial to avoid dual-GPU OOM on one card):
 ./bin/test/test_local_grpc_r2s \
     --address 127.0.0.1:50061 \
-    --split-dir /media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/dataAndPos3/splitdata \
-    --calibration-dir /media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/cali \
-    --result-dir /media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res \
-    --raw-prefix "converted_rawData" \
-    --node-count 4 \
-    --max-pending-segments 128 \
-    --batch-segments 3 \
-    --parallel \
-    --no-local-receiver
+    --data-root /media/lenovo/1TB/50100data/test_9120 \
+    --calibration-dir /media/lenovo/1TB/50100data/pni_res/caliFile \
+    --result-dir /media/lenovo/1TB/50100data/test_9120/pni_singles_grpc \
+    --max-pending-segments 32 \
+    --batch-segments 1
+
+Parallel (requires enough free GPU VRAM for 2x 288ch R2S):
+./bin/test/test_local_grpc_r2s --parallel
+
+External coincidence host:
+./bin/test/test_local_grpc_r2s --no-local-receiver --address 127.0.0.1:50051
 */

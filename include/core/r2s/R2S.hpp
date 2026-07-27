@@ -272,8 +272,8 @@ namespace openpni::distributed::r2s
      */
     openpni::interface::ISingleGenerator *createSingleGenerator(
         const R2SProcessConfig &config,
-        uint16_t channelIndex,
-        const std::string &calibrationFile);
+        uint16_t localIndex,
+        uint16_t globalChannelIndex);
 
     /**
      * @brief RawData 段缓存（拥有数据所有权）
@@ -536,6 +536,8 @@ namespace openpni::distributed::r2s
         std::vector<uint16_t> m_channelsToProcess;
         std::unordered_set<uint16_t> m_assignedChannelSet;
         bool m_filterUnassignedChannels = false;
+        std::vector<uint16_t> m_globalToLocalChannel;  // indexed by global channel, value = local index (or UINT16_MAX)
+        std::vector<uint16_t> m_localToGlobalChannel;  // indexed by local index, value = global channel
         std::vector<openpni::interface::ISingleGenerator *> m_generatorsVector;
         openpni::ConvergedR2S m_r2s;
 

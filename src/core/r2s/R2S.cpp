@@ -258,7 +258,8 @@ namespace openpni::distributed::r2s
 
     openpni::interface::ISingleGenerator *createSingleGenerator(
         const R2SProcessConfig &config,
-        uint16_t channelIndex)
+        uint16_t localIndex,
+        uint16_t globalChannelIndex)
     {
         openpni::interface::ISingleGenerator *generator = nullptr;
 
@@ -276,8 +277,8 @@ namespace openpni::distributed::r2s
             params.timeShift = config.timeShift;
             params.crossTalkEnabled = config.crossTalkEnabled;
             params.crossTalkTimeWindow = config.crossTalkTimeWindow;
-            params.__deviceId = config.__deviceId; // 使用默认设备ID
-            params.energyThresholds = config.energyThresholds; // 使用配置中的能量阈值数组
+            params.__deviceId = config.__deviceId;
+            params.energyThresholds = config.energyThresholds;
             g50100->setParams(params);
             generator = g50100;
             break;
@@ -286,8 +287,8 @@ namespace openpni::distributed::r2s
             throw std::runtime_error("Unknown detector type");
         }
 
-        generator->SetChannelIndex(channelIndex);
-        generator->LoadCalibration(config.calibrationFiles[channelIndex]);
+        generator->SetChannelIndex(localIndex);
+        generator->LoadCalibration(config.calibrationFiles[globalChannelIndex]);
 
         return generator;
     }
@@ -576,6 +577,18 @@ namespace openpni::distributed::r2s
 
         m_totalRawPackets += effectiveView.count;
 
+        // Remap global channel IDs to local (0-based) indices for GPU kernel
+        std::vector<uint16_t> remappedChannel;
+        if (m_filterUnassignedChannels && !m_globalToLocalChannel.empty())
+        {
+            remappedChannel.resize(static_cast<size_t>(effectiveView.count));
+            for (uint64_t i = 0; i < effectiveView.count; ++i)
+            {
+                remappedChannel[i] = m_globalToLocalChannel[effectiveView.channel[i]];
+            }
+            effectiveView.channel = remappedChannel.data();
+        }
+
         const uint64_t clockMs = effectiveView.clock_ms;
         const uint32_t durationMs =
             effectiveView.duration_ms > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())
@@ -649,10 +662,26 @@ namespace openpni::distributed::r2s
                 }
             }
 
-            const bool callbackSuccess = dispatchSinglesToCallback(singlesSpan, clockMs, durationMs);
-            const bool fileSuccess = dispatchSinglesToFile(singlesSpan, clockMs, durationMs);
+            // Restore global channel indices if local remapping was applied
+            std::vector<Single> hostSinglesRestored;
+            std::span<Single const> dispatchSpan = singlesSpan;
+            if (m_filterUnassignedChannels && !m_localToGlobalChannel.empty() && !singlesSpan.empty())
+            {
+                hostSinglesRestored = materializeSinglesOnHost(singlesSpan);
+                for (auto &s : hostSinglesRestored)
+                {
+                    if (s.channelIndex < m_localToGlobalChannel.size())
+                    {
+                        s.channelIndex = m_localToGlobalChannel[s.channelIndex];
+                    }
+                }
+                dispatchSpan = std::span<Single const>(hostSinglesRestored.data(), hostSinglesRestored.size());
+            }
 
-            m_totalSingles += singlesSpan.size();
+            const bool callbackSuccess = dispatchSinglesToCallback(dispatchSpan, clockMs, durationMs);
+            const bool fileSuccess = dispatchSinglesToFile(dispatchSpan, clockMs, durationMs);
+
+            m_totalSingles += dispatchSpan.size();
 
             if (needPerfLog)
             {
@@ -805,11 +834,20 @@ namespace openpni::distributed::r2s
 
         LOG(INFO) << "Loading " << m_channelsToProcess.size() << " channels' calibration data...";
 
+        // Build global <-> local channel mapping
+        const uint16_t maxGlobalCh = *std::max_element(m_channelsToProcess.begin(), m_channelsToProcess.end());
+        m_globalToLocalChannel.assign(static_cast<size_t>(maxGlobalCh) + 1, UINT16_MAX);
+        m_localToGlobalChannel.resize(m_channelsToProcess.size());
+
+        uint16_t localIdx = 0;
         for (auto channelIndex : m_channelsToProcess)
         {
+            m_globalToLocalChannel[channelIndex] = localIdx;
+            m_localToGlobalChannel[localIdx] = channelIndex;
+
             try
             {
-                auto generator = createSingleGenerator(m_config, channelIndex);
+                auto generator = createSingleGenerator(m_config, localIdx, channelIndex);
                 m_generatorsVector.push_back(generator);
             }
             catch (const std::exception &e)
@@ -818,6 +856,7 @@ namespace openpni::distributed::r2s
                 cleanupGenerators();
                 return false;
             }
+            ++localIdx;
         }
 
         return true;

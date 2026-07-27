@@ -591,9 +591,9 @@ void test_50100_930_callback(bool saveSinglesFile = true)
  */
 bool merge_9120_two_ring_rawdata()
 {
-    const std::string ring0Dir = path_pre + "/pni_raw_ring0";
-    const std::string ring1Dir = path_pre + "/pni_raw_ring1";
-    const std::string mergedDir = out_path + "/pni_raw_node0";
+    const std::string ring0Dir = path_pre + "/pni_raw_ring2";
+    const std::string ring1Dir = path_pre + "/pni_raw_ring3";
+    const std::string mergedDir = out_path + "/pni_raw_node1";
 
     std::cout << "\n========== Merge 9120 Two-Ring Raw (0+1) ==========\n"
               << std::endl;
@@ -622,8 +622,8 @@ void test_9120_two_ring_r2s(bool saveSinglesFile = true)
     std::cout << "\n========== Testing 9120 Two-Ring (0+1) R2S ==========\n"
               << std::endl;
 
-    const std::string mergedDir = out_path + "/pni_raw_node0";
-    const std::string resultDir = out_path + "/pni_singles_node0";
+    const std::string mergedDir = out_path + "/pni_raw_node1";
+    const std::string resultDir = out_path + "/pni_singles_node1";
 
     std::cout << "Merged raw: " << mergedDir << std::endl;
     std::cout << "Result:     " << resultDir << std::endl;
@@ -639,7 +639,7 @@ void test_9120_two_ring_r2s(bool saveSinglesFile = true)
 
     std::vector<uint16_t> channelIndices;
     channelIndices.reserve(288);
-    for (uint16_t ch = 0; ch < 288; ++ch)
+    for (uint16_t ch = 288; ch < 576; ++ch)
     {
         channelIndices.push_back(ch);
     }
@@ -648,7 +648,7 @@ void test_9120_two_ring_r2s(bool saveSinglesFile = true)
         "",
         resultDir,
         {cali_path, cali_path},
-        "singles_9120_node0",
+        "singles_9120_node1",
         channelIndices,
         4);
 
@@ -1112,13 +1112,15 @@ int main(int argc, char **argv)
     // convert_50100_rawdata_batch_process(3);
 
      constexpr bool kSaveSinglesFile = false;
-    std::cout << "[Test 3] Testing 50100 callback mode..." << std::endl;
-    test_50100_930_callback(kSaveSinglesFile);
+    // //单环测试（930） 
+    // std::cout << "[Test 3] Testing 50100 callback mode..." << std::endl;
+    // test_50100_930_callback(kSaveSinglesFile);
 
-    // 9120：合并与 R2S 分开调用（合并只需跑一次，之后可反复跑 R2S）
+    // //9120：合并与 R2S 分开调用（合并只需跑一次，之后可反复跑 R2S）
     // std::cout << "[Tool 9120] Merge ring0+ring1 rawdata..." << std::endl;
     // merge_9120_two_ring_rawdata();
 
+    // 9120： 两环R2S 测试
     std::cout << "[Test 9120] Two-ring (0+1) R2S..." << std::endl;
     test_9120_two_ring_r2s(kSaveSinglesFile);
 

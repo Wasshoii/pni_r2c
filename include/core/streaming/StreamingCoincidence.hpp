@@ -24,6 +24,11 @@
 #include <filesystem>
 #include <iostream>
 
+namespace openpni::distributed::streaming::multi_gpu
+{
+    class CoincidenceMultiGpuEngine;
+}
+
 namespace openpni::distributed::streaming
 {
     using Single = openpni::Single;
@@ -154,6 +159,12 @@ namespace openpni::distributed::streaming
         size_t maxTotalMemoryBytes = 2ULL * 1024 * 1024 * 1024; // 内存池最大容量，单位字节（默认 2 GB）
         bool useMemoryPool = true;
 
+        // 默认使用多 GPU 任务并行引擎（gpuIds 为空时自动检测全部 GPU）。
+        // 设 enableMultiGpu=false 可临时回退单 GPU Coincidence 路径。
+        bool enableMultiGpu = true;
+        std::vector<uint32_t> gpuIds;
+        uint32_t instancePerGpu = 1;
+
         uint64_t getTotalSafetyMargin() const;
     };
 
@@ -197,7 +208,8 @@ namespace openpni::distributed::streaming
             openpni::distributed::coreio::RollingFileWriter<
                 openpni::distributed::coreio::ListmodeFileWriter,
                 openpni::distributed::coreio::ListmodeWriterOptions> &output,
-            std::span<Listmode const> coins);
+            std::span<Listmode const> coins,
+            bool alreadyOnHost = false);
         void flushRemaining();
 
         TimeAlignerConfig m_config;
@@ -208,6 +220,9 @@ namespace openpni::distributed::streaming
         openpni::Coincidence m_coinNode;
         openpni::tools::UniPtr<Single> m_singleBuffer{"StreamingTimeAligner_singles"};
         openpni::tools::UniPtr<Listmode> m_coinBuffer{"StreamingTimeAligner_coins"};
+
+        std::unique_ptr<multi_gpu::CoincidenceMultiGpuEngine> m_multiGpuEngine;
+        bool m_useMultiGpu = false;
 
         openpni::distributed::coreio::RollingFileWriter<
             openpni::distributed::coreio::ListmodeFileWriter,

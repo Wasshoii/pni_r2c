@@ -51,7 +51,8 @@
         "R2C_BUILD_TEST_LOCAL_GRPC_R2S": "ON",
         "R2C_BUILD_TEST_PNI_COIN": "ON",
         "R2C_BUILD_TEST_ACQ_R2S_PIPELINE": "ON",
-        "R2C_BUILD_TEST_R2S_MULTI_GPU": "ON"
+        "R2C_BUILD_TEST_R2S_MULTI_GPU": "ON",
+        "R2C_BUILD_TEST_COIN_MULTI_GPU": "ON"
       }
     },
     {

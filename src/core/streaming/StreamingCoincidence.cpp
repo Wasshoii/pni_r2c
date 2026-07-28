@@ -1,5 +1,7 @@
 #include "core/streaming/StreamingCoincidence.hpp"
 
+#include "core/streaming/multi_gpu/CoincidenceMultiGpuEngine.hpp"
+
 #include <iterator>
 #include <utility>
 #include <glog/logging.h>
@@ -503,15 +505,49 @@ namespace openpni::distributed::streaming
 
         std::vector<uint32_t> crystalNumOfEachChannel(
             config.channelNum, config.crystalsPerChannel);
-        m_coinNode.setTotalCrystalNumOfEachChannel(crystalNumOfEachChannel);
+
+        m_useMultiGpu = multi_gpu::shouldUseCoincidenceMultiGpu(config);
+        if (m_useMultiGpu)
+        {
+            try
+            {
+                auto engineConfig = multi_gpu::makeCoincidenceMultiGpuEngineConfig(config);
+                m_multiGpuEngine = std::make_unique<multi_gpu::CoincidenceMultiGpuEngine>();
+                if (!m_multiGpuEngine->initialize(engineConfig))
+                {
+                    LOG(WARNING) << "[StreamingTimeAligner] Multi-GPU engine init failed, "
+                                 << "falling back to legacy single-GPU coincidence";
+                    m_multiGpuEngine.reset();
+                    m_useMultiGpu = false;
+                }
+            }
+            catch (const std::exception &e)
+            {
+                LOG(WARNING) << "[StreamingTimeAligner] Multi-GPU engine setup failed: "
+                             << e.what() << "; falling back to legacy single-GPU coincidence";
+                m_multiGpuEngine.reset();
+                m_useMultiGpu = false;
+            }
+        }
+
+        if (!m_useMultiGpu)
+        {
+            m_coinNode.setTotalCrystalNumOfEachChannel(crystalNumOfEachChannel);
+        }
 
         LOG(INFO) << "[StreamingTimeAligner] Initialized with " << nodeCount
-                  << " nodes, " << config.channelNum << " channels";
+                  << " nodes, " << config.channelNum << " channels, multiGpu="
+                  << (m_useMultiGpu ? "true" : "false");
     }
 
     StreamingTimeAligner::~StreamingTimeAligner()
     {
         stop();
+        if (m_multiGpuEngine)
+        {
+            m_multiGpuEngine->finalize();
+            m_multiGpuEngine.reset();
+        }
     }
 
     NodeRingBuffer *StreamingTimeAligner::getNodeBuffer(uint16_t nodeId)
@@ -562,6 +598,10 @@ namespace openpni::distributed::streaming
         }
 
         finalizeOutput();
+        if (m_multiGpuEngine)
+        {
+            m_multiGpuEngine->finalize();
+        }
         LOG(INFO) << "[StreamingTimeAligner] Stopped";
     }
 
@@ -721,6 +761,25 @@ namespace openpni::distributed::streaming
         }
         try
         {
+            if (m_useMultiGpu && m_multiGpuEngine)
+            {
+                const auto result = m_multiGpuEngine->processSinglesSync(
+                    std::span<const Single>(singles));
+
+                if (!result.prompt.empty() && m_promptOpened)
+                {
+                    saveCoincidenceResult(m_promptWriter, result.prompt, true);
+                    m_stats.totalPromptPairs += result.promptCount;
+                }
+
+                if (!result.delay.empty() && m_delayOpened)
+                {
+                    saveCoincidenceResult(m_delayWriter, result.delay, true);
+                    m_stats.totalDelayPairs += result.delayCount;
+                }
+                return;
+            }
+
             m_singleBuffer.CopyFromHost(std::span<const Single>(singles));
 
             std::vector<std::span<Single const>> inputList;
@@ -750,15 +809,24 @@ namespace openpni::distributed::streaming
         openpni::distributed::coreio::RollingFileWriter<
             openpni::distributed::coreio::ListmodeFileWriter,
             openpni::distributed::coreio::ListmodeWriterOptions> &output,
-        std::span<Listmode const> coins)
+        std::span<Listmode const> coins,
+        bool alreadyOnHost)
     {
         if (coins.empty())
         {
             return;
         }
 
-        m_coinBuffer.CopyFromCuda(coins);
-        auto hostBuf = m_coinBuffer.HostRStdSpan();
+        std::span<Listmode const> hostBuf;
+        if (alreadyOnHost)
+        {
+            hostBuf = coins;
+        }
+        else
+        {
+            m_coinBuffer.CopyFromCuda(coins);
+            hostBuf = m_coinBuffer.HostRStdSpan();
+        }
 
         // 估算本次写入字节数，用于分卷阈值判断（仅在 listmodeMaxFileSizeBytes > 0 时生效）
         constexpr size_t ESTIMATED_LISTMODE_BYTES = 16;
@@ -805,6 +873,7 @@ namespace openpni::distributed::streaming
         config.channelNum = 48;
         config.crystalsPerChannel = 169 * 4;
         config.coinProtocol = coinProtocol;
+        config.enableMultiGpu = true;
         return config;
     }
 
@@ -820,6 +889,7 @@ namespace openpni::distributed::streaming
         config.maxChunksPerNode = 1000;
         config.maxTotalMemoryBytes = 8ULL * 1024 * 1024 * 1024;
         config.processingIntervalMs = 100;
+        config.enableMultiGpu = true;
         return config;
     }
 

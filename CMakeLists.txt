@@ -9,9 +9,9 @@ include(CTest)
 option(R2C_BUILD_TEST_GRPC "Build gRPC clock-sync test" ON)
 option(R2C_BUILD_TEST_BASIC "Build mock clock-sync test" ON)
 
-# - pni (libpni + tbb + openmp, no CUDA)
-option(R2C_BUILD_TEST_STREAMING "Build streaming coincidence test (requires libpni)" OFF)
-option(R2C_BUILD_TEST_LOCAL_GRPC_COIN "Build local gRPC coin receiver test (requires libpni, tbb)" OFF)
+# - pni (libpni + tbb + openmp; streaming coincidence now also needs nvcc for multi-GPU)
+option(R2C_BUILD_TEST_STREAMING "Build streaming coincidence test (requires libpni, nvcc)" OFF)
+option(R2C_BUILD_TEST_LOCAL_GRPC_COIN "Build local gRPC coin receiver test (requires libpni, tbb, nvcc)" OFF)
 option(R2C_BUILD_TEST_ACQ_CONTROL_INIT "Build acquisition control init test (requires libpni, tbb)" OFF)
 option(R2C_BUILD_TEST_ACQ_DATAPATH_UDP "Build acquisition datapath UDP test (requires libpni, tbb)" OFF)
 
@@ -21,10 +21,11 @@ option(R2C_BUILD_TEST_PNI_COIN "Build PNI standalone coincidence test (requires 
 option(R2C_BUILD_TEST_LOCAL_GRPC_R2S "Build local gRPC R2S test (requires libpni, nvcc, tbb)" OFF)
 option(R2C_BUILD_TEST_ACQ_R2S_PIPELINE "Build acquisition to R2S pipeline test (requires libpni, nvcc, tbb)" OFF)
 option(R2C_BUILD_TEST_R2S_MULTI_GPU "Build BDM50100 multi-GPU R2S test (requires libpni, nvcc, tbb)" OFF)
+option(R2C_BUILD_TEST_COIN_MULTI_GPU "Build coincidence multi-GPU consistency test (requires libpni, nvcc, tbb)" OFF)
 
 # Build options: Apps
-# - basic (libpni + tbb + openmp, no CUDA)
-option(R2C_BUILD_APP_COIN_MASTER "Build app coin master executable (requires libpni, tbb)" OFF)
+# - basic (libpni + tbb + openmp; coin master needs nvcc for multi-GPU coincidence)
+option(R2C_BUILD_APP_COIN_MASTER "Build app coin master executable (requires libpni, tbb, nvcc)" OFF)
 option(R2C_BUILD_TOOL_UDP_RAW_REPLAYER "Build tool udp raw replayer executable (requires libpni)" OFF)
 option(R2C_BUILD_TOOL_DPDK_TX_REPLAYER "Build tool DPDK tx replayer executable (requires libdpdk)" OFF)
 
@@ -170,13 +171,56 @@ if(R2C_BUILD_TEST_GRPC)
   )
 endif()
 
-if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_COIN_MASTER)
+if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_COIN_MASTER OR R2C_BUILD_TEST_COIN_MULTI_GPU)
   pkg_check_modules(R2C_PNI REQUIRED IMPORTED_TARGET libpni)
   pkg_check_modules(R2C_DPDK QUIET libdpdk)
+
+  if(EXISTS "/usr/bin/nvcc")
+    set(R2C_NVCC_EXECUTABLE "/usr/bin/nvcc")
+  else()
+    find_program(R2C_NVCC_EXECUTABLE NAMES nvcc REQUIRED)
+  endif()
+
+  set(R2C_CUDA_OBJ_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/cuda")
+  file(MAKE_DIRECTORY "${R2C_CUDA_OBJ_DIR}")
+  set(R2C_S2C_COMPUTE_OBJ "${R2C_CUDA_OBJ_DIR}/S2CCompute.o")
+
+  set(R2C_S2C_NVCC_INCLUDE_FLAGS "")
+  foreach(include_dir IN LISTS R2C_PNI_INCLUDE_DIRS)
+    list(APPEND R2C_S2C_NVCC_INCLUDE_FLAGS "-I${include_dir}")
+  endforeach()
+
+  set(R2C_S2C_NVCC_COMMON_FLAGS
+    -std=c++20
+    -O2
+    --expt-relaxed-constexpr
+    -ccbin ${CMAKE_CXX_COMPILER}
+    ${R2C_S2C_NVCC_INCLUDE_FLAGS}
+    -I${CMAKE_CURRENT_SOURCE_DIR}/include
+    -I${CMAKE_CURRENT_SOURCE_DIR}/protos
+    -I${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  add_custom_command(
+    OUTPUT "${R2C_S2C_COMPUTE_OBJ}"
+    COMMAND ${R2C_NVCC_EXECUTABLE}
+      ${R2C_S2C_NVCC_COMMON_FLAGS}
+      -c ${CMAKE_CURRENT_SOURCE_DIR}/src/core/streaming/multi_gpu/S2CCompute.cu
+      -o ${R2C_S2C_COMPUTE_OBJ}
+    DEPENDS
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/core/streaming/multi_gpu/S2CCompute.cu
+      ${CMAKE_CURRENT_SOURCE_DIR}/include/core/streaming/multi_gpu/S2CCompute.cuh
+      ${CMAKE_CURRENT_SOURCE_DIR}/include/core/r2s/multi_gpu/PinnedHostCopy.cuh
+      ${CMAKE_CURRENT_SOURCE_DIR}/include/core/r2s/multi_gpu/SPSCProcessor.hpp
+    COMMENT "Building CUDA object S2CCompute.o"
+    VERBATIM
+  )
+  set_source_files_properties(${R2C_S2C_COMPUTE_OBJ} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
 
   if(NOT TARGET r2c_core_streaming_objs)
     add_library(r2c_core_streaming_objs OBJECT
       src/core/streaming/StreamingCoincidence.cpp
+      src/core/streaming/multi_gpu/CoincidenceMultiGpuEngine.cpp
     )
     target_include_directories(r2c_core_streaming_objs
       PRIVATE
@@ -198,8 +242,10 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
     )
   endif()
 
+  if(R2C_BUILD_TEST_STREAMING)
   add_executable(test_streaming_coincidence
     tests/test_streaming_coincidence.cpp
+    ${R2C_S2C_COMPUTE_OBJ}
     $<TARGET_OBJECTS:r2c_core_streaming_objs>
     $<TARGET_OBJECTS:r2c_proto_objs>
   )
@@ -219,6 +265,27 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
       PkgConfig::R2C_GLOG
       dl
   )
+  endif()
+
+  if(R2C_BUILD_TEST_COIN_MULTI_GPU)
+    add_executable(test_coincidence_multi_gpu
+      tests/test_coincidence_multi_gpu.cpp
+      ${R2C_S2C_COMPUTE_OBJ}
+      $<TARGET_OBJECTS:r2c_core_streaming_objs>
+    )
+    target_include_directories(test_coincidence_multi_gpu
+      PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    target_compile_options(test_coincidence_multi_gpu PRIVATE -O3 -march=native -pthread)
+    target_link_libraries(test_coincidence_multi_gpu
+      PRIVATE
+        PkgConfig::R2C_PNI
+        PkgConfig::R2C_GLOG
+        dl
+    )
+  endif()
 
   if(R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_COIN_MASTER)
     find_library(R2C_TBB_LIBRARY NAMES tbb REQUIRED)
@@ -347,6 +414,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
 
     add_executable(test_local_grpc_coin
       tests/test_local_grpc_coin.cpp
+      ${R2C_S2C_COMPUTE_OBJ}
       $<TARGET_OBJECTS:r2c_grpc_service_coin_objs>
       $<TARGET_OBJECTS:r2c_grpc_node_coin_objs>
       $<TARGET_OBJECTS:r2c_core_streaming_objs>
@@ -379,6 +447,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
         $<TARGET_OBJECTS:r2c_grpc_service_acq_master_objs>
         $<TARGET_OBJECTS:r2c_grpc_service_coin_objs>
         $<TARGET_OBJECTS:r2c_grpc_node_coin_objs>
+        ${R2C_S2C_COMPUTE_OBJ}
         $<TARGET_OBJECTS:r2c_core_streaming_objs>
         $<TARGET_OBJECTS:r2c_proto_objs>
       )
@@ -1105,6 +1174,7 @@ r2c_set_output_dir(tool_dpdk_tx_replayer tools)
 r2c_set_output_dir(test_distributed_clock_sync test)
 r2c_set_output_dir(test_distributed_clock_sync_grpc test)
 r2c_set_output_dir(test_streaming_coincidence test)
+r2c_set_output_dir(test_coincidence_multi_gpu test)
 r2c_set_output_dir(test_local_grpc_coin test)
 r2c_set_output_dir(test_acquisition_control_init test)
 r2c_set_output_dir(test_acquisition_datapath_udp test)
@@ -1135,6 +1205,7 @@ r2c_register_test(test_distributed_clock_sync core)
 r2c_register_test(test_distributed_clock_sync_grpc core)
 
 r2c_register_test(test_streaming_coincidence pni)
+r2c_register_test(test_coincidence_multi_gpu cuda)
 r2c_register_test(test_local_grpc_coin pni integration)
 r2c_register_test(test_acquisition_control_init pni)
 r2c_register_test(test_acquisition_datapath_udp pni)

@@ -1,5 +1,7 @@
 #include "core/r2s/R2S.hpp"
 
+#include "core/r2s/multi_gpu/R2S50100MultiGpuEngine.hpp"
+
 #include <cctype>
 #include <chrono>
 #include <glog/logging.h>
@@ -427,6 +429,96 @@ namespace openpni::distributed::r2s
         }
     }
 
+    namespace
+    {
+        bool postProcessHostSingles(
+            std::span<const Single> hostSingles,
+            const R2SProcessConfig &config,
+            std::vector<Single> &out)
+        {
+            out.clear();
+            if (hostSingles.empty())
+            {
+                return true;
+            }
+
+            if (!config.useEnergyCut && !config.sortDataByTime)
+            {
+                out.assign(hostSingles.begin(), hostSingles.end());
+                return true;
+            }
+
+            const cudaError_t setDeviceErr = cudaSetDevice(static_cast<int>(config.__deviceId));
+            if (setDeviceErr != cudaSuccess)
+            {
+                LOG(ERROR) << "cudaSetDevice failed for post-process on GPU " << config.__deviceId
+                           << ": " << cudaGetErrorString(setDeviceErr);
+                return false;
+            }
+
+            Single *d_singles = nullptr;
+            const size_t bytes = hostSingles.size() * sizeof(Single);
+            cudaError_t err = cudaMalloc(&d_singles, bytes);
+            if (err != cudaSuccess)
+            {
+                LOG(ERROR) << "cudaMalloc failed for post-process: " << cudaGetErrorString(err);
+                return false;
+            }
+
+            out.assign(hostSingles.begin(), hostSingles.end());
+            try
+            {
+                err = cudaMemcpy(d_singles, out.data(), bytes, cudaMemcpyHostToDevice);
+                if (err != cudaSuccess)
+                {
+                    LOG(ERROR) << "cudaMemcpy H2D failed for post-process: " << cudaGetErrorString(err);
+                    cudaFree(d_singles);
+                    return false;
+                }
+
+                uint64_t count = out.size();
+                if (config.useEnergyCut)
+                {
+                    count = d_filterSinglesByEnergy_R2S(
+                        d_singles,
+                        count,
+                        config.energyCutLow,
+                        config.energyCutHigh);
+                }
+
+                if (config.sortDataByTime && count > 0)
+                {
+                    d_sortSinglesByTime_R2S(d_singles, count);
+                }
+
+                if (count > 0)
+                {
+                    out.resize(static_cast<size_t>(count));
+                    err = cudaMemcpy(out.data(), d_singles, count * sizeof(Single), cudaMemcpyDeviceToHost);
+                    if (err != cudaSuccess)
+                    {
+                        LOG(ERROR) << "cudaMemcpy D2H failed for post-process: " << cudaGetErrorString(err);
+                        cudaFree(d_singles);
+                        return false;
+                    }
+                }
+                else
+                {
+                    out.clear();
+                }
+            }
+            catch (const std::exception &e)
+            {
+                LOG(ERROR) << "Exception during multi-GPU post-process: " << e.what();
+                cudaFree(d_singles);
+                return false;
+            }
+
+            cudaFree(d_singles);
+            return true;
+        }
+    }
+
     R2SStreamProcessor::R2SStreamProcessor(const R2SProcessConfig &config)
         : m_config(config)
     {
@@ -484,19 +576,64 @@ namespace openpni::distributed::r2s
                 return false;
             }
 
-            if (!prepareGenerators())
+            m_useMultiGpu50100 = multi_gpu::shouldUseMultiGpu50100(m_config);
+            if (m_useMultiGpu50100)
             {
-                m_hadError = true;
-                return false;
+                try
+                {
+                    const auto engine_config =
+                        multi_gpu::makeMultiGpuEngineConfig(m_config, m_channelsToProcess);
+
+                    std::ostringstream gpu_list;
+                    for (size_t i = 0; i < engine_config.gpu_ids.size(); ++i)
+                    {
+                        if (i > 0)
+                        {
+                            gpu_list << ", ";
+                        }
+                        gpu_list << engine_config.gpu_ids[i];
+                    }
+                    LOG(INFO) << "BDM50100 default multi-GPU mode: " << engine_config.gpu_ids.size()
+                              << " GPU(s) [" << gpu_list.str() << "]";
+
+                    m_multiGpuEngine = std::make_unique<multi_gpu::R2S50100MultiGpuEngine>();
+                    if (!m_multiGpuEngine->initialize(engine_config))
+                    {
+                        m_hadError = true;
+                        cleanupGenerators();
+                        return false;
+                    }
+                }
+                catch (const std::exception &e)
+                {
+                    LOG(ERROR) << "Failed to initialize BDM50100 multi-GPU engine: " << e.what();
+                    m_hadError = true;
+                    return false;
+                }
+            }
+            else if (m_config.detectorType == DetectorType::BDM50100)
+            {
+                LOG(INFO) << "BDM50100 legacy single-GPU mode (ConvergedR2S); "
+                          << "enableMultiGpu=false";
             }
 
-            LOG(INFO) << "Setting up ConvergedR2S with generators...";
-            m_r2s.SetChannels(m_generatorsVector);
-            LOG(INFO) << "Setup complete.";
+            if (!m_useMultiGpu50100)
+            {
+                if (!prepareGenerators())
+                {
+                    m_hadError = true;
+                    return false;
+                }
+
+                LOG(INFO) << "Setting up ConvergedR2S with generators...";
+                m_r2s.SetChannels(m_generatorsVector);
+                LOG(INFO) << "Setup complete.";
+            }
 
             if (!prepareOutput())
             {
                 m_hadError = true;
+                cleanupGenerators();
                 return false;
             }
 
@@ -599,84 +736,139 @@ namespace openpni::distributed::r2s
 
         try
         {
-            auto d_data = openpni::DPackets::FromHost(
-                effectiveView.data,
-                effectiveView.offset,
-                effectiveView.length,
-                effectiveView.channel,
-                effectiveView.count);
+            std::span<Single const> singlesSpan;
+            uint64_t singlesCount = 0;
 
-            auto r2sResults = m_r2s.R2S_CUDA(
-                d_data.raw,
-                d_data.offset,
-                d_data.length,
-                d_data.channel,
-                d_data.count);
-
-            const cudaError_t cudaSyncErr = cudaDeviceSynchronize();
-            if (cudaSyncErr != cudaSuccess)
+            if (m_useMultiGpu50100)
             {
-                LOG(ERROR) << "CUDA sync error after R2S_CUDA: " << cudaGetErrorString(cudaSyncErr);
-                m_hadError = true;
-                return false;
-            }
-
-            const cudaError_t cudaLastErr = cudaGetLastError();
-            if (cudaLastErr != cudaSuccess)
-            {
-                LOG(ERROR) << "CUDA async error after R2S_CUDA: " << cudaGetErrorString(cudaLastErr);
-                m_hadError = true;
-                return false;
-            }
-
-            if (m_config.r2sResultIndex >= r2sResults.size())
-            {
-                LOG(ERROR) << "Error: r2sResultIndex " << m_config.r2sResultIndex
-                           << " is out of range, result size=" << r2sResults.size();
-                m_hadError = true;
-                return false;
-            }
-
-            auto &singlesSpan = r2sResults[m_config.r2sResultIndex];
-
-            if (m_config.useEnergyCut)
-            {
-                if (!singlesSpan.empty() && isDevicePointer(singlesSpan.data()))
+                multi_gpu::SegmentSinglesResult segmentResult;
+                try
                 {
-                    const uint64_t filteredCount = openpni::distributed::r2s::d_filterSinglesByEnergy_R2S(
-                        const_cast<Single *>(singlesSpan.data()),
-                        singlesSpan.size(),
-                        m_config.energyCutLow,
-                        m_config.energyCutHigh);
-                    singlesSpan = std::span<Single const>(singlesSpan.data(), filteredCount);
+                    segmentResult = m_multiGpuEngine->processSegmentSync(effectiveView);
                 }
-            }
-
-            if (m_config.sortDataByTime)
-            {
-                if (!singlesSpan.empty() && isDevicePointer(singlesSpan.data()))
+                catch (const std::exception &e)
                 {
-                    openpni::distributed::r2s::d_sortSinglesByTime_R2S(
-                        const_cast<Single *>(singlesSpan.data()),
-                        singlesSpan.size());
+                    LOG(ERROR) << "Multi-GPU R2S compute failed at segment " << segmentId << ": " << e.what();
+                    m_hadError = true;
+                    return false;
                 }
-            }
 
-            // Restore global channel indices if local remapping was applied
-            std::vector<Single> hostSinglesRestored;
-            std::span<Single const> dispatchSpan = singlesSpan;
-            if (m_filterUnassignedChannels && !m_localToGlobalChannel.empty() && !singlesSpan.empty())
-            {
-                hostSinglesRestored = materializeSinglesOnHost(singlesSpan);
-                for (auto &s : hostSinglesRestored)
+                singlesCount = segmentResult.count;
+
+                if (singlesCount == 0)
                 {
-                    if (s.channelIndex < m_localToGlobalChannel.size())
+                    const bool callbackSuccess = dispatchSinglesToCallback({}, clockMs, durationMs);
+                    const bool fileSuccess = dispatchSinglesToFile({}, clockMs, durationMs);
+                    return callbackSuccess && fileSuccess;
+                }
+
+                if (!postProcessHostSingles(segmentResult.span, m_config, m_multiGpuHostSingles))
+                {
+                    LOG(ERROR) << "Multi-GPU post-process failed at segment " << segmentId;
+                    m_hadError = true;
+                    return false;
+                }
+
+                if (m_filterUnassignedChannels && !m_localToGlobalChannel.empty())
+                {
+                    for (auto &s : m_multiGpuHostSingles)
                     {
-                        s.channelIndex = m_localToGlobalChannel[s.channelIndex];
+                        if (s.channelIndex < m_localToGlobalChannel.size())
+                        {
+                            s.channelIndex = m_localToGlobalChannel[s.channelIndex];
+                        }
                     }
                 }
-                dispatchSpan = std::span<Single const>(hostSinglesRestored.data(), hostSinglesRestored.size());
+
+                singlesSpan = std::span<Single const>(
+                    m_multiGpuHostSingles.data(),
+                    m_multiGpuHostSingles.size());
             }
+            else
+            {
+                auto d_data = openpni::DPackets::FromHost(
+                    effectiveView.data,
+                    effectiveView.offset,
+                    effectiveView.length,
+                    effectiveView.channel,
+                    effectiveView.count);
+
+                auto r2sResults = m_r2s.R2S_CUDA(
+                    d_data.raw,
+                    d_data.offset,
+                    d_data.length,
+                    d_data.channel,
+                    d_data.count);
+
+                const cudaError_t cudaSyncErr = cudaDeviceSynchronize();
+                if (cudaSyncErr != cudaSuccess)
+                {
+                    LOG(ERROR) << "CUDA sync error after R2S_CUDA: " << cudaGetErrorString(cudaSyncErr);
+                    m_hadError = true;
+                    return false;
+                }
+
+                const cudaError_t cudaLastErr = cudaGetLastError();
+                if (cudaLastErr != cudaSuccess)
+                {
+                    LOG(ERROR) << "CUDA async error after R2S_CUDA: " << cudaGetErrorString(cudaLastErr);
+                    m_hadError = true;
+                    return false;
+                }
+
+                if (m_config.r2sResultIndex >= r2sResults.size())
+                {
+                    LOG(ERROR) << "Error: r2sResultIndex " << m_config.r2sResultIndex
+                               << " is out of range, result size=" << r2sResults.size();
+                    m_hadError = true;
+                    return false;
+                }
+
+                auto &deviceSinglesSpan = r2sResults[m_config.r2sResultIndex];
+                singlesSpan = deviceSinglesSpan;
+
+                if (m_config.useEnergyCut)
+                {
+                    if (!singlesSpan.empty() && isDevicePointer(singlesSpan.data()))
+                    {
+                        const uint64_t filteredCount = openpni::distributed::r2s::d_filterSinglesByEnergy_R2S(
+                            const_cast<Single *>(singlesSpan.data()),
+                            singlesSpan.size(),
+                            m_config.energyCutLow,
+                            m_config.energyCutHigh);
+                        singlesSpan = std::span<Single const>(singlesSpan.data(), filteredCount);
+                    }
+                }
+
+                if (m_config.sortDataByTime)
+                {
+                    if (!singlesSpan.empty() && isDevicePointer(singlesSpan.data()))
+                    {
+                        openpni::distributed::r2s::d_sortSinglesByTime_R2S(
+                            const_cast<Single *>(singlesSpan.data()),
+                            singlesSpan.size());
+                    }
+                }
+
+                // Restore global channel indices if local remapping was applied
+                if (m_filterUnassignedChannels && !m_localToGlobalChannel.empty() && !singlesSpan.empty())
+                {
+                    m_multiGpuHostSingles = materializeSinglesOnHost(singlesSpan);
+                    for (auto &s : m_multiGpuHostSingles)
+                    {
+                        if (s.channelIndex < m_localToGlobalChannel.size())
+                        {
+                            s.channelIndex = m_localToGlobalChannel[s.channelIndex];
+                        }
+                    }
+                    singlesSpan = std::span<Single const>(
+                        m_multiGpuHostSingles.data(),
+                        m_multiGpuHostSingles.size());
+                }
+            }
+
+            const std::span<Single const> dispatchSpan = singlesSpan;
+            singlesCount = dispatchSpan.size();
 
             const bool callbackSuccess = dispatchSinglesToCallback(dispatchSpan, clockMs, durationMs);
             const bool fileSuccess = dispatchSinglesToFile(dispatchSpan, clockMs, durationMs);
@@ -690,7 +882,7 @@ namespace openpni::distributed::r2s
 
                 LOG(INFO) << "Segment " << segmentId
                           << ": Processed " << effectiveView.count << " packets, generated "
-                          << singlesSpan.size() << " singles";
+                          << singlesCount << " singles";
 
                 if (timeMs > 0)
                 {
@@ -782,12 +974,30 @@ namespace openpni::distributed::r2s
         else
         {
             m_channelsToProcess = m_config.channelIndices;
-            LOG(INFO) << "Processing assigned channels (" << m_channelsToProcess.size() << "): ";
-            for (auto ch : m_channelsToProcess)
+            if (m_channelsToProcess.empty())
             {
-                LOG(INFO) << ch << " ";
+                LOG(INFO) << "Processing assigned channels: 0";
             }
-            LOG(INFO) << "";
+            else if (m_channelsToProcess.size() <= 16)
+            {
+                std::ostringstream oss;
+                for (size_t i = 0; i < m_channelsToProcess.size(); ++i)
+                {
+                    if (i > 0)
+                    {
+                        oss << ", ";
+                    }
+                    oss << m_channelsToProcess[i];
+                }
+                LOG(INFO) << "Processing assigned channels (" << m_channelsToProcess.size()
+                          << "): " << oss.str();
+            }
+            else
+            {
+                LOG(INFO) << "Processing assigned channels (" << m_channelsToProcess.size()
+                          << "): [" << m_channelsToProcess.front() << " .. "
+                          << m_channelsToProcess.back() << "]";
+            }
 
             // 整机上界用 channelNums；若已知 raw 头通道数，再核对文件头是否覆盖分配通道
             for (auto ch : m_channelsToProcess)
@@ -1017,6 +1227,12 @@ namespace openpni::distributed::r2s
 
     void R2SStreamProcessor::cleanupGenerators()
     {
+        if (m_multiGpuEngine)
+        {
+            m_multiGpuEngine->finalize();
+            m_multiGpuEngine.reset();
+        }
+
         for (auto *generator : m_generatorsVector)
         {
             delete generator;
@@ -1495,6 +1711,7 @@ namespace openpni::distributed::r2s
         config.matchXTalkEnabled = true;
         config.crossTalkEnabled = true;
         config.crossTalkTimeWindow = 2.0f;
+        config.enableMultiGpu = true;
         return config;
     }
 
@@ -1583,6 +1800,7 @@ namespace openpni::distributed::r2s
         config.matchXTalkEnabled = true;
         config.crossTalkEnabled = true;
         config.crossTalkTimeWindow = 2.0f;
+        config.enableMultiGpu = true;
 
         size_t missing = 0;
         if (config.channelIndices.empty())

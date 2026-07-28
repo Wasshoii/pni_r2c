@@ -20,6 +20,7 @@ option(R2C_BUILD_TEST_PNI_R2C "Build PNI R2C test (requires libpni, nvcc, tbb)" 
 option(R2C_BUILD_TEST_PNI_COIN "Build PNI standalone coincidence test (requires libpni, nvcc, tbb)" OFF)
 option(R2C_BUILD_TEST_LOCAL_GRPC_R2S "Build local gRPC R2S test (requires libpni, nvcc, tbb)" OFF)
 option(R2C_BUILD_TEST_ACQ_R2S_PIPELINE "Build acquisition to R2S pipeline test (requires libpni, nvcc, tbb)" OFF)
+option(R2C_BUILD_TEST_R2S_MULTI_GPU "Build BDM50100 multi-GPU R2S test (requires libpni, nvcc, tbb)" OFF)
 
 # Build options: Apps
 # - basic (libpni + tbb + openmp, no CUDA)
@@ -572,7 +573,7 @@ if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_ACQ_DATAPATH_UDP OR R2C_BUI
   endif()
 endif()
 
-if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRPC_R2S OR R2C_BUILD_TEST_ACQ_R2S_PIPELINE OR R2C_BUILD_APP_ACQ_R2S_NODE)
+if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRPC_R2S OR R2C_BUILD_TEST_ACQ_R2S_PIPELINE OR R2C_BUILD_APP_ACQ_R2S_NODE OR R2C_BUILD_TEST_R2S_MULTI_GPU)
   pkg_check_modules(R2C_PNI REQUIRED IMPORTED_TARGET libpni)
   pkg_check_modules(R2C_DPDK QUIET libdpdk)
   find_library(R2C_TBB_LIBRARY NAMES tbb REQUIRED)
@@ -587,23 +588,34 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
   set(R2C_CUDA_OBJ_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/cuda")
   file(MAKE_DIRECTORY "${R2C_CUDA_OBJ_DIR}")
   set(R2C_SINGLES_PROCESS_OBJ "${R2C_CUDA_OBJ_DIR}/SinglesProcess.o")
+  set(R2C_DPACKETS_ASYNC_OBJ "${R2C_CUDA_OBJ_DIR}/DPacketsAsync.o")
+  set(R2C_R2S50100_COMPUTE_OBJ "${R2C_CUDA_OBJ_DIR}/R2S50100Compute.o")
+  set(R2C_R2S_CUDA_OBJS
+    ${R2C_SINGLES_PROCESS_OBJ}
+    ${R2C_DPACKETS_ASYNC_OBJ}
+    ${R2C_R2S50100_COMPUTE_OBJ}
+  )
 
   set(R2C_NVCC_INCLUDE_FLAGS "")
   foreach(include_dir IN LISTS R2C_PNI_INCLUDE_DIRS)
     list(APPEND R2C_NVCC_INCLUDE_FLAGS "-I${include_dir}")
   endforeach()
 
+  set(R2C_NVCC_COMMON_FLAGS
+    -std=c++20
+    -O2
+    --expt-relaxed-constexpr
+    -ccbin ${CMAKE_CXX_COMPILER}
+    ${R2C_NVCC_INCLUDE_FLAGS}
+    -I${CMAKE_CURRENT_SOURCE_DIR}/include
+    -I${CMAKE_CURRENT_SOURCE_DIR}/protos
+    -I${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
   add_custom_command(
     OUTPUT "${R2C_SINGLES_PROCESS_OBJ}"
     COMMAND ${R2C_NVCC_EXECUTABLE}
-      -std=c++20
-      -O2
-      --expt-relaxed-constexpr
-      -ccbin ${CMAKE_CXX_COMPILER}
-      ${R2C_NVCC_INCLUDE_FLAGS}
-      -I${CMAKE_CURRENT_SOURCE_DIR}/include
-      -I${CMAKE_CURRENT_SOURCE_DIR}/protos
-      -I${CMAKE_CURRENT_SOURCE_DIR}/src
+      ${R2C_NVCC_COMMON_FLAGS}
       -c ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/SinglesProcess.cu
       -o ${R2C_SINGLES_PROCESS_OBJ}
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/SinglesProcess.cu
@@ -611,8 +623,37 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
     VERBATIM
   )
 
+  add_custom_command(
+    OUTPUT "${R2C_DPACKETS_ASYNC_OBJ}"
+    COMMAND ${R2C_NVCC_EXECUTABLE}
+      ${R2C_NVCC_COMMON_FLAGS}
+      -c ${CMAKE_CURRENT_SOURCE_DIR}/src/core/r2s/multi_gpu/DPacketsAsync.cu
+      -o ${R2C_DPACKETS_ASYNC_OBJ}
+    DEPENDS
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/core/r2s/multi_gpu/DPacketsAsync.cu
+      ${CMAKE_CURRENT_SOURCE_DIR}/include/core/r2s/multi_gpu/DPacketsAsync.cuh
+    COMMENT "Building CUDA object DPacketsAsync.o"
+    VERBATIM
+  )
+
+  add_custom_command(
+    OUTPUT "${R2C_R2S50100_COMPUTE_OBJ}"
+    COMMAND ${R2C_NVCC_EXECUTABLE}
+      ${R2C_NVCC_COMMON_FLAGS}
+      -c ${CMAKE_CURRENT_SOURCE_DIR}/src/core/r2s/multi_gpu/R2S50100Compute.cu
+      -o ${R2C_R2S50100_COMPUTE_OBJ}
+    DEPENDS
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/core/r2s/multi_gpu/R2S50100Compute.cu
+      ${CMAKE_CURRENT_SOURCE_DIR}/include/core/r2s/multi_gpu/R2S50100Compute.cuh
+      ${CMAKE_CURRENT_SOURCE_DIR}/include/core/r2s/multi_gpu/PinnedHostCopy.cuh
+      ${CMAKE_CURRENT_SOURCE_DIR}/include/core/r2s/multi_gpu/DPacketsAsync.cuh
+    COMMENT "Building CUDA object R2S50100Compute.o"
+    VERBATIM
+  )
+
   add_library(r2c_core_r2s_objs OBJECT
     src/core/r2s/R2S.cpp
+    src/core/r2s/multi_gpu/R2S50100MultiGpuEngine.cpp
   )
   target_include_directories(r2c_core_r2s_objs
     PRIVATE
@@ -787,12 +828,12 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
     )
   endif()
 
-  set_source_files_properties(${R2C_SINGLES_PROCESS_OBJ} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+  set_source_files_properties(${R2C_R2S_CUDA_OBJS} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
 
   if(R2C_BUILD_TEST_PNI_R2C)
     add_executable(test_pni_r2c
       tests/test_pni_r2c.cpp
-      ${R2C_SINGLES_PROCESS_OBJ}
+      ${R2C_R2S_CUDA_OBJS}
       $<TARGET_OBJECTS:r2c_core_r2s_objs>
     )
     target_include_directories(test_pni_r2c
@@ -815,7 +856,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
   if(R2C_BUILD_TEST_PNI_COIN)
     add_executable(test_pni_coin
       tests/test_pni_coin.cpp
-      ${R2C_SINGLES_PROCESS_OBJ}
+      ${R2C_R2S_CUDA_OBJS}
       $<TARGET_OBJECTS:r2c_core_r2s_objs>
     )
     target_include_directories(test_pni_coin
@@ -839,7 +880,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
   if(R2C_BUILD_TEST_LOCAL_GRPC_R2S)
     add_executable(test_local_grpc_r2s
       tests/test_local_grpc_r2s.cpp
-      ${R2C_SINGLES_PROCESS_OBJ}
+      ${R2C_R2S_CUDA_OBJS}
       $<TARGET_OBJECTS:r2c_core_r2s_objs>
       $<TARGET_OBJECTS:r2c_grpc_node_r2s_objs>
       $<TARGET_OBJECTS:r2c_proto_objs>
@@ -868,7 +909,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
   if(R2C_BUILD_APP_ACQ_R2S_NODE)
     add_executable(app_acq_r2s_node
       app/acq_r2s_node_main.cpp
-      ${R2C_SINGLES_PROCESS_OBJ}
+      ${R2C_R2S_CUDA_OBJS}
       $<TARGET_OBJECTS:r2c_app_common_objs>
       $<TARGET_OBJECTS:r2c_core_r2s_objs>
       $<TARGET_OBJECTS:r2c_core_acq_objs>
@@ -909,7 +950,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
   if(R2C_BUILD_TEST_ACQ_R2S_PIPELINE)
     add_executable(test_acquisition_r2s_pipeline
       tests/test_acquisition_r2s_pipeline.cpp
-      ${R2C_SINGLES_PROCESS_OBJ}
+      ${R2C_R2S_CUDA_OBJS}
       $<TARGET_OBJECTS:r2c_grpc_service_acq_master_objs>
       $<TARGET_OBJECTS:r2c_core_acq_objs>
       $<TARGET_OBJECTS:r2c_core_r2s_objs>
@@ -930,6 +971,29 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
       PRIVATE
         PkgConfig::R2C_PNI
         PkgConfig::R2C_GRPC
+        PkgConfig::R2C_GLOG
+        OpenMP::OpenMP_CXX
+        ${R2C_TBB_LIBRARY}
+        dl
+    )
+  endif()
+
+  if(R2C_BUILD_TEST_R2S_MULTI_GPU)
+    add_executable(test_r2s50100_multi_gpu
+      tests/test_r2s50100_multi_gpu.cpp
+      ${R2C_R2S_CUDA_OBJS}
+      $<TARGET_OBJECTS:r2c_core_r2s_objs>
+    )
+    target_include_directories(test_r2s50100_multi_gpu
+      PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/protos"
+    )
+    target_compile_options(test_r2s50100_multi_gpu PRIVATE -O3 -march=native -fopenmp)
+    target_link_libraries(test_r2s50100_multi_gpu
+      PRIVATE
+        PkgConfig::R2C_PNI
         PkgConfig::R2C_GLOG
         OpenMP::OpenMP_CXX
         ${R2C_TBB_LIBRARY}
@@ -1048,6 +1112,7 @@ r2c_set_output_dir(test_pni_r2c test)
 r2c_set_output_dir(test_pni_coin test)
 r2c_set_output_dir(test_local_grpc_r2s test)
 r2c_set_output_dir(test_acquisition_r2s_pipeline test)
+r2c_set_output_dir(test_r2s50100_multi_gpu test)
 
 # CTest registration: only register targets that are enabled and built.
 function(r2c_register_test target_name tier_label)
@@ -1078,3 +1143,4 @@ r2c_register_test(test_pni_r2c cuda)
 r2c_register_test(test_pni_coin cuda)
 r2c_register_test(test_local_grpc_r2s cuda integration)
 r2c_register_test(test_acquisition_r2s_pipeline cuda)
+r2c_register_test(test_r2s50100_multi_gpu cuda)

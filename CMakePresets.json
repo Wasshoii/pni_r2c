@@ -50,7 +50,8 @@
         "R2C_BUILD_TEST_PNI_R2C": "ON",
         "R2C_BUILD_TEST_LOCAL_GRPC_R2S": "ON",
         "R2C_BUILD_TEST_PNI_COIN": "ON",
-        "R2C_BUILD_TEST_ACQ_R2S_PIPELINE": "ON"
+        "R2C_BUILD_TEST_ACQ_R2S_PIPELINE": "ON",
+        "R2C_BUILD_TEST_R2S_MULTI_GPU": "ON"
       }
     },
     {
@@ -153,7 +154,8 @@
         "test_pni_r2c",
         "test_local_grpc_r2s",
         "test_pni_coin",
-        "test_acquisition_r2s_pipeline"
+        "test_acquisition_r2s_pipeline",
+        "test_r2s50100_multi_gpu"
       ]
     },
     {

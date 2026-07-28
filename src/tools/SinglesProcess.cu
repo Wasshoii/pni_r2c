@@ -14,7 +14,7 @@ namespace openpni::distributed::r2s
         __host__ __device__ bool operator()(
             Single const &a, Single const &b)
         {
-            return a.timevalue_pico < b.timevalue_pico;
+            return a.timevalue_100fs < b.timevalue_100fs;
         }
     };
 

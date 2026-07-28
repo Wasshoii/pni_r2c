@@ -33,6 +33,11 @@
 #include <unordered_set>
 #include <optional>
 
+namespace openpni::distributed::r2s::multi_gpu
+{
+    class R2S50100MultiGpuEngine;
+}
+
 namespace openpni::distributed::r2s
 {
     using Single = openpni::Single;
@@ -147,7 +152,15 @@ namespace openpni::distributed::r2s
         bool useEnergyCut = false;                   // 是否启用能量窗过滤
         float energyCutLow = 0.0f;                    // 能量窗下限 eV
         float energyCutHigh = 0.0f;                   // 能量窗上限 eV
-        uint32_t __deviceId = 0; // CUDA设备ID
+        uint32_t __deviceId = 0; // CUDA设备ID（后处理/回退路径主 GPU）
+
+        // BDM50100 默认使用多 GPU 任务并行引擎（gpuIds 为空时自动检测全部 GPU）。
+        // 设 enableMultiGpu=false 可临时回退 ConvergedR2S 单 GPU 路径（待真实数据验收后移除）。
+        bool enableMultiGpu = true;
+        std::vector<uint32_t> gpuIds;            // 空 = 使用 [0, device_count)
+        uint32_t instancePerGpu = 1;             // 每张 GPU 上的 compute 实例数
+        long double maxInputGibits = 0.0L;       // 0 = 不预分配 singles 缓冲
+        float inputBurstToleranceCoef = 1.2f;    // ring slot 预分配系数
 
         openpni::device::bdm50100_v2::caliCoef::EnergyThresholds_t energyThresholds = {60, 80, 100, 120, 140, 160, 180, 200, 0,  0.0454, 0.1111, 1.964, -0.0014}; // 能量阈值数组 for 50100
 
@@ -540,6 +553,9 @@ namespace openpni::distributed::r2s
         std::vector<uint16_t> m_localToGlobalChannel;  // indexed by local index, value = global channel
         std::vector<openpni::interface::ISingleGenerator *> m_generatorsVector;
         openpni::ConvergedR2S m_r2s;
+        std::unique_ptr<multi_gpu::R2S50100MultiGpuEngine> m_multiGpuEngine;
+        bool m_useMultiGpu50100 = false;
+        std::vector<Single> m_multiGpuHostSingles;
 
         openpni::distributed::coreio::RollingFileWriter<
             openpni::distributed::coreio::SinglesFileWriter,

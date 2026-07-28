@@ -132,7 +132,8 @@ namespace openpni::distributed::streaming
 
     struct TimeAlignerConfig
     {
-        uint64_t networkLatencyMargin_pico = 5'000'000'000; // 网络延迟安全边际，单位皮秒（默认 5 秒）
+        // 网络延迟安全边际，单位皮秒（与 CoincidenceProtocol 一致）；getTotalSafetyMargin 内转为 100fs
+        uint64_t networkLatencyMargin_pico = 5'000'000'000;
 
         openpni::CoincidenceProtocol coinProtocol; // Coincidence 协议配置，包含时间窗口、能量窗口等参数
         uint16_t channelNum = 0;                   // 总通道数
@@ -229,6 +230,10 @@ namespace openpni::distributed::streaming
     };
 
     TimeAlignerConfig createBDM2AlignerConfig(
+        const std::string &outputDir,
+        const openpni::CoincidenceProtocol &coinProtocol = {});
+
+    TimeAlignerConfig createBDM50100_9120AlignerConfig(
         const std::string &outputDir,
         const openpni::CoincidenceProtocol &coinProtocol = {});
 

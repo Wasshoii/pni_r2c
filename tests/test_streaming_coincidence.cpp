@@ -15,6 +15,10 @@
 #include <pni/io/IO.hpp>
 #include <pni/io/ListmodeIO.hpp>
 #include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <random>
 #include <chrono>
@@ -22,15 +26,480 @@
 #include <functional>
 #include <filesystem>
 #include <limits>
+#include <optional>
 #include <stdexcept>
+#include <thread>
+#include <vector>
+#include <array>
 
 using namespace openpni::distributed::streaming;
 namespace fs = std::filesystem;
 
-constexpr float kEnergyLower_eV = 350000.0f;
-constexpr float kEnergyUpper_eV = 650000.0f;
+constexpr const char *k9120DataRoot = "/media/lenovo/1TB/50100data/test_9120";
+constexpr float k9120EnergyLower_eV = 421000.0f;
+constexpr float k9120EnergyUpper_eV = 1000000.0f;
+constexpr uint16_t k9120ChannelNum = 576;
+constexpr uint32_t k9120CrystalsPerChannel = 6 * 6 * 8;
+constexpr int16_t k9120TimeWindowPs = 2000;
+constexpr int k9120DelayTimePs = 2000000;
+
+std::vector<Single> readSinglesFromSegment(openpni::io::listmode::ListmodeFileSegment &segment);
+
+/** Test 7 可调参数（环境变量 TEST9120_* 或 CLI --test7-* 覆盖） */
+struct Test9120StreamOptions
+{
+    uint64_t singlesPerSecPerNode = 50000'000; // 每个节点每秒发送的单事件数
+    double rateJitterFraction = 0.15;  // 每个节点发送速率的随机抖动幅度（0.0~1.0，默认 15%）
+    size_t pushChunkSingles = 5000'000; // 每次推送的单事件数量（每个节点）
+    uint64_t networkLatencyMarginPs = 5'000'000;    // 水印时间戳的网络延迟裕量（皮秒）
+    uint32_t processingIntervalMs = 50;       // Aligner 处理循环的轮询间隔（毫秒）
+    size_t maxChunksPerNode = 1000; // 每个节点最多推送的块数
+    size_t maxTotalMemoryBytes = 8ULL * 1024 * 1024 * 1024; // 流式对齐器的最大内存使用量（字节）
+    size_t maxFilesPerNode = 0; // 每个节点最多生成的 .lsingle 文件数（0=无限制）
+    uint32_t pushTimeoutMs = 120'000;   // 推送单事件块的超时时间（毫秒）
+    uint32_t monitorIntervalMs = 5'000; // 进度打印间隔（毫秒，0=关闭）
+    uint64_t minWatermarkBatches = 10; // 需要的最小水位批次数（用于验证对齐器已处理足够数据）
+    bool burstMode = false;
+    bool skipLmfAnalysis = false;
+    bool test7Only = true; // 仅运行 Test 7，跳过其他测试
+};
+
+struct NodeLoaderStats
+{
+    uint64_t chunksPushed = 0;
+    uint64_t singlesPushed = 0;
+    double throttleSleepSec = 0.0;
+};
+
+namespace
+{
+    std::optional<uint64_t> parseEnvU64(const char *name)
+    {
+        const char *v = std::getenv(name);
+        if (!v || v[0] == '\0')
+        {
+            return std::nullopt;
+        }
+        try
+        {
+            return static_cast<uint64_t>(std::stoull(v));
+        }
+        catch (...)
+        {
+            return std::nullopt;
+        }
+    }
+
+    std::optional<double> parseEnvDouble(const char *name)
+    {
+        const char *v = std::getenv(name);
+        if (!v || v[0] == '\0')
+        {
+            return std::nullopt;
+        }
+        try
+        {
+            return std::stod(v);
+        }
+        catch (...)
+        {
+            return std::nullopt;
+        }
+    }
+
+    Test9120StreamOptions defaultTest9120StreamOptions()
+    {
+        Test9120StreamOptions opts;
+        if (auto v = parseEnvU64("TEST9120_SINGLES_PER_SEC"))
+        {
+            opts.singlesPerSecPerNode = *v;
+        }
+        if (auto v = parseEnvU64("TEST9120_PUSH_CHUNK"))
+        {
+            opts.pushChunkSingles = static_cast<size_t>(*v);
+        }
+        if (auto v = parseEnvU64("TEST9120_NETWORK_MARGIN_MS"))
+        {
+            opts.networkLatencyMarginPs = *v * 1'000'000ULL;
+        }
+        if (auto v = parseEnvU64("TEST9120_PROCESSING_INTERVAL_MS"))
+        {
+            opts.processingIntervalMs = static_cast<uint32_t>(*v);
+        }
+        if (auto v = parseEnvDouble("TEST9120_RATE_JITTER"))
+        {
+            opts.rateJitterFraction = *v;
+        }
+        if (auto v = parseEnvU64("TEST9120_MAX_FILES"))
+        {
+            opts.maxFilesPerNode = static_cast<size_t>(*v);
+        }
+        if (auto v = parseEnvU64("TEST9120_MONITOR_MS"))
+        {
+            opts.monitorIntervalMs = static_cast<uint32_t>(*v);
+        }
+        if (auto v = parseEnvU64("TEST9120_MIN_BATCHES"))
+        {
+            opts.minWatermarkBatches = *v;
+        }
+        if (const char *v = std::getenv("TEST9120_BURST"))
+        {
+            opts.burstMode = (std::strcmp(v, "1") == 0 || std::strcmp(v, "true") == 0);
+        }
+        if (const char *v = std::getenv("TEST9120_SKIP_LMF"))
+        {
+            opts.skipLmfAnalysis = (std::strcmp(v, "1") == 0 || std::strcmp(v, "true") == 0);
+        }
+        return opts;
+    }
+
+    Test9120StreamOptions parseTest9120CliOptions(int argc, char **argv, Test9120StreamOptions opts)
+    {
+        for (int i = 1; i < argc; ++i)
+        {
+            const char *arg = argv[i];
+            auto needValue = [&](const char *flag) -> const char * {
+                if (std::strcmp(arg, flag) != 0)
+                {
+                    return nullptr;
+                }
+                if (i + 1 >= argc)
+                {
+                    throw std::runtime_error(std::string("Missing value for ") + flag);
+                }
+                return argv[++i];
+            };
+
+            if (std::strcmp(arg, "--help") == 0 || std::strcmp(arg, "-h") == 0)
+            {
+                std::cout
+                    << "Test 7 tuning (also via TEST9120_* env):\n"
+                    << "  --test7-only                      Run Test 7 only\n"
+                    << "  --test7-singles-per-sec <n>       Per-node send rate (default 400000)\n"
+                    << "  --test7-push-chunk <n>            Singles per push chunk (default 500000)\n"
+                    << "  --test7-network-margin-ms <n>     Watermark margin ms (default 5)\n"
+                    << "  --test7-processing-interval-ms <n> Aligner poll interval (default 50)\n"
+                    << "  --test7-rate-jitter <0..1>        Per-node rate jitter (default 0.15)\n"
+                    << "  --test7-max-files <n>             Limit .lsingle files per node (0=all)\n"
+                    << "  --test7-monitor-ms <n>            Progress print interval (0=off)\n"
+                    << "  --test7-min-batches <n>           Min watermark batches required\n"
+                    << "  --test7-burst                     Disable rate limit (A/B compare)\n"
+                    << "  --test7-skip-lmf                  Skip LMF distribution check\n";
+                std::exit(0);
+            }
+            if (const char *v = needValue("--test7-singles-per-sec"))
+            {
+                opts.singlesPerSecPerNode = std::stoull(v);
+            }
+            else if (const char *v = needValue("--test7-push-chunk"))
+            {
+                opts.pushChunkSingles = static_cast<size_t>(std::stoull(v));
+            }
+            else if (const char *v = needValue("--test7-network-margin-ms"))
+            {
+                opts.networkLatencyMarginPs = std::stoull(v) * 1'000'000ULL;
+            }
+            else if (const char *v = needValue("--test7-processing-interval-ms"))
+            {
+                opts.processingIntervalMs = static_cast<uint32_t>(std::stoull(v));
+            }
+            else if (const char *v = needValue("--test7-rate-jitter"))
+            {
+                opts.rateJitterFraction = std::stod(v);
+            }
+            else if (const char *v = needValue("--test7-max-files"))
+            {
+                opts.maxFilesPerNode = static_cast<size_t>(std::stoull(v));
+            }
+            else if (const char *v = needValue("--test7-monitor-ms"))
+            {
+                opts.monitorIntervalMs = static_cast<uint32_t>(std::stoull(v));
+            }
+            else if (const char *v = needValue("--test7-min-batches"))
+            {
+                opts.minWatermarkBatches = std::stoull(v);
+            }
+            else if (std::strcmp(arg, "--test7-burst") == 0)
+            {
+                opts.burstMode = true;
+            }
+            else if (std::strcmp(arg, "--test7-skip-lmf") == 0)
+            {
+                opts.skipLmfAnalysis = true;
+            }
+            else if (std::strcmp(arg, "--test7-only") == 0)
+            {
+                opts.test7Only = true;
+            }
+        }
+        return opts;
+    }
+
+    void printTest9120StreamOptions(const Test9120StreamOptions &opts)
+    {
+        std::cout << "  Stream sim:" << std::endl;
+        std::cout << "    burstMode=" << (opts.burstMode ? "true" : "false")
+                  << ", singlesPerSecPerNode=" << opts.singlesPerSecPerNode
+                  << ", pushChunkSingles=" << opts.pushChunkSingles << std::endl;
+        std::cout << "    rateJitter=+/-" << (opts.rateJitterFraction * 100.0) << "%"
+                  << ", networkMarginMs=" << (opts.networkLatencyMarginPs / 1'000'000ULL)
+                  << ", processingIntervalMs=" << opts.processingIntervalMs << std::endl;
+        std::cout << "    maxFilesPerNode=" << (opts.maxFilesPerNode == 0 ? "all" : std::to_string(opts.maxFilesPerNode))
+                  << ", monitorIntervalMs=" << opts.monitorIntervalMs
+                  << ", minWatermarkBatches=" << opts.minWatermarkBatches << std::endl;
+    }
+
+    std::vector<std::string> limitSinglesFiles(const std::vector<std::string> &files, size_t maxFiles)
+    {
+        if (maxFiles == 0 || files.size() <= maxFiles)
+        {
+            return files;
+        }
+        return std::vector<std::string>(files.begin(), files.begin() + static_cast<std::ptrdiff_t>(maxFiles));
+    }
+
+    void throttleForRate(
+        uint64_t singlesInBatch,
+        uint64_t singlesPerSec,
+        double jitterFraction,
+        std::mt19937 &rng,
+        NodeLoaderStats *stats)
+    {
+        if (singlesPerSec == 0 || singlesInBatch == 0)
+        {
+            return;
+        }
+
+        std::uniform_real_distribution<double> jitterDist(
+            std::max(0.05, 1.0 - jitterFraction),
+            1.0 + jitterFraction);
+        const double effectiveRate = static_cast<double>(singlesPerSec) * jitterDist(rng);
+        const double sleepSec = static_cast<double>(singlesInBatch) / effectiveRate;
+        if (stats)
+        {
+            stats->throttleSleepSec += sleepSec;
+        }
+        const auto sleepDur = std::chrono::duration<double>(sleepSec);
+        if (sleepDur.count() > 0.0)
+        {
+            std::this_thread::sleep_for(sleepDur);
+        }
+    }
+
+    bool streamSinglesPathsToBuffer(
+        NodeRingBuffer *buffer,
+        uint16_t nodeId,
+        const std::vector<std::string> &filePaths,
+        const Test9120StreamOptions &opts,
+        NodeLoaderStats *stats)
+    {
+        if (!buffer || filePaths.empty())
+        {
+            return false;
+        }
+
+        std::mt19937 rng(static_cast<uint32_t>(nodeId) * 7919U + 17U);
+        if (nodeId > 0)
+        {
+            std::uniform_int_distribution<int> startupJitterMs(0, 200);
+            std::this_thread::sleep_for(std::chrono::milliseconds(startupJitterMs(rng)));
+        }
+
+        uint64_t nextChunkId = 0;
+        for (const auto &filePath : filePaths)
+        {
+            openpni::io::listmode::ListmodeFileInput inputFile;
+            inputFile.Open(filePath);
+
+            if (inputFile.Header().FileTypeName() != openpni::io::listmode::fields::file_type_single_listmode)
+            {
+                std::cerr << "[streamLoader] Node " << nodeId << " not a singles file: " << filePath << std::endl;
+                return false;
+            }
+
+            std::cout << "[streamLoader] Node " << nodeId << " streaming " << filePath
+                      << " (" << inputFile.SegmentNum() << " segments)" << std::endl;
+
+            for (uint32_t segIdx = 0; segIdx < inputFile.SegmentNum(); ++segIdx)
+            {
+                auto segment = inputFile.ReadSegment(segIdx);
+                auto allSingles = readSinglesFromSegment(segment);
+                if (allSingles.empty())
+                {
+                    continue;
+                }
+
+                const size_t chunkSize = std::max<size_t>(1, opts.pushChunkSingles);
+                for (size_t off = 0; off < allSingles.size(); off += chunkSize)
+                {
+                    const size_t end = std::min(off + chunkSize, allSingles.size());
+
+                    TimestampedSingleChunk chunk;
+                    chunk.nodeId = nodeId;
+                    chunk.chunkId = nextChunkId++;
+                    chunk.computerClock_ms = segment.GetClockMs();
+                    chunk.duration_ms = segment.GetDurationMs();
+                    chunk.singles.assign(allSingles.begin() + static_cast<std::ptrdiff_t>(off),
+                                         allSingles.begin() + static_cast<std::ptrdiff_t>(end));
+                    chunk.updateTimeRange();
+
+                    if (!buffer->push(std::move(chunk), opts.pushTimeoutMs))
+                    {
+                        std::cerr << "[streamLoader] Node " << nodeId << " push timeout at chunk "
+                                  << nextChunkId << std::endl;
+                        return false;
+                    }
+
+                    const uint64_t pushed = end - off;
+                    if (stats)
+                    {
+                        stats->chunksPushed++;
+                        stats->singlesPushed += pushed;
+                    }
+
+                    throttleForRate(pushed, opts.singlesPerSecPerNode, opts.rateJitterFraction, rng, stats);
+
+                    if (stats && stats->chunksPushed % 20 == 0)
+                    {
+                        std::cout << "[streamLoader] Node " << nodeId
+                                  << " pushed chunks=" << stats->chunksPushed
+                                  << " singles=" << stats->singlesPushed << std::endl;
+                    }
+                }
+            }
+        }
+
+        if (stats)
+        {
+            std::cout << "[streamLoader] Node " << nodeId << " done: chunks=" << stats->chunksPushed
+                      << " singles=" << stats->singlesPushed
+                      << " throttleSec=" << stats->throttleSleepSec << std::endl;
+        }
+        return true;
+    }
+
+    void rateLimitedPathsLoaderThread(
+        NodeRingBuffer *buffer,
+        uint16_t nodeId,
+        std::vector<std::string> filePaths,
+        Test9120StreamOptions opts,
+        NodeLoaderStats *stats,
+        std::atomic<bool> *success)
+    {
+        const bool ok = streamSinglesPathsToBuffer(buffer, nodeId, filePaths, opts, stats);
+        if (success)
+        {
+            success->store(ok);
+        }
+    }
+
+    void alignerMonitorThread(
+        StreamingTimeAligner *aligner,
+        std::atomic<bool> *stopFlag,
+        uint32_t intervalMs)
+    {
+        while (!stopFlag->load(std::memory_order_relaxed))
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
+            if (stopFlag->load(std::memory_order_relaxed))
+            {
+                break;
+            }
+
+            const auto &stats = aligner->getStatistics();
+            const auto mem = aligner->getMemoryStatus();
+            std::cout << "[Monitor] processed=" << stats.totalSinglesProcessed.load()
+                      << " watermarkBatches=" << stats.chunksProcessed.load()
+                      << " prompt=" << stats.totalPromptPairs.load()
+                      << " delay=" << stats.totalDelayPairs.load()
+                      << " memMB=" << (mem.usedBytes / (1024.0 * 1024.0))
+                      << " (" << (mem.usageRatio * 100.0) << "%)" << std::endl;
+        }
+    }
+} // namespace
 
 // ==================== 文件读取工具函数 ====================
+
+std::optional<uint64_t> parseSinglesPartNumber(const std::string &path)
+{
+    const std::string name = fs::path(path).filename().string();
+    const std::string marker = "_part";
+    const size_t partPos = name.rfind(marker);
+    if (partPos != std::string::npos)
+    {
+        const size_t start = partPos + marker.size();
+        const size_t end = name.find('.', start);
+        if (end != std::string::npos && end > start)
+        {
+            try
+            {
+                return static_cast<uint64_t>(std::stoull(name.substr(start, end - start)));
+            }
+            catch (...)
+            {
+            }
+        }
+    }
+
+    const size_t dotPos = name.rfind('.');
+    if (dotPos == std::string::npos)
+    {
+        return std::nullopt;
+    }
+    const size_t underscorePos = name.rfind('_', dotPos);
+    if (underscorePos == std::string::npos || underscorePos + 1 >= dotPos)
+    {
+        return std::nullopt;
+    }
+    try
+    {
+        return static_cast<uint64_t>(std::stoull(name.substr(underscorePos + 1, dotPos - underscorePos - 1)));
+    }
+    catch (...)
+    {
+        return std::nullopt;
+    }
+}
+
+std::vector<std::string> collectSinglesFiles(const std::string &dirOrFile)
+{
+    std::vector<std::string> files;
+    if (!fs::exists(dirOrFile))
+    {
+        return files;
+    }
+
+    if (fs::is_regular_file(dirOrFile))
+    {
+        files.push_back(dirOrFile);
+        return files;
+    }
+
+    if (!fs::is_directory(dirOrFile))
+    {
+        return files;
+    }
+
+    for (const auto &entry : fs::directory_iterator(dirOrFile))
+    {
+        if (entry.is_regular_file() && entry.path().extension() == ".lsingle")
+        {
+            files.push_back(entry.path().string());
+        }
+    }
+
+    std::sort(files.begin(), files.end(),
+              [](const std::string &a, const std::string &b) {
+                  const auto partA = parseSinglesPartNumber(a);
+                  const auto partB = parseSinglesPartNumber(b);
+                  if (partA && partB && partA != partB)
+                  {
+                      return partA.value() < partB.value();
+                  }
+                  return fs::path(a).filename().string() < fs::path(b).filename().string();
+              });
+    return files;
+}
 
 /**
  * @brief 从 Listmode 段解析为 Single 数组
@@ -67,13 +536,17 @@ std::vector<Single> readSinglesFromSegment(openpni::io::listmode::ListmodeFileSe
  * @param nodeId 节点ID
  * @param filePath Single 文件路径
  * @param simulateDelay 是否模拟网络延迟（毫秒），0表示不模拟
+ * @param startChunkId 首个 segment 使用的 chunkId（多卷文件时全局递增）
+ * @param outNextChunkId 成功时写入下一个可用 chunkId
  * @return 成功返回 true
  */
 bool loadSingleFileToBuffer(
     NodeRingBuffer *buffer,
     uint16_t nodeId,
     const std::string &filePath,
-    uint32_t simulateDelay = 0)
+    uint32_t simulateDelay = 0,
+    uint64_t startChunkId = 0,
+    uint64_t *outNextChunkId = nullptr)
 {
     if (!buffer)
     {
@@ -107,6 +580,7 @@ bool loadSingleFileToBuffer(
         std::cout << "  Segments: " << segmentNum << std::endl;
 
         uint64_t totalSinglesLoaded = 0;
+        uint64_t nextChunkId = startChunkId;
 
         // 逐段读取并推送到缓冲区
         for (uint32_t segIdx = 0; segIdx < segmentNum; ++segIdx)
@@ -124,7 +598,7 @@ bool loadSingleFileToBuffer(
             // 创建 TimestampedSingleChunk
             TimestampedSingleChunk chunk;
             chunk.nodeId = nodeId;
-            chunk.chunkId = segIdx;
+            chunk.chunkId = nextChunkId++;
             chunk.computerClock_ms = segment.GetClockMs();
             chunk.duration_ms = segment.GetDurationMs();
 
@@ -152,6 +626,11 @@ bool loadSingleFileToBuffer(
                   << " loaded " << totalSinglesLoaded << " singles from "
                   << segmentNum << " segments" << std::endl;
 
+        if (outNextChunkId)
+        {
+            *outNextChunkId = nextChunkId;
+        }
+
         return true;
     }
     catch (const std::exception &e)
@@ -159,6 +638,34 @@ bool loadSingleFileToBuffer(
         std::cerr << "[loadSingleFileToBuffer] Error: " << e.what() << std::endl;
         return false;
     }
+}
+
+bool loadSinglesPathsToBuffer(
+    NodeRingBuffer *buffer,
+    uint16_t nodeId,
+    const std::vector<std::string> &filePaths,
+    uint32_t simulateDelay = 0)
+{
+    if (!buffer)
+    {
+        std::cerr << "[loadSinglesPathsToBuffer] Error: buffer is null" << std::endl;
+        return false;
+    }
+    if (filePaths.empty())
+    {
+        std::cerr << "[loadSinglesPathsToBuffer] Error: no input files for node " << nodeId << std::endl;
+        return false;
+    }
+
+    uint64_t nextChunkId = 0;
+    for (const auto &filePath : filePaths)
+    {
+        if (!loadSingleFileToBuffer(buffer, nodeId, filePath, simulateDelay, nextChunkId, &nextChunkId))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 /**
@@ -174,6 +681,20 @@ void fileLoaderThread(
     std::atomic<bool> *success)
 {
     bool result = loadSingleFileToBuffer(buffer, nodeId, filePath, simulateDelay);
+    if (success)
+    {
+        success->store(result);
+    }
+}
+
+void pathsLoaderThread(
+    NodeRingBuffer *buffer,
+    uint16_t nodeId,
+    std::vector<std::string> filePaths,
+    uint32_t simulateDelay,
+    std::atomic<bool> *success)
+{
+    bool result = loadSinglesPathsToBuffer(buffer, nodeId, filePaths, simulateDelay);
     if (success)
     {
         success->store(result);
@@ -228,9 +749,9 @@ EnergyStats analyzeSinglesEnergy(const std::vector<std::string> &singlePaths)
                     stats.maxRaw = std::max(stats.maxRaw, raw);
                     stats.minScaled = std::min(stats.minScaled, scaled);
                     stats.maxScaled = std::max(stats.maxScaled, scaled);
-                    if (scaled >= kEnergyLower_eV && scaled <= kEnergyUpper_eV)
+                    if (scaled >= k9120EnergyLower_eV && scaled <= k9120EnergyUpper_eV)
                         stats.inWindow_eV++;
-                    if (scaled >= kEnergyLower_eV / 1000.0f && scaled <= kEnergyUpper_eV / 1000.0f)
+                    if (scaled >= k9120EnergyLower_eV / 1000.0f && scaled <= k9120EnergyUpper_eV / 1000.0f)
                         stats.inWindow_keV++;
                 }
             }
@@ -252,13 +773,141 @@ EnergyStats analyzeSinglesEnergy(const std::vector<std::string> &singlePaths)
         std::cout << "  scaled range: [" << stats.minScaled << ", " << stats.maxScaled << "]" << std::endl;
         const double ratioEv = 100.0 * static_cast<double>(stats.inWindow_eV) / static_cast<double>(stats.total);
         const double ratioKev = 100.0 * static_cast<double>(stats.inWindow_keV) / static_cast<double>(stats.total);
-        std::cout << "  in window " << kEnergyLower_eV << "~" << kEnergyUpper_eV << " eV: "
+        std::cout << "  in window " << k9120EnergyLower_eV << "~" << k9120EnergyUpper_eV << " eV: "
                   << stats.inWindow_eV << " (" << ratioEv << "%)" << std::endl;
-        std::cout << "  in window " << kEnergyLower_eV / 1000.0f << "~" << kEnergyUpper_eV / 1000.0f
+        std::cout << "  in window " << k9120EnergyLower_eV / 1000.0f << "~" << k9120EnergyUpper_eV / 1000.0f
                   << " keV: " << stats.inWindow_keV << " (" << ratioKev << "%)" << std::endl;
     }
 
     return stats;
+}
+
+uint16_t channelSeparation9120(uint32_t crystal1, uint32_t crystal2)
+{
+    const uint16_t ch1 = static_cast<uint16_t>(crystal1 / k9120CrystalsPerChannel);
+    const uint16_t ch2 = static_cast<uint16_t>(crystal2 / k9120CrystalsPerChannel);
+    const uint16_t diff = (ch1 > ch2) ? static_cast<uint16_t>(ch1 - ch2) : static_cast<uint16_t>(ch2 - ch1);
+    const uint16_t wrap = static_cast<uint16_t>(k9120ChannelNum - diff);
+    return std::min(diff, wrap);
+}
+
+struct LmfStats
+{
+    std::string path;
+    uint64_t totalEvents = 0;
+    uint64_t checkedDtCount = 0;
+    uint64_t negativeDtCount = 0;
+    uint64_t overWindowDtCount = 0;
+    int16_t minDt = std::numeric_limits<int16_t>::max();
+    int16_t maxDt = std::numeric_limits<int16_t>::min();
+    std::vector<uint64_t> channelSepHist;
+};
+
+LmfStats analyzeLmfFile(const std::string &lmfPath, int16_t timeWindow100fs)
+{
+    LmfStats stats;
+    stats.path = lmfPath;
+    stats.channelSepHist.assign(k9120ChannelNum / 2 + 1, 0);
+
+    openpni::io::listmode::ListmodeFileInput input;
+    input.Open(lmfPath);
+
+    std::cout << "\n[LMF] " << lmfPath << std::endl;
+    std::cout << "  segmentNum=" << input.SegmentNum() << std::endl;
+
+    for (uint32_t segIdx = 0; segIdx < input.SegmentNum(); ++segIdx)
+    {
+        auto segment = input.ReadSegment(segIdx);
+        const auto data = segment.GetHAnyData();
+        if (!data.local_crystal_index1 || !data.local_crystal_index2 ||
+            !data.channel_index1 || !data.channel_index2 || !data.time_of_flight_100fs)
+        {
+            std::cout << "  Segment " << segIdx << " missing listmode fields, skipping" << std::endl;
+            continue;
+        }
+
+        stats.totalEvents += data.count;
+
+        for (std::size_t i = 0; i < data.count; ++i)
+        {
+            const uint16_t ch1 = data.channel_index1[i];
+            const uint16_t ch2 = data.channel_index2[i];
+            const uint32_t g1 = static_cast<uint32_t>(ch1) * k9120CrystalsPerChannel + data.local_crystal_index1[i];
+            const uint32_t g2 = static_cast<uint32_t>(ch2) * k9120CrystalsPerChannel + data.local_crystal_index2[i];
+            const int16_t dt = static_cast<int16_t>(data.time_of_flight_100fs[i]);
+            const int16_t dtAbs = static_cast<int16_t>(std::abs(static_cast<int>(dt)));
+
+            stats.checkedDtCount++;
+            if (dt < 0)
+            {
+                stats.negativeDtCount++;
+            }
+            if (dtAbs > timeWindow100fs)
+            {
+                stats.overWindowDtCount++;
+            }
+
+            stats.minDt = std::min(stats.minDt, dt);
+            stats.maxDt = std::max(stats.maxDt, dt);
+
+            const uint16_t sep = channelSeparation9120(g1, g2);
+            if (sep < stats.channelSepHist.size())
+            {
+                stats.channelSepHist[sep]++;
+            }
+        }
+    }
+
+    return stats;
+}
+
+bool validatePromptChannelSepPeak(const LmfStats &promptStats, uint16_t expectedSep, double minRatio)
+{
+    if (promptStats.totalEvents == 0 || expectedSep >= promptStats.channelSepHist.size())
+    {
+        return false;
+    }
+
+    std::vector<std::pair<uint16_t, uint64_t>> bins;
+    bins.reserve(promptStats.channelSepHist.size());
+    for (uint16_t sep = 0; sep < promptStats.channelSepHist.size(); ++sep)
+    {
+        if (promptStats.channelSepHist[sep] > 0)
+        {
+            bins.emplace_back(sep, promptStats.channelSepHist[sep]);
+        }
+    }
+    if (bins.empty())
+    {
+        return false;
+    }
+
+    std::sort(bins.begin(), bins.end(),
+              [](const auto &a, const auto &b) { return a.second > b.second; });
+
+    const double sepRatio = static_cast<double>(promptStats.channelSepHist[expectedSep])
+                            / static_cast<double>(promptStats.totalEvents);
+    const bool inTop2 = (bins[0].first == expectedSep)
+                        || (bins.size() > 1 && bins[1].first == expectedSep);
+
+    std::cout << "  Prompt channelSep top bins:" << std::endl;
+    for (size_t i = 0; i < std::min<size_t>(5, bins.size()); ++i)
+    {
+        std::cout << "    sep=" << bins[i].first << ", count=" << bins[i].second << std::endl;
+    }
+    std::cout << "  sep=" << expectedSep << " ratio=" << (sepRatio * 100.0) << "%" << std::endl;
+
+    return inTop2 && sepRatio >= minRatio;
+}
+
+bool validate9120PromptChannelSep(const LmfStats &promptStats)
+{
+    // 双节点各 288 通道：对环主峰常在 sep=144（半机）或 sep=288（整机对环）
+    constexpr uint16_t kSepPerNode = k9120ChannelNum / 4;   // 144
+    constexpr uint16_t kSepFullRing = k9120ChannelNum / 2; // 288
+    const bool perNodeOk = validatePromptChannelSepPeak(promptStats, kSepPerNode, 0.05);
+    const bool fullRingOk = validatePromptChannelSepPeak(promptStats, kSepFullRing, 0.04);
+    return perNodeOk || fullRingOk;
 }
 
 /**
@@ -519,15 +1168,15 @@ bool testConfigCreation()
     std::cout << "  BDM2: " << bdm2Config.channelNum << " channels, "
               << bdm2Config.crystalsPerChannel << " crystals/channel" << std::endl;
 
-    // // BDMBiD 配置
-    // auto bdmbidConfig = createBDMBiDAlignerConfig("/tmp/bdmbid_output");
-    // if (bdmbidConfig.channelNum != 4 || bdmbidConfig.crystalsPerChannel != 400 * 8)
-    // {
-    //     std::cerr << "FAIL: BDMBiD config incorrect" << std::endl;
-    //     return false;
-    // }
-    // std::cout << "  BDMBiD: " << bdmbidConfig.channelNum << " channels, "
-    //           << bdmbidConfig.crystalsPerChannel << " crystals/channel" << std::endl;
+    auto aligner9120 = createBDM50100_9120AlignerConfig("/tmp/bdm50100_9120_output");
+    if (aligner9120.channelNum != k9120ChannelNum
+        || aligner9120.crystalsPerChannel != k9120CrystalsPerChannel)
+    {
+        std::cerr << "FAIL: BDM50100 9120 aligner config incorrect" << std::endl;
+        return false;
+    }
+    std::cout << "  BDM50100_9120: " << aligner9120.channelNum << " channels, "
+              << aligner9120.crystalsPerChannel << " crystals/channel" << std::endl;
 
     std::cout << "PASS: Config creation" << std::endl;
     return true;
@@ -692,215 +1341,285 @@ bool testBufferWithMemoryPool()
 }
 
 /**
- * @brief 测试7：使用处理好的数据测试coincidence计算
- *
- * 此测试从磁盘读取 Single 文件，写入 NodeRingBuffer，
- * 然后通过 StreamingTimeAligner 进行符合计算
+ * @brief 测试7：9120 双节点流式符合计算（速率模拟 + 可调参）
  */
-bool testStreamingCoincidenceComputation()
+bool testStreamingCoincidenceComputation(const Test9120StreamOptions &opts)
 {
-    std::cout << "\n=== Test 7: Streaming Coincidence Computation ===" << std::endl;
+    std::cout << "\n=== Test 7: 9120 Dual-Node Streaming Coincidence ===" << std::endl;
+    printTest9120StreamOptions(opts);
 
-    // 配置文件路径
-    std::vector<std::string> files = {
-        "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/singles_50100_split/singles_50100_test_ch0-35_n36.lsingle",
-        "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/singles_50100_split/singles_50100_test_ch36-71_n36.lsingle",
-        "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/singles_50100_split/singles_50100_test_ch72-107_n36.lsingle",
-        "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/singles_50100_split/singles_50100_test_ch108-143_n36.lsingle"};
+    const std::string node0Dir = std::string(k9120DataRoot) + "/pni_singles_node0";
+    const std::string node1Dir = std::string(k9120DataRoot) + "/pni_singles_node1";
+    const std::vector<std::vector<std::string>> nodeFiles = {
+        limitSinglesFiles(collectSinglesFiles(node0Dir), opts.maxFilesPerNode),
+        limitSinglesFiles(collectSinglesFiles(node1Dir), opts.maxFilesPerNode)};
 
-    // 检查文件是否存在
-    std::vector<std::string> validFiles;
-    for (const auto &f : files)
+    constexpr size_t kNodeCount = 2;
+    for (size_t i = 0; i < kNodeCount; ++i)
     {
-        if (fs::exists(f))
+        const std::string &dir = (i == 0) ? node0Dir : node1Dir;
+        std::cout << "  Node " << i << " dir: " << dir << std::endl;
+        if (nodeFiles[i].empty())
         {
-            validFiles.push_back(f);
-            std::cout << "  Found file: " << f << std::endl;
+            std::cerr << "FAIL: No .lsingle files in " << dir << std::endl;
+            std::cerr << "  Please run 9120 R2S for both nodes first (pni_singles_node0 + pni_singles_node1)." << std::endl;
+            return false;
         }
-        else
-        {
-            std::cout << "  File not found (skipped): " << f << std::endl;
-        }
+        std::cout << "    using " << nodeFiles[i].size() << " file(s)" << std::endl;
     }
 
-    if (validFiles.empty())
-    {
-        std::cout << "  No valid input files found. Test skipped." << std::endl;
-        return true; // 没有文件不算失败
-    }
-
-    size_t nodeCount = validFiles.size();
-    std::cout << "  Using " << nodeCount << " nodes/files" << std::endl;
-
-    // 创建输出目录
-    std::string outputDir = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/coin_50100_stream";
+    const std::string outputDir = std::string(k9120DataRoot) + "/coin_9120_stream";
     fs::create_directories(outputDir);
 
-    // 创建 TimeAligner 配置
-    TimeAlignerConfig alignerConfig;
-    alignerConfig.outputDir = outputDir;
-    alignerConfig.channelNum = 48 * 3;
-    alignerConfig.crystalsPerChannel = 6 * 6 * 8;
-    alignerConfig.coinProtocol.timeWindow_ps = 2000;
-    alignerConfig.coinProtocol.delayTime_ps = 2000000;
-    alignerConfig.coinProtocol.energyLower_eV = kEnergyLower_eV;
-    alignerConfig.coinProtocol.energyUpper_eV = kEnergyUpper_eV;
-    alignerConfig.networkLatencyMargin_pico = 10'000'000'000;      // 10ms 网络延迟裕量
-    alignerConfig.processingIntervalMs = 100;                      // 100ms 处理间隔
-    alignerConfig.maxChunksPerNode = 200;                          // 每节点最大200个chunk
-    alignerConfig.maxTotalMemoryBytes = 1ULL * 1024 * 1024 * 1024; // 1GB 内存限制
+    openpni::CoincidenceProtocol coinProtocol;
+    coinProtocol.timeWindow_ps = k9120TimeWindowPs;
+    coinProtocol.delayTime_ps = k9120DelayTimePs;
+    coinProtocol.energyLower_eV = k9120EnergyLower_eV;
+    coinProtocol.energyUpper_eV = k9120EnergyUpper_eV;
 
-    const auto energyStats = analyzeSinglesEnergy(validFiles);
+    TimeAlignerConfig alignerConfig = createBDM50100_9120AlignerConfig(outputDir, coinProtocol);
+    alignerConfig.networkLatencyMargin_pico = opts.networkLatencyMarginPs;
+    alignerConfig.processingIntervalMs = opts.processingIntervalMs;
+    alignerConfig.maxChunksPerNode = opts.maxChunksPerNode;
+    alignerConfig.maxTotalMemoryBytes = opts.maxTotalMemoryBytes;
+
+    std::vector<std::string> energyProbePaths;
+    if (!nodeFiles[0].empty())
+    {
+        energyProbePaths.push_back(nodeFiles[0].front());
+    }
+    if (!nodeFiles[1].empty())
+    {
+        energyProbePaths.push_back(nodeFiles[1].front());
+    }
+
+    const auto energyStats = analyzeSinglesEnergy(energyProbePaths);
     if (energyStats.total > 0 && energyStats.inWindow_eV == 0 && energyStats.inWindow_keV > 0)
     {
-        alignerConfig.coinProtocol.energyLower_eV = kEnergyLower_eV / 1000.0f;
-        alignerConfig.coinProtocol.energyUpper_eV = kEnergyUpper_eV / 1000.0f;
+        alignerConfig.coinProtocol.energyLower_eV = k9120EnergyLower_eV / 1000.0f;
+        alignerConfig.coinProtocol.energyUpper_eV = k9120EnergyUpper_eV / 1000.0f;
         std::cout << "[Energy] Auto-switch window to keV scale: "
                   << alignerConfig.coinProtocol.energyLower_eV << "~"
                   << alignerConfig.coinProtocol.energyUpper_eV << std::endl;
     }
 
-    std::cout << "  Config:" << std::endl;
+    std::cout << "  Aligner:" << std::endl;
     std::cout << "    Channel num: " << alignerConfig.channelNum << std::endl;
     std::cout << "    Crystals per channel: " << alignerConfig.crystalsPerChannel << std::endl;
-    // std::cout << "    Time window: " << coinProtocol.timeWindow_ps << " ps" << std::endl;
-    // std::cout << "    Delay time: " << coinProtocol.delayTime_ps << " ps" << std::endl;
     std::cout << "    Output dir: " << outputDir << std::endl;
+    std::cout << "    Safety margin (100fs): " << alignerConfig.getTotalSafetyMargin() << std::endl;
 
-    // 创建 StreamingTimeAligner
-    StreamingTimeAligner aligner(alignerConfig, nodeCount);
-
-    // 启动处理线程
+    StreamingTimeAligner aligner(alignerConfig, kNodeCount);
     aligner.start();
     std::cout << "  StreamingTimeAligner started" << std::endl;
 
-    // 创建多个线程并行加载数据文件
-    std::vector<std::thread> loaderThreads;
-    std::vector<std::atomic<bool>> loadResults(nodeCount);
-
-    for (size_t i = 0; i < nodeCount; ++i)
+    std::atomic<bool> monitorStop{false};
+    std::thread monitorThread;
+    if (opts.monitorIntervalMs > 0)
     {
-        loadResults[i].store(false);
-        loaderThreads.emplace_back(
-            fileLoaderThread,
-            aligner.getNodeBuffer(i),
-            static_cast<uint16_t>(i),
-            validFiles[i],
-            10, // 10ms 模拟延迟，测试乱序处理
-            &loadResults[i]);
+        monitorThread = std::thread(alignerMonitorThread, &aligner, &monitorStop, opts.monitorIntervalMs);
     }
 
-    // 等待所有加载线程完成
-    std::cout << "  Waiting for file loaders to complete..." << std::endl;
+    const auto loadStart = std::chrono::steady_clock::now();
+
+    std::vector<std::thread> loaderThreads;
+    std::vector<std::atomic<bool>> loadResults(kNodeCount);
+    std::array<NodeLoaderStats, kNodeCount> loaderStats{};
+
+    for (size_t i = 0; i < kNodeCount; ++i)
+    {
+        loadResults[i].store(false);
+        if (opts.burstMode)
+        {
+            loaderThreads.emplace_back(
+                pathsLoaderThread,
+                aligner.getNodeBuffer(static_cast<uint16_t>(i)),
+                static_cast<uint16_t>(i),
+                nodeFiles[i],
+                0,
+                &loadResults[i]);
+        }
+        else
+        {
+            loaderThreads.emplace_back(
+                rateLimitedPathsLoaderThread,
+                aligner.getNodeBuffer(static_cast<uint16_t>(i)),
+                static_cast<uint16_t>(i),
+                nodeFiles[i],
+                opts,
+                &loaderStats[i],
+                &loadResults[i]);
+        }
+    }
+
+    std::cout << "  Waiting for " << (opts.burstMode ? "burst" : "rate-limited")
+              << " loaders to complete..." << std::endl;
     for (auto &t : loaderThreads)
     {
         t.join();
     }
 
-    // 检查加载结果
-    bool allLoaded = true;
-    for (size_t i = 0; i < nodeCount; ++i)
+    const auto loadEnd = std::chrono::steady_clock::now();
+    const double loadElapsedSec =
+        std::chrono::duration<double>(loadEnd - loadStart).count();
+
+    monitorStop.store(true, std::memory_order_relaxed);
+    if (monitorThread.joinable())
+    {
+        monitorThread.join();
+    }
+
+    for (size_t i = 0; i < kNodeCount; ++i)
     {
         if (!loadResults[i].load())
         {
-            std::cerr << "  Node " << i << " failed to load data" << std::endl;
-            allLoaded = false;
+            aligner.stop(false);
+            std::cerr << "FAIL: Node " << i << " failed to load data" << std::endl;
+            return false;
         }
     }
 
-    if (!allLoaded)
+    const auto &statsBeforeStop = aligner.getStatistics();
+    std::cout << "  Load finished in " << loadElapsedSec << " s" << std::endl;
+    std::cout << "  Before stop: processed=" << statsBeforeStop.totalSinglesProcessed.load()
+              << " watermarkBatches=" << statsBeforeStop.chunksProcessed.load() << std::endl;
+
+    for (size_t i = 0; i < kNodeCount; ++i)
     {
-        aligner.stop(false);
-        std::cerr << "FAIL: Some files failed to load" << std::endl;
+        if (!opts.burstMode)
+        {
+            std::cout << "  Loader node " << i << ": chunks=" << loaderStats[i].chunksPushed
+                      << " singles=" << loaderStats[i].singlesPushed
+                      << " throttleSec=" << loaderStats[i].throttleSleepSec << std::endl;
+        }
+    }
+
+    std::cout << "  Stopping aligner (flush remaining)..." << std::endl;
+    aligner.stop(true);
+
+    const auto &stats = aligner.getStatistics();
+    const uint64_t processedBeforeStop = statsBeforeStop.totalSinglesProcessed.load();
+    const uint64_t processedTotal = stats.totalSinglesProcessed.load();
+    const uint64_t flushedSingles = processedTotal > processedBeforeStop
+                                        ? processedTotal - processedBeforeStop
+                                        : 0;
+    const double flushRatio = processedTotal > 0
+                                  ? static_cast<double>(flushedSingles) / static_cast<double>(processedTotal)
+                                  : 0.0;
+
+    std::cout << "\n  Processing Statistics:" << std::endl;
+    std::cout << "    Singles processed: " << processedTotal << std::endl;
+    std::cout << "    Prompt pairs: " << stats.totalPromptPairs.load() << std::endl;
+    std::cout << "    Delay pairs: " << stats.totalDelayPairs.load() << std::endl;
+    std::cout << "    Watermark batches: " << stats.chunksProcessed.load() << std::endl;
+    std::cout << "    Flush singles: " << flushedSingles << " (" << (flushRatio * 100.0) << "%)" << std::endl;
+    std::cout << "    Avg batch time: " << stats.avgProcessingTime_ms.load() << " ms" << std::endl;
+
+    if (!opts.burstMode && stats.chunksProcessed.load() < opts.minWatermarkBatches)
+    {
+        std::cerr << "FAIL: Watermark batches (" << stats.chunksProcessed.load()
+                  << ") < minWatermarkBatches (" << opts.minWatermarkBatches
+                  << "); streaming may not be exercising real-time path" << std::endl;
         return false;
     }
 
-    std::cout << "  All files loaded successfully" << std::endl;
-
-    // 等待处理完成（给一些时间让数据被处理）
-    std::cout << "  Waiting for processing to complete..." << std::endl;
-    std::this_thread::sleep_for(std::chrono::seconds(3));
-
-    // 停止并等待所有数据处理完毕
-    aligner.stop(true);
-
-    // 获取统计信息
-    const auto &stats = aligner.getStatistics();
-    std::cout << "\n  Processing Statistics:" << std::endl;
-    std::cout << "    Singles processed: " << stats.totalSinglesProcessed.load() << std::endl;
-    std::cout << "    Prompt pairs: " << stats.totalPromptPairs.load() << std::endl;
-    std::cout << "    Delay pairs: " << stats.totalDelayPairs.load() << std::endl;
-    std::cout << "    Chunks processed: " << stats.chunksProcessed.load() << std::endl;
-    std::cout << "    Avg processing time: " << stats.avgProcessingTime_ms.load() << " ms" << std::endl;
-
-    // 检查输出文件
-    std::string promptFile = outputDir + "/prompt.lmf";
-    std::string delayFile = outputDir + "/delay.lmf";
-
-    bool promptExists = fs::exists(promptFile);
-    bool delayExists = fs::exists(delayFile);
-
-    std::cout << "\n  Output Files:" << std::endl;
-    if (promptExists)
+    if (!opts.burstMode && flushRatio > 0.20)
     {
-        std::cout << "    Prompt: " << promptFile << " ("
-                  << fs::file_size(promptFile) << " bytes)" << std::endl;
-    }
-    if (delayExists)
-    {
-        std::cout << "    Delay: " << delayFile << " ("
-                  << fs::file_size(delayFile) << " bytes)" << std::endl;
+        std::cerr << "WARN: >20% singles processed in final flush; consider lower margin or higher send rate" << std::endl;
     }
 
-    // 验证处理结果
-    if (stats.totalSinglesProcessed.load() > 0)
-    {
-        std::cout << "PASS: Streaming Coincidence Computation" << std::endl;
-        return true;
-    }
-    else
+    const std::string promptFile = outputDir + "/prompt.lmf";
+    const std::string delayFile = outputDir + "/delay.lmf";
+
+    if (processedTotal == 0)
     {
         std::cerr << "FAIL: No singles were processed" << std::endl;
         return false;
     }
+    if (stats.totalPromptPairs.load() == 0 || stats.totalDelayPairs.load() == 0)
+    {
+        std::cerr << "FAIL: Expected both prompt and delay pairs > 0" << std::endl;
+        return false;
+    }
+    if (!fs::exists(promptFile) || !fs::exists(delayFile))
+    {
+        std::cerr << "FAIL: Output LMF files missing" << std::endl;
+        return false;
+    }
+    if (fs::file_size(promptFile) == 0 || fs::file_size(delayFile) == 0)
+    {
+        std::cerr << "FAIL: Output LMF files are empty" << std::endl;
+        return false;
+    }
+
+    std::cout << "\n  Output Files:" << std::endl;
+    std::cout << "    Prompt: " << promptFile << " (" << fs::file_size(promptFile) << " bytes)" << std::endl;
+    std::cout << "    Delay: " << delayFile << " (" << fs::file_size(delayFile) << " bytes)" << std::endl;
+
+    if (opts.skipLmfAnalysis)
+    {
+        std::cout << "PASS: 9120 Dual-Node Streaming Coincidence (LMF analysis skipped)" << std::endl;
+        return true;
+    }
+
+    const int16_t timeWindow100fs = static_cast<int16_t>(k9120TimeWindowPs * 10);
+    const LmfStats promptStats = analyzeLmfFile(promptFile, timeWindow100fs);
+    const LmfStats delayStats = analyzeLmfFile(delayFile, timeWindow100fs);
+
+    if (promptStats.overWindowDtCount > 0)
+    {
+        std::cerr << "FAIL: Prompt LMF has " << promptStats.overWindowDtCount
+                  << " events over time window" << std::endl;
+        return false;
+    }
+
+    if (!validate9120PromptChannelSep(promptStats))
+    {
+        std::cerr << "FAIL: Prompt channelSep peak not at 144 or 288 (9120 dual-node)" << std::endl;
+        return false;
+    }
+
+    std::cout << "  Delay events: " << delayStats.totalEvents << std::endl;
+
+    std::cout << "PASS: 9120 Dual-Node Streaming Coincidence" << std::endl;
+    return true;
 }
 
 /**
- * @brief 测试8：单独测试文件加载到缓冲区功能
+ * @brief 测试8：9120 node0 singles 文件加载到缓冲区
  */
 bool testFileToBufferLoading()
 {
-    std::cout << "\n=== Test 8: File to Buffer Loading ===" << std::endl;
+    std::cout << "\n=== Test 8: File to Buffer Loading (9120 node0) ===" << std::endl;
 
-    // 使用一个测试文件
-    std::string testFile = "/media/lenovo/9e9a8f5e-9976-4563-bba3-f45659126f6c/pni_dis_r2c/data/res/singles_50100_split/singles_50100_test_ch0-35_n36.lsingle";
-
-    if (!fs::exists(testFile))
+    const std::string node0Dir = std::string(k9120DataRoot) + "/pni_singles_node0";
+    const auto allFiles = collectSinglesFiles(node0Dir);
+    if (allFiles.empty())
     {
-        std::cout << "  Test file not found: " << testFile << std::endl;
+        std::cout << "  Singles dir not found or empty: " << node0Dir << std::endl;
         std::cout << "  Test skipped." << std::endl;
         return true;
     }
 
-    // 创建共享内存池和缓冲区
-    // 测试文件有 456 段，每段约 135K singles，每个 single 16 字节
-    // 总数据量约 456 * 135000 * 16 = ~1GB，需要足够大的内存池
-    const size_t maxMemory = 2ULL * 1024 * 1024 * 1024; // 2GB
+    const std::vector<std::string> singlesFiles = {allFiles.front()};
+
+    std::cout << "  Loading " << singlesFiles.size() << " file(s) from " << node0Dir << std::endl;
+    for (const auto &f : singlesFiles)
+    {
+        std::cout << "    " << f << std::endl;
+    }
+
+    const size_t maxMemory = 2ULL * 1024 * 1024 * 1024;
     SharedMemoryPool memPool(maxMemory);
-    NodeRingBuffer buffer(0, 500, &memPool); // 允许 500 个 chunks
+    NodeRingBuffer buffer(0, 1000, &memPool);
 
-    std::cout << "  Loading file: " << testFile << std::endl;
-
-    // 加载文件
-    bool loadResult = loadSingleFileToBuffer(&buffer, 0, testFile, 0);
-
+    const bool loadResult = loadSinglesPathsToBuffer(&buffer, 0, singlesFiles, 0);
     if (!loadResult)
     {
-        std::cerr << "FAIL: Failed to load file to buffer" << std::endl;
+        std::cerr << "FAIL: Failed to load singles to buffer" << std::endl;
         return false;
     }
 
-    // 统计缓冲区内容
     size_t totalChunks = buffer.size();
     size_t totalSingles = 0;
     uint64_t minTime = UINT64_MAX;
@@ -912,7 +1631,6 @@ bool testFileToBufferLoading()
 
     memPool.printStatus();
 
-    // 读取并验证数据
     while (auto chunk = buffer.tryPop())
     {
         totalSingles += chunk->singles.size();
@@ -925,24 +1643,35 @@ bool testFileToBufferLoading()
 
     std::cout << "  Data summary:" << std::endl;
     std::cout << "    Total singles: " << totalSingles << std::endl;
-    std::cout << "    Time range: [" << minTime << ", " << maxTime << "] pico" << std::endl;
-    std::cout << "    Time span: " << (maxTime - minTime) / 1e12 << " seconds" << std::endl;
-
     if (totalSingles > 0)
+    {
+        std::cout << "    Time range: [" << minTime << ", " << maxTime << "] (100fs units)" << std::endl;
+    }
+
+    if (totalSingles > 0 && totalChunks > 0)
     {
         std::cout << "PASS: File to Buffer Loading" << std::endl;
         return true;
     }
-    else
-    {
-        std::cerr << "FAIL: No singles loaded" << std::endl;
-        return false;
-    }
+
+    std::cerr << "FAIL: No singles loaded" << std::endl;
+    return false;
 }
 // ==================== 主函数 ====================
 
-int main()
+int main(int argc, char **argv)
 {
+    Test9120StreamOptions test9120Opts = defaultTest9120StreamOptions();
+    try
+    {
+        test9120Opts = parseTest9120CliOptions(argc, argv, test9120Opts);
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Argument error: " << e.what() << std::endl;
+        return 1;
+    }
+
     std::cout << "=======================================" << std::endl;
     std::cout << " Streaming Coincidence System Tests" << std::endl;
     std::cout << "=======================================" << std::endl;
@@ -950,44 +1679,43 @@ int main()
     int passed = 0;
     int failed = 0;
 
-    // 运行基础测试
-    if (testNodeRingBuffer())
-        passed++;
-    else
-        failed++;
-    if (testMultiProducerBuffer())
-        passed++;
-    else
-        failed++;
-    if (testTimeRangeCalculation())
-        passed++;
-    else
-        failed++;
-    if (testConfigCreation())
-        passed++;
-    else
-        failed++;
-    if (testSharedMemoryPool())
-        passed++;
-    else
-        failed++;
-    if (testBufferWithMemoryPool())
-        passed++;
-    else
-        failed++;
-    // 运行文件加载测试
-    if (testFileToBufferLoading())
+    if (!test9120Opts.test7Only)
+    {
+        if (testNodeRingBuffer())
+            passed++;
+        else
+            failed++;
+        if (testMultiProducerBuffer())
+            passed++;
+        else
+            failed++;
+        if (testTimeRangeCalculation())
+            passed++;
+        else
+            failed++;
+        if (testConfigCreation())
+            passed++;
+        else
+            failed++;
+        if (testSharedMemoryPool())
+            passed++;
+        else
+            failed++;
+        if (testBufferWithMemoryPool())
+            passed++;
+        else
+            failed++;
+        if (testFileToBufferLoading())
+            passed++;
+        else
+            failed++;
+    }
+
+    if (testStreamingCoincidenceComputation(test9120Opts))
         passed++;
     else
         failed++;
 
-    // 运行完整的流式符合计算测试
-    if (testStreamingCoincidenceComputation())
-        passed++;
-    else
-        failed++;
-
-    // 总结
     std::cout << "\n=======================================" << std::endl;
     std::cout << " Test Summary: " << passed << " passed, " << failed << " failed" << std::endl;
     std::cout << "=======================================" << std::endl;

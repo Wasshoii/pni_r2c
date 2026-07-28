@@ -466,9 +466,11 @@ namespace openpni::distributed::streaming
 
     uint64_t TimeAlignerConfig::getTotalSafetyMargin() const
     {
-        const uint64_t coinWindow_pico = static_cast<uint64_t>(coinProtocol.timeWindow_ps);
-        const uint64_t delayWindow_pico = static_cast<uint64_t>(coinProtocol.delayTime_ps);
-        return networkLatencyMargin_pico + std::max(coinWindow_pico, delayWindow_pico);
+        const uint64_t coinWindow_ps = static_cast<uint64_t>(coinProtocol.timeWindow_ps);
+        const uint64_t delayWindow_ps = static_cast<uint64_t>(coinProtocol.delayTime_ps);
+        // Watermark 与 singles 时间戳同为 100fs；ps 配置值需 ×10
+        return networkLatencyMargin_pico * 10
+               + std::max(coinWindow_ps, delayWindow_ps) * 10;
     }
 
     void ProcessingStatistics::reset()
@@ -803,6 +805,21 @@ namespace openpni::distributed::streaming
         config.channelNum = 48;
         config.crystalsPerChannel = 169 * 4;
         config.coinProtocol = coinProtocol;
+        return config;
+    }
+
+    TimeAlignerConfig createBDM50100_9120AlignerConfig(
+        const std::string &outputDir,
+        const openpni::CoincidenceProtocol &coinProtocol)
+    {
+        TimeAlignerConfig config;
+        config.outputDir = outputDir;
+        config.channelNum = 576;
+        config.crystalsPerChannel = 6 * 6 * 8;
+        config.coinProtocol = coinProtocol;
+        config.maxChunksPerNode = 1000;
+        config.maxTotalMemoryBytes = 8ULL * 1024 * 1024 * 1024;
+        config.processingIntervalMs = 100;
         return config;
     }
 

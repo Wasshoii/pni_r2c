@@ -19,6 +19,9 @@ option(R2C_BUILD_TEST_ACQ_DATAPATH_UDP "Build acquisition datapath UDP test (req
 option(R2C_BUILD_TEST_PNI_R2C "Build PNI R2C test (requires libpni, nvcc, tbb)" OFF)
 option(R2C_BUILD_TEST_PNI_COIN "Build PNI standalone coincidence test (requires libpni, nvcc, tbb)" OFF)
 option(R2C_BUILD_TEST_LOCAL_GRPC_R2S "Build local gRPC R2S test (requires libpni, nvcc, tbb)" OFF)
+option(R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN "Build local gRPC R2S→coincidence E2E test (requires libpni, nvcc, tbb)" OFF)
+option(R2C_BUILD_TEST_LOCAL_GRPC_SINGLES_INGRESS "Build L2 gRPC singles ingress test (requires libpni)" OFF)
+option(R2C_BUILD_TEST_LOCAL_GRPC_COIN_STREAM "Build L3 gRPC coincidence stream test (requires libpni, nvcc, tbb)" OFF)
 option(R2C_BUILD_TEST_ACQ_R2S_PIPELINE "Build acquisition to R2S pipeline test (requires libpni, nvcc, tbb)" OFF)
 option(R2C_BUILD_TEST_R2S_MULTI_GPU "Build BDM50100 multi-GPU R2S test (requires libpni, nvcc, tbb)" OFF)
 option(R2C_BUILD_TEST_COIN_MULTI_GPU "Build coincidence multi-GPU consistency test (requires libpni, nvcc, tbb)" OFF)
@@ -60,6 +63,12 @@ endif()
 # Keep migration low-risk: use pkg-config (same dependency source as Makefile).
 pkg_check_modules(R2C_GRPC REQUIRED IMPORTED_TARGET grpc++ protobuf)
 pkg_check_modules(R2C_GLOG REQUIRED IMPORTED_TARGET libglog gflags)
+pkg_check_modules(R2C_IBVERBS REQUIRED IMPORTED_TARGET libibverbs)
+
+option(OPENPNI_ENABLE_RDMA "Build RDMA (RoCE) singles data plane (required)" ON)
+if(NOT OPENPNI_ENABLE_RDMA)
+  message(FATAL_ERROR "OPENPNI_ENABLE_RDMA is required; gRPC StreamSingles data plane has been removed")
+endif()
 
 set(R2C_PROTOC_EXECUTABLE "${R2C_PROTOC_DEFAULT}" CACHE FILEPATH "Path to protoc")
 set(R2C_GRPC_CPP_PLUGIN_EXECUTABLE "${R2C_GRPC_CPP_PLUGIN_DEFAULT}" CACHE FILEPATH "Path to grpc_cpp_plugin")
@@ -133,10 +142,34 @@ target_compile_options(r2c_proto_objs
     -pthread
 )
 
+add_library(r2c_dataplane_rdma_objs OBJECT
+  src/dataplane/rdma/HugepageArena.cpp
+  src/dataplane/rdma/SlotRing.cpp
+  src/dataplane/rdma/RdmaContext.cpp
+  src/dataplane/rdma/RdmaRecvServer.cpp
+  src/dataplane/rdma/RdmaWriteSender.cpp
+)
+target_include_directories(r2c_dataplane_rdma_objs
+  PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${R2C_PROTO_GEN_ROOT}"
+    "${R2C_PROTO_GEN_DIR}"
+)
+target_compile_options(r2c_dataplane_rdma_objs PRIVATE -Wall -Wextra -O3 -pthread)
+target_compile_definitions(r2c_dataplane_rdma_objs PRIVATE GLOG_USE_GLOG_EXPORT)
+target_link_libraries(r2c_dataplane_rdma_objs
+  PUBLIC
+    PkgConfig::R2C_IBVERBS
+    PkgConfig::R2C_GLOG
+    PkgConfig::R2C_GRPC
+)
+
 # Optional explicit target to (re)generate proto/grpc sources.
 add_custom_target(r2c_proto
   DEPENDS ${R2C_PROTO_GEN_SRCS} ${R2C_PROTO_GEN_HDRS}
 )
+add_dependencies(r2c_dataplane_rdma_objs r2c_proto)
 
 if(R2C_BUILD_TEST_BASIC)
   add_executable(test_distributed_clock_sync tests/test_distributed_clock_sync.cpp)
@@ -166,12 +199,13 @@ if(R2C_BUILD_TEST_GRPC)
   target_link_libraries(test_distributed_clock_sync_grpc
     PRIVATE
       PkgConfig::R2C_GRPC
+      PkgConfig::R2C_IBVERBS
       PkgConfig::R2C_GLOG
       dl
   )
 endif()
 
-if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_COIN_MASTER OR R2C_BUILD_TEST_COIN_MULTI_GPU)
+if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_COIN_MASTER OR R2C_BUILD_TEST_COIN_MULTI_GPU OR R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN OR R2C_BUILD_TEST_LOCAL_GRPC_SINGLES_INGRESS OR R2C_BUILD_TEST_LOCAL_GRPC_COIN_STREAM)
   pkg_check_modules(R2C_PNI REQUIRED IMPORTED_TARGET libpni)
   pkg_check_modules(R2C_DPDK QUIET libdpdk)
 
@@ -262,6 +296,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
     PRIVATE
       PkgConfig::R2C_PNI
       PkgConfig::R2C_GRPC
+      PkgConfig::R2C_IBVERBS
       PkgConfig::R2C_GLOG
       dl
   )
@@ -287,7 +322,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
     )
   endif()
 
-  if(R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_COIN_MASTER)
+  if(R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_COIN_MASTER OR R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN OR R2C_BUILD_TEST_LOCAL_GRPC_COIN_STREAM)
     find_library(R2C_TBB_LIBRARY NAMES tbb REQUIRED)
     find_package(OpenMP REQUIRED)
 
@@ -316,6 +351,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
         PRIVATE
           PkgConfig::R2C_PNI
           PkgConfig::R2C_GRPC
+          PkgConfig::R2C_IBVERBS
           PkgConfig::R2C_GLOG
           OpenMP::OpenMP_CXX
           ${R2C_TBB_LIBRARY}
@@ -347,98 +383,194 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
         PRIVATE
           PkgConfig::R2C_PNI
           PkgConfig::R2C_GRPC
+          PkgConfig::R2C_IBVERBS
           PkgConfig::R2C_GLOG
           OpenMP::OpenMP_CXX
           ${R2C_TBB_LIBRARY}
       )
     endif()
 
-    add_library(r2c_grpc_service_coin_objs OBJECT
-      src/grpcService/CoincidenceServiceImpl.cpp
-      src/grpcService/CoincidenceClient.cpp
-    )
-    target_include_directories(r2c_grpc_service_coin_objs
-      PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}"
-        "${R2C_PROTO_GEN_ROOT}"
-        "${R2C_PROTO_GEN_DIR}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    )
-    target_compile_options(r2c_grpc_service_coin_objs
-      PRIVATE
-        -Wall
-        -Wextra
-        -O3
-        -march=native
-        -fopenmp
-    )
-    target_link_libraries(r2c_grpc_service_coin_objs
-      PRIVATE
-        PkgConfig::R2C_PNI
-        PkgConfig::R2C_GRPC
-        PkgConfig::R2C_GLOG
-        OpenMP::OpenMP_CXX
-        ${R2C_TBB_LIBRARY}
-    )
+    if(NOT TARGET r2c_grpc_service_coin_objs)
+      add_library(r2c_grpc_service_coin_objs OBJECT
+        src/grpcService/CoincidenceServiceImpl.cpp
+        src/grpcService/CoincidenceClient.cpp
+      )
+      target_include_directories(r2c_grpc_service_coin_objs
+        PRIVATE
+          "${CMAKE_CURRENT_SOURCE_DIR}"
+          "${R2C_PROTO_GEN_ROOT}"
+          "${R2C_PROTO_GEN_DIR}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include"
+          "${CMAKE_CURRENT_SOURCE_DIR}/src"
+      )
+      target_compile_options(r2c_grpc_service_coin_objs
+        PRIVATE
+          -Wall
+          -Wextra
+          -O3
+          -march=native
+          -fopenmp
+      )
+      target_link_libraries(r2c_grpc_service_coin_objs
+        PRIVATE
+          PkgConfig::R2C_PNI
+          PkgConfig::R2C_GRPC
+          PkgConfig::R2C_GLOG
+          PkgConfig::R2C_IBVERBS
+          OpenMP::OpenMP_CXX
+          ${R2C_TBB_LIBRARY}
+      )
+    endif()
 
-    add_library(r2c_grpc_node_coin_objs OBJECT
-      src/grpcNode/coinNode.cpp
-    )
-    target_include_directories(r2c_grpc_node_coin_objs
-      PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}"
-        "${R2C_PROTO_GEN_ROOT}"
-        "${R2C_PROTO_GEN_DIR}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    )
-    target_compile_options(r2c_grpc_node_coin_objs
-      PRIVATE
-        -Wall
-        -Wextra
-        -O3
-        -march=native
-        -fopenmp
-    )
-    target_link_libraries(r2c_grpc_node_coin_objs
-      PRIVATE
-        PkgConfig::R2C_PNI
-        PkgConfig::R2C_GRPC
-        PkgConfig::R2C_GLOG
-        OpenMP::OpenMP_CXX
-        ${R2C_TBB_LIBRARY}
-    )
+    if(NOT TARGET r2c_grpc_node_coin_objs)
+      add_library(r2c_grpc_node_coin_objs OBJECT
+        src/grpcNode/coinNode.cpp
+      )
+      target_include_directories(r2c_grpc_node_coin_objs
+        PRIVATE
+          "${CMAKE_CURRENT_SOURCE_DIR}"
+          "${R2C_PROTO_GEN_ROOT}"
+          "${R2C_PROTO_GEN_DIR}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include"
+          "${CMAKE_CURRENT_SOURCE_DIR}/src"
+      )
+      target_compile_options(r2c_grpc_node_coin_objs
+        PRIVATE
+          -Wall
+          -Wextra
+          -O3
+          -march=native
+          -fopenmp
+      )
+      target_link_libraries(r2c_grpc_node_coin_objs
+        PRIVATE
+          PkgConfig::R2C_PNI
+          PkgConfig::R2C_GRPC
+          PkgConfig::R2C_IBVERBS
+          PkgConfig::R2C_GLOG
+          OpenMP::OpenMP_CXX
+          ${R2C_TBB_LIBRARY}
+      )
+    endif()
 
-    add_executable(test_local_grpc_coin
-      tests/test_local_grpc_coin.cpp
-      ${R2C_S2C_COMPUTE_OBJ}
-      $<TARGET_OBJECTS:r2c_grpc_service_coin_objs>
-      $<TARGET_OBJECTS:r2c_grpc_node_coin_objs>
-      $<TARGET_OBJECTS:r2c_core_streaming_objs>
-      $<TARGET_OBJECTS:r2c_proto_objs>
-    )
-    target_include_directories(test_local_grpc_coin
-      PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}"
-        "${R2C_PROTO_GEN_ROOT}"
-        "${R2C_PROTO_GEN_DIR}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    )
-    target_compile_options(test_local_grpc_coin PRIVATE -O3 -march=native -fopenmp)
-    target_link_libraries(test_local_grpc_coin
-      PRIVATE
-        PkgConfig::R2C_PNI
-        PkgConfig::R2C_GRPC
-        PkgConfig::R2C_GLOG
-        OpenMP::OpenMP_CXX
-        ${R2C_TBB_LIBRARY}
-        dl
-    )
+    if(R2C_BUILD_TEST_LOCAL_GRPC_COIN)
+      add_executable(test_local_grpc_coin
+        tests/test_local_grpc_coin.cpp
+        ${R2C_S2C_COMPUTE_OBJ}
+        $<TARGET_OBJECTS:r2c_grpc_service_coin_objs>
+        $<TARGET_OBJECTS:r2c_dataplane_rdma_objs>
+        $<TARGET_OBJECTS:r2c_grpc_node_coin_objs>
+        $<TARGET_OBJECTS:r2c_core_streaming_objs>
+        $<TARGET_OBJECTS:r2c_proto_objs>
+      )
+      target_include_directories(test_local_grpc_coin
+        PRIVATE
+          "${CMAKE_CURRENT_SOURCE_DIR}"
+          "${R2C_PROTO_GEN_ROOT}"
+          "${R2C_PROTO_GEN_DIR}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include"
+          "${CMAKE_CURRENT_SOURCE_DIR}/src"
+      )
+      target_compile_options(test_local_grpc_coin PRIVATE -O3 -march=native -fopenmp)
+      target_link_libraries(test_local_grpc_coin
+        PRIVATE
+          PkgConfig::R2C_PNI
+          PkgConfig::R2C_GRPC
+          PkgConfig::R2C_IBVERBS
+          PkgConfig::R2C_GLOG
+          OpenMP::OpenMP_CXX
+          ${R2C_TBB_LIBRARY}
+          dl
+      )
+    endif()
+
+    if(R2C_BUILD_TEST_LOCAL_GRPC_SINGLES_INGRESS)
+      add_executable(test_local_grpc_singles_ingress
+        tests/test_local_grpc_singles_ingress.cpp
+        tests/grpc_singles_replay.cpp
+        $<TARGET_OBJECTS:r2c_dataplane_rdma_objs>
+        $<TARGET_OBJECTS:r2c_proto_objs>
+      )
+      target_include_directories(test_local_grpc_singles_ingress
+        PRIVATE
+          "${CMAKE_CURRENT_SOURCE_DIR}"
+          "${R2C_PROTO_GEN_ROOT}"
+          "${R2C_PROTO_GEN_DIR}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include"
+          "${CMAKE_CURRENT_SOURCE_DIR}/src"
+      )
+      target_compile_options(test_local_grpc_singles_ingress PRIVATE -O3 -march=native)
+      target_link_libraries(test_local_grpc_singles_ingress
+        PRIVATE
+          PkgConfig::R2C_PNI
+          PkgConfig::R2C_GRPC
+          PkgConfig::R2C_GLOG
+          PkgConfig::R2C_IBVERBS
+          dl
+      )
+
+      add_executable(test_rdma_dataplane_loopback
+        tests/test_rdma_dataplane_loopback.cpp
+        $<TARGET_OBJECTS:r2c_dataplane_rdma_objs>
+        $<TARGET_OBJECTS:r2c_proto_objs>
+      )
+      target_include_directories(test_rdma_dataplane_loopback
+        PRIVATE
+          "${CMAKE_CURRENT_SOURCE_DIR}"
+          "${R2C_PROTO_GEN_ROOT}"
+          "${R2C_PROTO_GEN_DIR}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include"
+          "${CMAKE_CURRENT_SOURCE_DIR}/src"
+      )
+      target_compile_options(test_rdma_dataplane_loopback PRIVATE -O2 -pthread)
+      target_link_libraries(test_rdma_dataplane_loopback
+        PRIVATE
+          PkgConfig::R2C_PNI
+          PkgConfig::R2C_GRPC
+          PkgConfig::R2C_GLOG
+          PkgConfig::R2C_IBVERBS
+          dl
+          pthread
+      )
+    endif()
+
+    if(R2C_BUILD_TEST_LOCAL_GRPC_COIN_STREAM)
+      add_executable(test_local_grpc_coin_stream
+        tests/test_local_grpc_coin_stream.cpp
+        tests/grpc_singles_replay.cpp
+        ${R2C_S2C_COMPUTE_OBJ}
+        $<TARGET_OBJECTS:r2c_grpc_service_coin_objs>
+        $<TARGET_OBJECTS:r2c_dataplane_rdma_objs>
+        $<TARGET_OBJECTS:r2c_grpc_node_coin_objs>
+        $<TARGET_OBJECTS:r2c_core_streaming_objs>
+        $<TARGET_OBJECTS:r2c_proto_objs>
+      )
+      target_include_directories(test_local_grpc_coin_stream
+        PRIVATE
+          "${CMAKE_CURRENT_SOURCE_DIR}"
+          "${R2C_PROTO_GEN_ROOT}"
+          "${R2C_PROTO_GEN_DIR}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include"
+          "${CMAKE_CURRENT_SOURCE_DIR}/src"
+      )
+      target_compile_options(test_local_grpc_coin_stream PRIVATE -O3 -march=native -fopenmp)
+      target_link_libraries(test_local_grpc_coin_stream
+        PRIVATE
+          PkgConfig::R2C_PNI
+          PkgConfig::R2C_GRPC
+          PkgConfig::R2C_IBVERBS
+          PkgConfig::R2C_GLOG
+          OpenMP::OpenMP_CXX
+          ${R2C_TBB_LIBRARY}
+          dl
+      )
+    endif()
 
     if(R2C_BUILD_APP_COIN_MASTER)
       add_executable(app_coin_master
@@ -446,6 +578,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
         $<TARGET_OBJECTS:r2c_app_common_objs>
         $<TARGET_OBJECTS:r2c_grpc_service_acq_master_objs>
         $<TARGET_OBJECTS:r2c_grpc_service_coin_objs>
+        $<TARGET_OBJECTS:r2c_dataplane_rdma_objs>
         $<TARGET_OBJECTS:r2c_grpc_node_coin_objs>
         ${R2C_S2C_COMPUTE_OBJ}
         $<TARGET_OBJECTS:r2c_core_streaming_objs>
@@ -465,6 +598,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
         PRIVATE
           PkgConfig::R2C_PNI
           PkgConfig::R2C_GRPC
+          PkgConfig::R2C_IBVERBS
           PkgConfig::R2C_GLOG
           OpenMP::OpenMP_CXX
           ${R2C_TBB_LIBRARY}
@@ -513,6 +647,7 @@ if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_ACQ_DATAPATH_UDP OR R2C_BUI
       PRIVATE
         PkgConfig::R2C_PNI
         PkgConfig::R2C_GRPC
+        PkgConfig::R2C_IBVERBS
         PkgConfig::R2C_GLOG
         OpenMP::OpenMP_CXX
         ${R2C_TBB_LIBRARY}
@@ -544,6 +679,7 @@ if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_ACQ_DATAPATH_UDP OR R2C_BUI
       PRIVATE
         PkgConfig::R2C_PNI
         PkgConfig::R2C_GRPC
+        PkgConfig::R2C_IBVERBS
         PkgConfig::R2C_GLOG
         OpenMP::OpenMP_CXX
         ${R2C_TBB_LIBRARY}
@@ -577,6 +713,7 @@ if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_ACQ_DATAPATH_UDP OR R2C_BUI
       PRIVATE
         PkgConfig::R2C_PNI
         PkgConfig::R2C_GRPC
+        PkgConfig::R2C_IBVERBS
         PkgConfig::R2C_GLOG
         OpenMP::OpenMP_CXX
         ${R2C_TBB_LIBRARY}
@@ -605,6 +742,7 @@ if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_ACQ_DATAPATH_UDP OR R2C_BUI
       PRIVATE
         PkgConfig::R2C_PNI
         PkgConfig::R2C_GRPC
+        PkgConfig::R2C_IBVERBS
         PkgConfig::R2C_GLOG
         OpenMP::OpenMP_CXX
         ${R2C_TBB_LIBRARY}
@@ -634,6 +772,7 @@ if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_ACQ_DATAPATH_UDP OR R2C_BUI
       PRIVATE
         PkgConfig::R2C_PNI
         PkgConfig::R2C_GRPC
+        PkgConfig::R2C_IBVERBS
         PkgConfig::R2C_GLOG
         OpenMP::OpenMP_CXX
         ${R2C_TBB_LIBRARY}
@@ -642,7 +781,7 @@ if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_ACQ_DATAPATH_UDP OR R2C_BUI
   endif()
 endif()
 
-if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRPC_R2S OR R2C_BUILD_TEST_ACQ_R2S_PIPELINE OR R2C_BUILD_APP_ACQ_R2S_NODE OR R2C_BUILD_TEST_R2S_MULTI_GPU)
+if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRPC_R2S OR R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN OR R2C_BUILD_TEST_ACQ_R2S_PIPELINE OR R2C_BUILD_APP_ACQ_R2S_NODE OR R2C_BUILD_TEST_R2S_MULTI_GPU)
   pkg_check_modules(R2C_PNI REQUIRED IMPORTED_TARGET libpni)
   pkg_check_modules(R2C_DPDK QUIET libdpdk)
   find_library(R2C_TBB_LIBRARY NAMES tbb REQUIRED)
@@ -768,6 +907,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
     PRIVATE
       PkgConfig::R2C_PNI
       PkgConfig::R2C_GRPC
+      PkgConfig::R2C_IBVERBS
       PkgConfig::R2C_GLOG
       OpenMP::OpenMP_CXX
       ${R2C_TBB_LIBRARY}
@@ -798,6 +938,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
       PRIVATE
         PkgConfig::R2C_PNI
         PkgConfig::R2C_GRPC
+        PkgConfig::R2C_IBVERBS
         PkgConfig::R2C_GLOG
         OpenMP::OpenMP_CXX
         ${R2C_TBB_LIBRARY}
@@ -831,6 +972,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
       PRIVATE
         PkgConfig::R2C_PNI
         PkgConfig::R2C_GRPC
+        PkgConfig::R2C_IBVERBS
         PkgConfig::R2C_GLOG
         OpenMP::OpenMP_CXX
         ${R2C_TBB_LIBRARY}
@@ -861,6 +1003,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
     PRIVATE
       PkgConfig::R2C_PNI
       PkgConfig::R2C_GRPC
+      PkgConfig::R2C_IBVERBS
       PkgConfig::R2C_GLOG
       OpenMP::OpenMP_CXX
       ${R2C_TBB_LIBRARY}
@@ -891,6 +1034,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
       PRIVATE
         PkgConfig::R2C_PNI
         PkgConfig::R2C_GRPC
+        PkgConfig::R2C_IBVERBS
         PkgConfig::R2C_GLOG
         OpenMP::OpenMP_CXX
         ${R2C_TBB_LIBRARY}
@@ -952,6 +1096,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
       ${R2C_R2S_CUDA_OBJS}
       $<TARGET_OBJECTS:r2c_core_r2s_objs>
       $<TARGET_OBJECTS:r2c_grpc_node_r2s_objs>
+      $<TARGET_OBJECTS:r2c_dataplane_rdma_objs>
       $<TARGET_OBJECTS:r2c_proto_objs>
     )
     target_include_directories(test_local_grpc_r2s
@@ -968,6 +1113,52 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
       PRIVATE
         PkgConfig::R2C_PNI
         PkgConfig::R2C_GRPC
+        PkgConfig::R2C_IBVERBS
+        PkgConfig::R2C_GLOG
+        OpenMP::OpenMP_CXX
+        ${R2C_TBB_LIBRARY}
+        dl
+    )
+  endif()
+
+  if(R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN)
+    if(NOT TARGET r2c_core_streaming_objs OR NOT TARGET r2c_grpc_service_coin_objs OR NOT TARGET r2c_grpc_node_coin_objs)
+      message(FATAL_ERROR
+        "R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN requires streaming/coin objects. "
+        "Ensure the streaming block is enabled (option itself pulls it in).")
+    endif()
+    if(NOT DEFINED R2C_S2C_COMPUTE_OBJ)
+      message(FATAL_ERROR "R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN requires R2C_S2C_COMPUTE_OBJ from streaming block")
+    endif()
+
+    add_executable(test_local_grpc_r2s_coin
+      tests/test_local_grpc_r2s_coin.cpp
+      tests/test_local_grpc_r2s_coin_r2s_runner.cpp
+      ${R2C_R2S_CUDA_OBJS}
+      ${R2C_S2C_COMPUTE_OBJ}
+      $<TARGET_OBJECTS:r2c_core_r2s_objs>
+      $<TARGET_OBJECTS:r2c_grpc_node_r2s_objs>
+      $<TARGET_OBJECTS:r2c_grpc_service_coin_objs>
+        $<TARGET_OBJECTS:r2c_dataplane_rdma_objs>
+      $<TARGET_OBJECTS:r2c_grpc_node_coin_objs>
+      $<TARGET_OBJECTS:r2c_core_streaming_objs>
+      $<TARGET_OBJECTS:r2c_proto_objs>
+    )
+    target_include_directories(test_local_grpc_r2s_coin
+      PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${R2C_PROTO_GEN_ROOT}"
+        "${R2C_PROTO_GEN_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    target_compile_options(test_local_grpc_r2s_coin PRIVATE -O3 -march=native -fopenmp)
+    target_link_libraries(test_local_grpc_r2s_coin
+      PRIVATE
+        PkgConfig::R2C_PNI
+        PkgConfig::R2C_GRPC
+        PkgConfig::R2C_IBVERBS
         PkgConfig::R2C_GLOG
         OpenMP::OpenMP_CXX
         ${R2C_TBB_LIBRARY}
@@ -984,6 +1175,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
       $<TARGET_OBJECTS:r2c_core_acq_objs>
       $<TARGET_OBJECTS:r2c_grpc_node_acq_objs>
       $<TARGET_OBJECTS:r2c_grpc_service_coin_client_objs>
+      $<TARGET_OBJECTS:r2c_dataplane_rdma_objs>
       $<TARGET_OBJECTS:r2c_proto_objs>
     )
     target_include_directories(app_acq_r2s_node
@@ -1000,6 +1192,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
       PRIVATE
         PkgConfig::R2C_PNI
         PkgConfig::R2C_GRPC
+        PkgConfig::R2C_IBVERBS
         PkgConfig::R2C_GLOG
         OpenMP::OpenMP_CXX
         ${R2C_TBB_LIBRARY}
@@ -1040,6 +1233,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
       PRIVATE
         PkgConfig::R2C_PNI
         PkgConfig::R2C_GRPC
+        PkgConfig::R2C_IBVERBS
         PkgConfig::R2C_GLOG
         OpenMP::OpenMP_CXX
         ${R2C_TBB_LIBRARY}
@@ -1095,6 +1289,7 @@ if(R2C_BUILD_TOOL_UDP_RAW_REPLAYER)
     PRIVATE
       PkgConfig::R2C_PNI
       PkgConfig::R2C_GRPC
+      PkgConfig::R2C_IBVERBS
       PkgConfig::R2C_GLOG
       OpenMP::OpenMP_CXX
       dl
@@ -1181,6 +1376,10 @@ r2c_set_output_dir(test_acquisition_datapath_udp test)
 r2c_set_output_dir(test_pni_r2c test)
 r2c_set_output_dir(test_pni_coin test)
 r2c_set_output_dir(test_local_grpc_r2s test)
+r2c_set_output_dir(test_local_grpc_r2s_coin test)
+r2c_set_output_dir(test_local_grpc_singles_ingress test)
+r2c_set_output_dir(test_rdma_dataplane_loopback test)
+r2c_set_output_dir(test_local_grpc_coin_stream test)
 r2c_set_output_dir(test_acquisition_r2s_pipeline test)
 r2c_set_output_dir(test_r2s50100_multi_gpu test)
 
@@ -1213,5 +1412,15 @@ r2c_register_test(test_acquisition_datapath_udp pni)
 r2c_register_test(test_pni_r2c cuda)
 r2c_register_test(test_pni_coin cuda)
 r2c_register_test(test_local_grpc_r2s cuda integration)
+r2c_register_test(test_local_grpc_r2s_coin cuda integration)
+if(BUILD_TESTING AND TARGET test_local_grpc_r2s_coin)
+  set_tests_properties(test_local_grpc_r2s_coin PROPERTIES TIMEOUT 7200)
+endif()
+r2c_register_test(test_local_grpc_singles_ingress pni integration)
+r2c_register_test(test_rdma_dataplane_loopback pni integration)
+r2c_register_test(test_local_grpc_coin_stream cuda integration)
+if(BUILD_TESTING AND TARGET test_local_grpc_coin_stream)
+  set_tests_properties(test_local_grpc_coin_stream PROPERTIES TIMEOUT 7200)
+endif()
 r2c_register_test(test_acquisition_r2s_pipeline cuda)
 r2c_register_test(test_r2s50100_multi_gpu cuda)

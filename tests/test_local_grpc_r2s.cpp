@@ -26,6 +26,8 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include "dataplane/rdma/ProtoConvert.hpp"
+#include "dataplane/rdma/RdmaRecvServer.hpp"
 #include "protos/coincidence.grpc.pb.h"
 #include "core/io/IOAdapter.hpp"
 #include "core/r2s/R2S.hpp"
@@ -35,6 +37,7 @@ namespace fs = std::filesystem;
 namespace coincidence = openpni::distributed::coincidence;
 namespace r2s = openpni::distributed::r2s;
 namespace grpcnode = openpni::distributed::grpcnode;
+namespace rdma = openpni::distributed::dataplane::rdma;
 
 namespace
 {
@@ -92,164 +95,66 @@ namespace
     class ReceiverOnlyCoincidenceService final : public coincidence::CoincidenceService::Service
     {
     public:
-        grpc::Status StreamSingles(
-            grpc::ServerContext * /*context*/,
-            grpc::ServerReader<coincidence::SingleChunkMessage> *reader,
-            coincidence::StreamResponse *response) override
+        ReceiverOnlyCoincidenceService()
         {
-            try
+            m_rdma = std::make_unique<rdma::RdmaRecvServer>(rdma::RdmaRecvServer::Config{});
+            m_rdma->setIngest([this](const rdma::SlotChunkView &view) {
+                m_totalChunksReceived.fetch_add(1, std::memory_order_relaxed);
+                m_totalSinglesReceived.fetch_add(view.singlesCount, std::memory_order_relaxed);
+                std::lock_guard<std::mutex> lock(m_mutex);
+                auto &node = m_nodes[view.nodeId];
+                node.connected = true;
+                node.chunksReceived += 1;
+                node.singlesReceived += view.singlesCount;
+                return true;
+            });
+            m_rdma->start();
+        }
+        ~ReceiverOnlyCoincidenceService() override
+        {
+            if (m_rdma) m_rdma->stop();
+        }
+
+
+        grpc::Status StreamSingles(
+            grpc::ServerContext *,
+            grpc::ServerReader<coincidence::SingleChunkMessage> *,
+            coincidence::StreamResponse *) override
+        {
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "use OpenDataPlane");
+        }
+
+        grpc::Status OpenDataPlane(
+            grpc::ServerContext *,
+            const coincidence::OpenDataPlaneRequest *request,
+            coincidence::OpenDataPlaneResponse *response) override
+        {
+            if (!m_rdma)
             {
-                coincidence::SingleChunkMessage msg;
-                uint64_t totalReceivedInRpc = 0;
-
-                while (reader->Read(&msg))
-                {
-                    const uint32_t nodeId = msg.node_id();
-                    const uint64_t singlesCount = static_cast<uint64_t>(msg.singles_size());
-                    const uint64_t segmentCount =
-                        msg.segment_metas_size() > 0 ? static_cast<uint64_t>(msg.segment_metas_size()) : 1ULL;
-
-                    totalReceivedInRpc += singlesCount;
-                    m_totalChunksReceived.fetch_add(segmentCount, std::memory_order_relaxed);
-                    m_totalSinglesReceived.fetch_add(singlesCount, std::memory_order_relaxed);
-
-                    {
-                        std::lock_guard<std::mutex> lock(m_mutex);
-                        auto &node = m_nodes[nodeId];
-                        node.connected = true;
-
-                        if (msg.segment_metas_size() > 0)
-                        {
-                            uint64_t singlesFromMeta = 0;
-                            for (const auto &meta : msg.segment_metas())
-                            {
-                                const uint64_t segmentSingles = static_cast<uint64_t>(meta.singles_count());
-                                node.chunksReceived += 1;
-                                node.singlesReceived += segmentSingles;
-                                singlesFromMeta += segmentSingles;
-
-                                if (meta.chunk_id() % 500 == 0)
-                                {
-                                    std::cout << "[Receiver] node=" << nodeId
-                                              << " chunk=" << meta.chunk_id()
-                                              << " singles=" << segmentSingles
-                                              << " totalSingles=" << m_totalSinglesReceived.load(std::memory_order_relaxed)
-                                              << std::endl;
-                                }
-                            }
-
-                            if (singlesFromMeta < singlesCount)
-                            {
-                                node.singlesReceived += (singlesCount - singlesFromMeta);
-                            }
-                        }
-                        else
-                        {
-                            node.chunksReceived += 1;
-                            node.singlesReceived += singlesCount;
-
-                            if (msg.chunk_id() % 500 == 0)
-                            {
-                                std::cout << "[Receiver] node=" << nodeId
-                                          << " chunk=" << msg.chunk_id()
-                                          << " singles=" << singlesCount
-                                          << " totalSingles=" << m_totalSinglesReceived.load(std::memory_order_relaxed)
-                                          << std::endl;
-                            }
-                        }
-                    }
-                }
-
-                response->set_success(true);
-                response->set_singles_received(totalReceivedInRpc);
-                response->set_message("Receiver-only mode: chunk stream accepted");
+                response->set_success(false);
+                response->set_message("rdma server missing");
                 return grpc::Status::OK;
             }
-            catch (const std::exception &e)
+            auto session = m_rdma->ensureSession(request->node_id());
+            if (!session)
             {
                 response->set_success(false);
-                response->set_singles_received(0);
-                response->set_message(std::string("Receiver exception: ") + e.what());
-                return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+                response->set_message("ensureSession failed");
+                return grpc::Status::OK;
             }
-            catch (...)
+            if (request->has_node_endpoint() && session->kind() == rdma::DataPlaneKind::RdmaRoceV2)
             {
-                response->set_success(false);
-                response->set_singles_received(0);
-                response->set_message("Receiver unknown exception");
-                return grpc::Status(grpc::StatusCode::INTERNAL, "Receiver unknown exception");
-            }
-        }
-
-        grpc::Status GetStatus(
-            grpc::ServerContext * /*context*/,
-            const coincidence::StatusRequest *request,
-            coincidence::StatusResponse *response) override
-        {
-            response->set_total_singles_received(m_totalSinglesReceived.load(std::memory_order_relaxed));
-            response->set_total_singles_processed(0);
-            response->set_total_prompt_pairs(0);
-            response->set_total_delay_pairs(0);
-            response->set_alignment_windows_processed(0);
-            response->set_avg_processing_time_ms(0.0);
-            response->set_current_time_boundary_pico(0);
-            response->set_is_running(true);
-            response->set_expected_node_count(static_cast<uint32_t>(m_nodes.size()));
-            response->set_connected_node_count(static_cast<uint32_t>(m_nodes.size()));
-            response->set_start_signal_issued(true);
-
-            if (request->include_node_stats())
-            {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                for (const auto &[nodeId, info] : m_nodes)
+                if (!session->acceptRemote(rdma::fromProtoEndpoint(request->node_endpoint())))
                 {
-                    auto *nodeStatus = response->add_node_stats();
-                    nodeStatus->set_node_id(nodeId);
-                    nodeStatus->set_chunks_received(info.chunksReceived);
-                    nodeStatus->set_singles_received(info.singlesReceived);
-                    nodeStatus->set_buffer_size(0);
-                    nodeStatus->set_connected(info.connected);
+                    response->set_success(false);
+                    response->set_message("acceptRemote failed");
+                    return grpc::Status::OK;
                 }
             }
-
-            return grpc::Status::OK;
-        }
-
-        grpc::Status WaitForStart(
-            grpc::ServerContext * /*context*/,
-            const coincidence::WaitForStartRequest *request,
-            coincidence::WaitForStartResponse *response) override
-        {
+            const auto local = session->localEndpoint();
             response->set_success(true);
-            response->set_start_signal_issued(true);
-            response->set_start_time_ms(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch())
-                    .count());
-            response->set_expected_node_count(static_cast<uint32_t>(m_nodes.size()));
-            response->set_connected_node_count(static_cast<uint32_t>(m_nodes.size()));
-            response->set_message("Receiver-only mode: start signal is always ready");
-            (void)request;
-            return grpc::Status::OK;
-        }
-
-        grpc::Status Control(
-            grpc::ServerContext * /*context*/,
-            const coincidence::ControlRequest * /*request*/,
-            coincidence::ControlResponse *response) override
-        {
-            response->set_success(true);
-            response->set_message("Receiver-only mode: control command ignored");
-            return grpc::Status::OK;
-        }
-
-        grpc::Status UpdateConfig(
-            grpc::ServerContext * /*context*/,
-            const coincidence::ConfigUpdateRequest * /*request*/,
-            coincidence::ConfigUpdateResponse *response) override
-        {
-            response->set_success(true);
-            response->set_message("Receiver-only mode: config update ignored");
+            response->set_data_plane_kind(rdma::toProto(local.kind));
+            rdma::fillProtoEndpoint(local, response->mutable_coin_endpoint());
             return grpc::Status::OK;
         }
 
@@ -310,6 +215,7 @@ namespace
         std::mutex m_mutex;
         std::unordered_map<uint32_t, ReceiverNodeStats> m_nodes;
         std::atomic<uint64_t> m_totalSinglesReceived{0};
+        std::unique_ptr<rdma::RdmaRecvServer> m_rdma;
         std::atomic<uint64_t> m_totalChunksReceived{0};
     };
 
@@ -959,7 +865,7 @@ int main(int argc, char **argv)
 
 /*
 Build example:
-    cmake --build --preset build-tests-pni --target test_local_grpc_r2s
+    cmake --build --preset build-tests-cuda --target test_local_grpc_r2s
 
 Run (9120 dual-node; default serial to avoid dual-GPU OOM on one card):
 ./bin/test/test_local_grpc_r2s \
@@ -973,6 +879,18 @@ Run (9120 dual-node; default serial to avoid dual-GPU OOM on one card):
 Parallel (requires enough free GPU VRAM for 2x 288ch R2S):
 ./bin/test/test_local_grpc_r2s --parallel
 
-External coincidence host:
-./bin/test/test_local_grpc_r2s --no-local-receiver --address 127.0.0.1:50051
+External coincidence host (protocol-only receiver):
+./bin/test/test_local_grpc_coin --expected-node-count 2 --address 127.0.0.1:50061
+./bin/test/test_local_grpc_r2s --no-local-receiver --parallel --address 127.0.0.1:50061
+
+Real R2S→streaming coincidence E2E (CoinGrpcNode + dual R2S in one process, multi-GPU only):
+./bin/test/test_local_grpc_r2s_coin
+
+L2 gRPC ingress (no CUDA, replays .lsingle files):
+./bin/test/test_local_grpc_singles_ingress --data-root /media/lenovo/1TB/50100data/test_9120
+
+L3 gRPC + streaming coincidence (single-GPU safe, replays .lsingle files):
+./bin/test/test_local_grpc_coin_stream --data-root /media/lenovo/1TB/50100data/test_9120 --disable-multi-gpu
+
+NOTE: L2/L3 require pre-computed singles from L1 offline R2S (pni_singles_node0/1).
 */

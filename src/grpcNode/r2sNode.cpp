@@ -20,6 +20,9 @@
 #include <glog/logging.h>
 
 #include "coincidence.grpc.pb.h"
+#include "core/streaming/PackedSingle.hpp"
+#include "dataplane/rdma/ProtoConvert.hpp"
+#include "dataplane/rdma/RdmaWriteSender.hpp"
 
 #ifdef DEBUG
 #include <fstream>
@@ -28,6 +31,8 @@
 namespace openpni::distributed::grpcnode
 {
     namespace coincidence = openpni::distributed::coincidence;
+    namespace streaming = openpni::distributed::streaming;
+    namespace rdma = openpni::distributed::dataplane::rdma;
 
 #ifdef DEBUG
     namespace
@@ -97,11 +102,13 @@ namespace openpni::distributed::grpcnode
                 uint32_t waitForStartTimeoutMs = 0;
                 uint32_t waitForStartRpcTimeoutMs = 15000;
                 uint32_t waitForStartRetryIntervalMs = 1000;
+                uint32_t parallelStreams = 1;
             };
 
             explicit PersistentNodeStreamSender(Config cfg)
                 : m_cfg(std::move(cfg))
             {
+                m_cfg.parallelStreams = 1;
             }
 
             ~PersistentNodeStreamSender()
@@ -118,14 +125,10 @@ namespace openpni::distributed::grpcnode
                 }
 
                 grpc::ChannelArguments channelArgs;
-                // Allow large singles chunks (still chunked in sendBatch to stay under this).
-                channelArgs.SetInt("grpc.max_receive_message_length", 256 * 1024 * 1024);
-                channelArgs.SetInt("grpc.max_send_message_length", 256 * 1024 * 1024);
-                channelArgs.SetInt("grpc.http2.bdp_probe", 1);
-                channelArgs.SetString("grpc.optimization_target", "throughput");
+                channelArgs.SetInt("grpc.max_receive_message_length", 16 * 1024 * 1024);
+                channelArgs.SetInt("grpc.max_send_message_length", 16 * 1024 * 1024);
                 channelArgs.SetInt("grpc.keepalive_time_ms", 20000);
                 channelArgs.SetInt("grpc.keepalive_timeout_ms", 10000);
-                channelArgs.SetInt("grpc.keepalive_permit_without_calls", 1);
 
                 m_channel = grpc::CreateCustomChannel(
                     m_cfg.serverAddress,
@@ -157,18 +160,18 @@ namespace openpni::distributed::grpcnode
                     waitUntil(plannedStartMs);
                 }
 
-                m_streamContext = std::make_unique<grpc::ClientContext>();
-                m_writer = m_stub->StreamSingles(m_streamContext.get(), &m_streamResponse);
-                if (!m_writer)
+                if (!openRdmaDataPlane())
                 {
-                    LOG(ERROR) << "[Node " << m_cfg.nodeId << "] failed to open StreamSingles writer";
+                    LOG(ERROR) << "[Node " << m_cfg.nodeId << "] OpenDataPlane / RDMA connect failed";
                     m_started = false;
                     return false;
                 }
 
                 m_running = true;
-                m_senderThread = std::thread([this]
-                                             { senderLoop(); });
+                m_senderThread = std::thread([this] { senderLoop(); });
+
+                LOG(INFO) << "[Node " << m_cfg.nodeId
+                          << "] RDMA singles sender started (ordered)";
                 return true;
             }
 
@@ -193,7 +196,9 @@ namespace openpni::distributed::grpcnode
                 const auto tWaitStart = std::chrono::steady_clock::now();
 #endif
                 m_cvNotFull.wait(lock, [this]
-                                 { return m_queue.size() < m_cfg.maxPendingSegments || !m_running.load(std::memory_order_relaxed) || m_sendFailed.load(std::memory_order_relaxed); });
+                                 { return m_queue.size() < m_cfg.maxPendingSegments ||
+                                          !m_running.load(std::memory_order_relaxed) ||
+                                          m_sendFailed.load(std::memory_order_relaxed); });
 #ifdef DEBUG
                 const auto tWaitEnd = std::chrono::steady_clock::now();
 #endif
@@ -237,10 +242,7 @@ namespace openpni::distributed::grpcnode
                     return !m_sendFailed.load(std::memory_order_relaxed);
                 }
 
-                {
-                    std::lock_guard<std::mutex> lock(m_mutex);
-                    m_running = false;
-                }
+                m_running = false;
                 m_cvNotEmpty.notify_all();
                 m_cvNotFull.notify_all();
 
@@ -249,23 +251,14 @@ namespace openpni::distributed::grpcnode
                     m_senderThread.join();
                 }
 
-                bool ok = !m_sendFailed.load(std::memory_order_relaxed);
-                if (m_writer)
+                if (m_rdmaSender)
                 {
-                    const bool writesDone = m_writer->WritesDone();
-                    grpc::Status status = m_writer->Finish();
-                    if (!writesDone || !status.ok() || !m_streamResponse.success())
-                    {
-                        ok = false;
-                        LOG(ERROR) << "[Node " << m_cfg.nodeId << "] stream finish failed: "
-                                   << (status.ok() ? m_streamResponse.message() : status.error_message());
-                    }
+                    m_rdmaSender->close();
+                    m_rdmaSender.reset();
                 }
 
-                m_writer.reset();
-                m_streamContext.reset();
                 m_stub.reset();
-                return ok;
+                return !m_sendFailed.load(std::memory_order_relaxed);
             }
 
             uint64_t singlesSent() const { return m_singlesSent.load(std::memory_order_relaxed); }
@@ -305,6 +298,42 @@ namespace openpni::distributed::grpcnode
                 {
                     LOG(ERROR) << "[Node " << m_cfg.nodeId << "] register failed: "
                                << (status.ok() ? response.message() : status.error_message());
+                    return false;
+                }
+                return true;
+            }
+
+            bool openRdmaDataPlane()
+            {
+                rdma::RdmaWriteSender::Config sc;
+                sc.nodeId = m_cfg.nodeId;
+                m_rdmaSender = std::make_unique<rdma::RdmaWriteSender>(std::move(sc));
+
+                rdma::RdmaEndpointInfo localEp{};
+                if (!m_rdmaSender->prepareLocalEndpoint(&localEp))
+                {
+                    LOG(ERROR) << "[Node " << m_cfg.nodeId << "] prepareLocalEndpoint failed";
+                    return false;
+                }
+
+                grpc::ClientContext context;
+                coincidence::OpenDataPlaneRequest req;
+                req.set_node_id(m_cfg.nodeId);
+                rdma::fillProtoEndpoint(localEp, req.mutable_node_endpoint());
+
+                coincidence::OpenDataPlaneResponse resp;
+                grpc::Status status = m_stub->OpenDataPlane(&context, req, &resp);
+                if (!status.ok() || !resp.success())
+                {
+                    LOG(ERROR) << "[Node " << m_cfg.nodeId << "] OpenDataPlane failed: "
+                               << (status.ok() ? resp.message() : status.error_message());
+                    return false;
+                }
+
+                const auto coinEp = rdma::fromProtoEndpoint(resp.coin_endpoint());
+                if (!m_rdmaSender->connect(coinEp))
+                {
+                    LOG(ERROR) << "[Node " << m_cfg.nodeId << "] RDMA connect failed";
                     return false;
                 }
                 return true;
@@ -369,11 +398,6 @@ namespace openpni::distributed::grpcnode
                         LOG(WARNING) << "[Node " << m_cfg.nodeId << "] WaitForStart RPC failed: "
                                      << status.error_message();
                     }
-                    else
-                    {
-                        VLOG(1) << "[Node " << m_cfg.nodeId << "] WaitForStart not ready: "
-                                << response.message();
-                    }
 
                     if (m_cfg.waitForStartTimeoutMs > 0)
                     {
@@ -400,42 +424,31 @@ namespace openpni::distributed::grpcnode
                 {
                     while (true)
                     {
-                        std::vector<SegmentPayload> batch;
-                        batch.reserve(std::max<size_t>(1, static_cast<size_t>(m_cfg.batchSegmentsPerMessage)));
-
+                        SegmentPayload payload;
                         {
                             std::unique_lock<std::mutex> lock(m_mutex);
                             m_cvNotEmpty.wait(lock, [this]
-                                              { return !m_queue.empty() || !m_running.load(std::memory_order_relaxed); });
-
+                                              { return !m_queue.empty() ||
+                                                       !m_running.load(std::memory_order_relaxed); });
                             if (m_queue.empty())
                             {
                                 break;
                             }
-
-                            const size_t targetBatchSize = std::max<size_t>(1, static_cast<size_t>(m_cfg.batchSegmentsPerMessage));
-                            while (!m_queue.empty() && batch.size() < targetBatchSize)
-                            {
 #ifdef DEBUG
-                                m_queueSegmentsInFlight.fetch_sub(1, std::memory_order_relaxed);
-                                m_queueSinglesInFlight.fetch_sub(
-                                    static_cast<uint64_t>(m_queue.front().singles.size()),
-                                    std::memory_order_relaxed);
+                            m_queueSegmentsInFlight.fetch_sub(1, std::memory_order_relaxed);
+                            m_queueSinglesInFlight.fetch_sub(
+                                static_cast<uint64_t>(m_queue.front().singles.size()),
+                                std::memory_order_relaxed);
 #endif
-                                batch.push_back(std::move(m_queue.front()));
-                                m_queue.pop_front();
-                            }
+                            payload = std::move(m_queue.front());
+                            m_queue.pop_front();
                         }
-
                         m_cvNotFull.notify_all();
 
-                        if (!sendBatch(batch))
+                        if (!sendSegment(payload))
                         {
                             m_sendFailed = true;
-                            {
-                                std::lock_guard<std::mutex> lock(m_mutex);
-                                m_running = false;
-                            }
+                            m_running = false;
                             m_cvNotEmpty.notify_all();
                             m_cvNotFull.notify_all();
                             return;
@@ -453,157 +466,56 @@ namespace openpni::distributed::grpcnode
                 }
 
                 m_sendFailed = true;
-                {
-                    std::lock_guard<std::mutex> lock(m_mutex);
-                    m_running = false;
-                }
+                m_running = false;
                 m_cvNotEmpty.notify_all();
                 m_cvNotFull.notify_all();
             }
 
-            bool sendBatch(const std::vector<SegmentPayload> &batch)
+            bool sendSegment(const SegmentPayload &payload)
             {
-                if (batch.empty())
+                if (!m_rdmaSender || payload.singles.empty())
                 {
-                    return true;
+                    return payload.singles.empty();
                 }
 
-                // 9120 two-ring nodes can emit tens of millions of singles per segment.
-                // Keep each gRPC message under the configured max (~100MiB default).
-                constexpr size_t kMaxSinglesPerMessage = 400000;
-
-                for (const auto &payload : batch)
+                constexpr size_t kMaxSinglesPerChunk = 8000000;
+                size_t offset = 0;
+                const size_t total = payload.singles.size();
+                while (offset < total)
                 {
-                    const size_t total = payload.singles.size();
-                    if (total == 0)
-                    {
-                        continue;
-                    }
-
-                    size_t offset = 0;
-                    while (offset < total)
-                    {
-                        const size_t count = std::min(kMaxSinglesPerMessage, total - offset);
-                        SegmentPayload chunk;
-                        chunk.clockMs = payload.clockMs;
-                        chunk.durationMs = payload.durationMs;
-                        chunk.singles.assign(
-                            payload.singles.begin() + static_cast<std::ptrdiff_t>(offset),
-                            payload.singles.begin() + static_cast<std::ptrdiff_t>(offset + count));
-
-                        if (!sendOneMessage({std::move(chunk)}))
-                        {
-                            return false;
-                        }
-                        offset += count;
-                    }
-                }
-                return true;
-            }
-
-            bool sendOneMessage(const std::vector<SegmentPayload> &batch)
-            {
-                if (batch.empty())
-                {
-                    return true;
-                }
-
-                size_t totalSingles = 0;
-                for (const auto &payload : batch)
-                {
-                    totalSingles += payload.singles.size();
-                }
-
-                if (totalSingles == 0)
-                {
-                    return true;
-                }
+                    const size_t count = std::min(kMaxSinglesPerChunk, total - offset);
+                    const uint64_t chunkId = m_chunkIdCounter.fetch_add(1, std::memory_order_relaxed);
 
 #ifdef DEBUG
-                const auto tBuildStart = std::chrono::steady_clock::now();
+                    const auto t0 = std::chrono::steady_clock::now();
 #endif
-                coincidence::SingleChunkMessage &msg = m_reusableMessage;
-                msg.Clear();
-                msg.set_node_id(m_cfg.nodeId);
-                msg.set_batch_id(m_batchIdCounter.fetch_add(1, std::memory_order_relaxed));
-                msg.mutable_singles()->Reserve(static_cast<int>(totalSingles));
-                msg.mutable_segment_metas()->Reserve(static_cast<int>(batch.size()));
-
-                uint32_t singlesOffset = 0;
-                bool firstSegment = true;
-
-                for (const auto &payload : batch)
-                {
-                    const size_t segmentSingles = payload.singles.size();
-                    if (segmentSingles > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+                    const bool ok = m_rdmaSender->sendPackedSingles(
+                        chunkId,
+                        payload.clockMs,
+                        payload.durationMs,
+                        payload.singles.data() + offset,
+                        static_cast<uint32_t>(count));
+#ifdef DEBUG
+                    const auto t1 = std::chrono::steady_clock::now();
+                    const uint64_t writeNs = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+                    m_writeNs.fetch_add(writeNs, std::memory_order_relaxed);
+                    updateAtomicMax(m_maxWriteNs, writeNs);
+                    m_estimatedWireBytes.fetch_add(
+                        static_cast<uint64_t>(count) * streaming::kPackedSingleSize,
+                        std::memory_order_relaxed);
+#endif
+                    if (!ok)
                     {
-                        LOG(ERROR) << "[Node " << m_cfg.nodeId << "] segment singles exceed uint32 range";
+                        LOG(ERROR) << "[Node " << m_cfg.nodeId << "] RDMA send failed at chunk "
+                                   << chunkId;
                         return false;
                     }
 
-                    const uint32_t segmentSinglesU32 = static_cast<uint32_t>(segmentSingles);
-                    if (singlesOffset > std::numeric_limits<uint32_t>::max() - segmentSinglesU32)
-                    {
-                        LOG(ERROR) << "[Node " << m_cfg.nodeId << "] batched singles offset overflow";
-                        return false;
-                    }
-
-                    const uint64_t segmentChunkId = m_chunkIdCounter.fetch_add(1, std::memory_order_relaxed);
-                    if (firstSegment)
-                    {
-                        msg.set_chunk_id(segmentChunkId);
-                        msg.set_computer_clock_ms(payload.clockMs);
-                        msg.set_duration_ms(payload.durationMs);
-                        firstSegment = false;
-                    }
-
-                    auto *meta = msg.add_segment_metas();
-                    meta->set_chunk_id(segmentChunkId);
-                    meta->set_computer_clock_ms(payload.clockMs);
-                    meta->set_duration_ms(payload.durationMs);
-                    meta->set_singles_offset(singlesOffset);
-                    meta->set_singles_count(segmentSinglesU32);
-
-                    for (const auto &s : payload.singles)
-                    {
-                        auto *event = msg.add_singles();
-                        event->set_channel_index(static_cast<uint32_t>(s.channelIndex));
-                        event->set_crystal_index(static_cast<uint32_t>(s.crystalIndex));
-                        event->set_energy(s.energy);
-                        event->set_time_pico(s.timevalue_100fs);
-                    }
-
-                    singlesOffset += segmentSinglesU32;
+                    m_messagesSent.fetch_add(1, std::memory_order_relaxed);
+                    m_singlesSent.fetch_add(static_cast<uint64_t>(count), std::memory_order_relaxed);
+                    offset += count;
                 }
-
-#ifdef DEBUG
-                const auto tBuildEnd = std::chrono::steady_clock::now();
-                m_serializeBuildNs.fetch_add(
-                    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(tBuildEnd - tBuildStart).count()),
-                    std::memory_order_relaxed);
-                m_estimatedWireBytes.fetch_add(static_cast<uint64_t>(msg.ByteSizeLong()), std::memory_order_relaxed);
-                const auto tWriteStart = std::chrono::steady_clock::now();
-#endif
-                grpc::WriteOptions writeOptions;
-                writeOptions.set_no_compression();
-                writeOptions.set_buffer_hint();
-                if (!m_writer->Write(msg, writeOptions))
-                {
-                    LOG(ERROR) << "[Node " << m_cfg.nodeId << "] stream write failed at chunk "
-                               << msg.chunk_id();
-                    return false;
-                }
-
-#ifdef DEBUG
-                const auto tWriteEnd = std::chrono::steady_clock::now();
-                const uint64_t writeNs = static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(tWriteEnd - tWriteStart).count());
-                m_writeNs.fetch_add(writeNs, std::memory_order_relaxed);
-                updateAtomicMax(m_maxWriteNs, writeNs);
-#endif
-
-                m_messagesSent.fetch_add(1, std::memory_order_relaxed);
-                m_singlesSent.fetch_add(static_cast<uint64_t>(totalSingles), std::memory_order_relaxed);
                 return true;
             }
 
@@ -611,22 +523,18 @@ namespace openpni::distributed::grpcnode
 
             std::shared_ptr<grpc::Channel> m_channel;
             std::unique_ptr<coincidence::CoincidenceService::Stub> m_stub;
-            std::unique_ptr<grpc::ClientContext> m_streamContext;
-            coincidence::StreamResponse m_streamResponse;
-            std::unique_ptr<grpc::ClientWriter<coincidence::SingleChunkMessage>> m_writer;
-            coincidence::SingleChunkMessage m_reusableMessage;
+            std::unique_ptr<rdma::RdmaWriteSender> m_rdmaSender;
 
-            std::thread m_senderThread;
             std::deque<SegmentPayload> m_queue;
             std::mutex m_mutex;
             std::condition_variable m_cvNotEmpty;
             std::condition_variable m_cvNotFull;
+            std::thread m_senderThread;
 
             std::atomic<bool> m_started{false};
             std::atomic<bool> m_running{false};
             std::atomic<bool> m_sendFailed{false};
             std::atomic<uint64_t> m_chunkIdCounter{0};
-            std::atomic<uint64_t> m_batchIdCounter{0};
             std::atomic<uint64_t> m_singlesSent{0};
             std::atomic<uint64_t> m_messagesSent{0};
 
@@ -709,6 +617,7 @@ namespace openpni::distributed::grpcnode
         senderConfig.waitForStartTimeoutMs = m_init.waitForStartTimeoutMs;
         senderConfig.waitForStartRpcTimeoutMs = m_init.waitForStartRpcTimeoutMs;
         senderConfig.waitForStartRetryIntervalMs = m_init.waitForStartRetryIntervalMs;
+        senderConfig.parallelStreams = std::max<uint32_t>(1, m_init.parallelStreams);
 
         PersistentNodeStreamSender sender(std::move(senderConfig));
         if (!sender.start())

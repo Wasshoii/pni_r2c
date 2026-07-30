@@ -9,28 +9,26 @@ option cc_enable_arenas = true;
 
 // ==================== 消息定义 ====================
 
-// 单个单事件数据
-message SingleEvent {
-    uint32 channel_index = 1;    // 探测器索引
-    uint32 crystal_index = 2;    // 探测器内晶体索引
-    float energy = 3;            // 能量 (eV)
-    uint64 time_pico = 4;        // PET 时钟时间戳 (pico秒)
-}
-
 // 单事件数据块（从分布式节点发送到主节点）
 message SingleChunkMessage {
     uint32 node_id = 1;           // 节点ID
     uint64 chunk_id = 2;          // 块序号（用于顺序保证）
     uint64 computer_clock_ms = 3; // 计算机时钟（ms，粗略参考）
     uint32 duration_ms = 4;       // 持续时间（ms）
-    repeated SingleEvent singles = 5; // 单事件数据列表
+    reserved 5;                   // was: repeated SingleEvent singles
 
     // 批量发送时用于还原每个 segment 的顺序和时间信息。
-    // 兼容性：若为空，接收端应按旧逻辑将整条消息视为单个 segment。
+    // 若为空，接收端应将整条消息视为单个 segment。
     repeated SegmentMeta segment_metas = 6;
 
     // 可选批次编号，仅用于诊断与追踪。
     uint64 batch_id = 7;
+
+    // Packed binary singles: contiguous array of 16-byte records (little-endian),
+    // layout per record: {u16 channelIndex, u16 crystalIndex, u64 timevalue_100fs, f32 energy}
+    // Matches openpni::Single memory layout (#pragma pack(1)).
+    bytes singles_packed = 8;
+    uint32 singles_packed_count = 9;
 }
 
 // 批内 segment 元信息（用于在接收端恢复单段边界与时间信息）
@@ -120,6 +118,13 @@ message ConfigUpdateResponse {
     string message = 2;
 }
 
+// Singles data-plane kind (gRPC StreamSingles removed from hot path).
+enum DataPlaneKind {
+    DATA_PLANE_UNSPECIFIED = 0;
+    DATA_PLANE_RDMA_ROCE_V2 = 1;
+    DATA_PLANE_INPROCESS = 2; // same-process memcpy when no IB device
+}
+
 // 节点注册请求
 message RegisterNodeRequest {
     uint32 node_id = 1;
@@ -139,6 +144,45 @@ message RegisterNodeResponse {
     uint32 connected_node_count = 5;
     bool start_signal_issued = 6;
     uint64 planned_start_time_ms = 7;
+
+    // Data plane is RDMA-only; kind echoed for clients.
+    DataPlaneKind data_plane_kind = 8;
+}
+
+// RoCE / in-process endpoint exchanged over the gRPC control plane.
+message RdmaEndpoint {
+    DataPlaneKind kind = 1;
+    bytes gid = 2;              // 16 bytes GID (RoCE)
+    uint32 lid = 3;
+    uint32 qp_num = 4;
+    uint32 psn = 5;
+    uint32 rkey = 6;
+    uint64 base_addr = 7;
+    uint32 slot_count = 8;
+    uint32 slot_stride = 9;
+    uint32 notify_rkey = 10;
+    uint64 notify_addr = 11;
+    uint32 notify_capacity = 12;
+    uint32 consumer_rkey = 13;
+    uint64 consumer_addr = 14;
+    string device_name = 15;
+    uint32 port_num = 16;
+    uint32 gid_index = 17;
+    uint64 inprocess_handle = 18;
+}
+
+message OpenDataPlaneRequest {
+    uint32 node_id = 1;
+    RdmaEndpoint node_endpoint = 2; // required for RoCE QP handshake
+    uint32 requested_slot_count = 3;
+    uint32 requested_slot_bytes = 4;
+}
+
+message OpenDataPlaneResponse {
+    bool success = 1;
+    string message = 2;
+    DataPlaneKind data_plane_kind = 3;
+    RdmaEndpoint coin_endpoint = 4;
 }
 
 // 节点等待主机发出开始信号
@@ -173,8 +217,11 @@ message HeartbeatResponse {
 
 // 符合计算主服务
 service CoincidenceService {
-    // 流式接收单事件数据（核心接口）
+    // Legacy gRPC singles stream — disabled; use OpenDataPlane + RDMA.
     rpc StreamSingles(stream SingleChunkMessage) returns (StreamResponse);
+
+    // Open / handshake RDMA (or in-process) singles data plane for a node.
+    rpc OpenDataPlane(OpenDataPlaneRequest) returns (OpenDataPlaneResponse);
 
     // 等待主机发出开始信号（标准编排流程）
     rpc WaitForStart(WaitForStartRequest) returns (WaitForStartResponse);

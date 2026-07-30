@@ -3,6 +3,7 @@
 #include <pni/io/IO.hpp>
 #include <grpcpp/grpcpp.h>
 
+#include "dataplane/rdma/RdmaWriteSender.hpp"
 #include "protos/coincidence.grpc.pb.h"
 
 #include <atomic>
@@ -45,6 +46,15 @@ namespace openpni::distributed::streaming
         uint32_t waitForStartRetryIntervalMs = 1000;
     };
 
+    struct PendingChunk
+    {
+        uint64_t chunkId = 0;
+        uint64_t computerClockMs = 0;
+        uint32_t durationMs = 0;
+        std::vector<uint8_t> packed;
+        uint32_t singlesCount = 0;
+    };
+
     class CoincidenceClient
     {
     public:
@@ -74,8 +84,9 @@ namespace openpni::distributed::streaming
         void waitUntil(uint64_t plannedStartMs);
 
         bool registerNode();
+        bool openRdmaDataPlane();
         void senderLoop();
-        bool sendMessage(const coincidence::SingleChunkMessage &msg);
+        bool sendChunk(const PendingChunk &chunk);
         void flushPendingMessages();
         void heartbeatLoop();
 
@@ -83,10 +94,11 @@ namespace openpni::distributed::streaming
 
         std::shared_ptr<grpc::Channel> m_channel;
         std::unique_ptr<coincidence::CoincidenceService::Stub> m_stub;
+        std::unique_ptr<openpni::distributed::dataplane::rdma::RdmaWriteSender> m_rdmaSender;
 
         mutable std::mutex m_mutex;
         std::condition_variable m_cv;
-        std::queue<std::unique_ptr<coincidence::SingleChunkMessage>> m_pendingMessages;
+        std::queue<std::unique_ptr<PendingChunk>> m_pendingMessages;
 
         std::thread m_senderThread;
         std::thread m_heartbeatThread;

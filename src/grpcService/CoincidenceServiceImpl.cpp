@@ -1,4 +1,8 @@
 #include "grpcService/CoincidenceServiceImpl.hpp"
+#include "core/streaming/PackedSingle.hpp"
+#include "dataplane/rdma/ProtoConvert.hpp"
+#include "dataplane/rdma/RdmaContext.hpp"
+#include "dataplane/rdma/SlotProtocol.hpp"
 
 #include <iostream>
 #include <utility>
@@ -6,6 +10,7 @@
 
 namespace openpni::distributed::streaming
 {
+    namespace rdma = openpni::distributed::dataplane::rdma;
 
     CoincidenceServiceImpl::CoincidenceServiceImpl(StreamingTimeAligner &aligner)
         : CoincidenceServiceImpl(aligner, OrchestrationConfig{})
@@ -29,6 +34,86 @@ namespace openpni::distributed::streaming
             info->nodeId = static_cast<uint32_t>(i);
             m_nodeInfos[static_cast<uint32_t>(i)] = info;
         }
+
+        startRdmaIngest();
+    }
+
+    void CoincidenceServiceImpl::startRdmaIngest()
+    {
+        rdma::RdmaRecvServer::Config cfg;
+        m_rdmaServer = std::make_unique<rdma::RdmaRecvServer>(cfg);
+        m_rdmaServer->setIngest([this](const rdma::SlotChunkView &view) -> bool
+                                {
+            std::string err;
+            if (!ingestPackedSinglesChunk(
+                    view.nodeId,
+                    view.chunkId,
+                    view.computerClockMs,
+                    view.durationMs,
+                    view.singlesPacked,
+                    view.singlesCount,
+                    &err))
+            {
+                LOG(ERROR) << "RDMA ingest failed: " << err;
+                return false;
+            }
+            return true; });
+        m_rdmaServer->start();
+    }
+
+    bool CoincidenceServiceImpl::ingestPackedSinglesChunk(
+        uint32_t nodeId,
+        uint64_t chunkId,
+        uint64_t computerClockMs,
+        uint32_t durationMs,
+        const void *singlesPacked,
+        uint32_t singlesCount,
+        std::string *errorMessage)
+    {
+        if (m_orchestration.rejectStreamBeforeStart &&
+            !m_startSignalIssued.load(std::memory_order_acquire))
+        {
+            if (errorMessage)
+            {
+                *errorMessage = "Acquisition not started yet";
+            }
+            return false;
+        }
+
+        auto *buffer = m_aligner.getNodeBuffer(static_cast<uint16_t>(nodeId));
+        if (!buffer)
+        {
+            if (errorMessage)
+            {
+                *errorMessage = "Invalid node ID: " + std::to_string(nodeId);
+            }
+            return false;
+        }
+
+        if (!singlesPacked || singlesCount == 0)
+        {
+            return true;
+        }
+
+        TimestampedSingleChunk chunk;
+        chunk.nodeId = static_cast<uint16_t>(nodeId);
+        chunk.chunkId = chunkId;
+        chunk.computerClock_ms = computerClockMs;
+        chunk.duration_ms = durationMs;
+        chunk.singles.resize(singlesCount);
+        unpackBinaryToSingles(singlesPacked, singlesCount, chunk.singles.data());
+
+        if (!buffer->push(std::move(chunk)))
+        {
+            if (errorMessage)
+            {
+                *errorMessage = "Buffer full or closed for node " + std::to_string(nodeId);
+            }
+            return false;
+        }
+
+        updateNodeStats(nodeId, singlesCount);
+        return true;
     }
 
     grpc::Status CoincidenceServiceImpl::StreamSingles(
@@ -37,108 +122,63 @@ namespace openpni::distributed::streaming
         coincidence::StreamResponse *response)
     {
         (void)context;
+        (void)reader;
+        (void)response;
+        return grpc::Status(
+            grpc::StatusCode::UNIMPLEMENTED,
+            "StreamSingles disabled; use OpenDataPlane + RDMA data plane");
+    }
 
-        if (m_orchestration.rejectStreamBeforeStart &&
-            !m_startSignalIssued.load(std::memory_order_acquire))
+    grpc::Status CoincidenceServiceImpl::OpenDataPlane(
+        grpc::ServerContext *context,
+        const coincidence::OpenDataPlaneRequest *request,
+        coincidence::OpenDataPlaneResponse *response)
+    {
+        (void)context;
+        const uint32_t nodeId = request->node_id();
+        if (nodeId >= m_aligner.getNodeCount())
         {
-            return grpc::Status(
-                grpc::StatusCode::FAILED_PRECONDITION,
-                "Acquisition not started yet. Wait for WaitForStart signal first.");
+            response->set_success(false);
+            response->set_message("Node ID out of range");
+            return grpc::Status::OK;
         }
 
-        coincidence::SingleChunkMessage msg;
-        uint64_t totalReceived = 0;
-
-        while (reader->Read(&msg))
+        if (!m_rdmaServer)
         {
-            uint32_t nodeId = msg.node_id();
-
-            auto *buffer = m_aligner.getNodeBuffer(static_cast<uint16_t>(nodeId));
-            if (!buffer)
-            {
-                return grpc::Status(
-                    grpc::StatusCode::INVALID_ARGUMENT,
-                    "Invalid node ID: " + std::to_string(nodeId));
-            }
-
-            auto appendSingle = [](const coincidence::SingleEvent &s, std::vector<Single> &out)
-            {
-                Single single;
-                single.channelIndex = static_cast<uint16_t>(s.channel_index());
-                single.crystalIndex = static_cast<uint16_t>(s.crystal_index());
-                single.energy = s.energy();
-                single.timevalue_100fs = s.time_pico();
-                out.push_back(single);
-            };
-
-            if (msg.segment_metas_size() > 0)
-            {
-                const uint64_t totalSinglesInMessage = static_cast<uint64_t>(msg.singles_size());
-
-                for (const auto &meta : msg.segment_metas())
-                {
-                    const uint64_t offset = static_cast<uint64_t>(meta.singles_offset());
-                    const uint64_t count = static_cast<uint64_t>(meta.singles_count());
-                    if (offset + count > totalSinglesInMessage)
-                    {
-                        return grpc::Status(
-                            grpc::StatusCode::INVALID_ARGUMENT,
-                            "Invalid segment metadata range: offset/count exceed singles size");
-                    }
-
-                    TimestampedSingleChunk chunk;
-                    chunk.nodeId = static_cast<uint16_t>(nodeId);
-                    chunk.chunkId = meta.chunk_id();
-                    chunk.computerClock_ms = meta.computer_clock_ms();
-                    chunk.duration_ms = meta.duration_ms();
-                    chunk.singles.reserve(static_cast<size_t>(count));
-
-                    for (uint64_t i = 0; i < count; ++i)
-                    {
-                        const auto &s = msg.singles(static_cast<int>(offset + i));
-                        appendSingle(s, chunk.singles);
-                    }
-
-                    if (!buffer->push(std::move(chunk)))
-                    {
-                        return grpc::Status(
-                            grpc::StatusCode::RESOURCE_EXHAUSTED,
-                            "Buffer full or closed for node " + std::to_string(nodeId));
-                    }
-
-                    totalReceived += count;
-                    updateNodeStats(nodeId, count);
-                }
-
-                continue;
-            }
-
-            TimestampedSingleChunk chunk;
-            chunk.nodeId = static_cast<uint16_t>(nodeId);
-            chunk.chunkId = msg.chunk_id();
-            chunk.computerClock_ms = msg.computer_clock_ms();
-            chunk.duration_ms = msg.duration_ms();
-
-            chunk.singles.reserve(msg.singles_size());
-            for (const auto &s : msg.singles())
-            {
-                appendSingle(s, chunk.singles);
-            }
-
-            if (!buffer->push(std::move(chunk)))
-            {
-                return grpc::Status(
-                    grpc::StatusCode::RESOURCE_EXHAUSTED,
-                    "Buffer full or closed for node " + std::to_string(nodeId));
-            }
-
-            totalReceived += static_cast<uint64_t>(msg.singles_size());
-            updateNodeStats(nodeId, static_cast<uint64_t>(msg.singles_size()));
+            response->set_success(false);
+            response->set_message("RDMA server not initialized");
+            return grpc::Status::OK;
         }
 
+        auto session = m_rdmaServer->ensureSession(nodeId);
+        if (!session)
+        {
+            response->set_success(false);
+            response->set_message("Failed to prepare RDMA receive session");
+            return grpc::Status::OK;
+        }
+
+        if (request->has_node_endpoint() &&
+            session->kind() == rdma::DataPlaneKind::RdmaRoceV2)
+        {
+            const auto remote = rdma::fromProtoEndpoint(request->node_endpoint());
+            if (!session->acceptRemote(remote))
+            {
+                response->set_success(false);
+                response->set_message("Failed to accept remote RDMA endpoint");
+                return grpc::Status::OK;
+            }
+        }
+
+        const auto local = session->localEndpoint();
         response->set_success(true);
-        response->set_singles_received(totalReceived);
-        response->set_message("Successfully received " + std::to_string(totalReceived) + " singles");
+        response->set_message("Data plane ready");
+        response->set_data_plane_kind(rdma::toProto(local.kind));
+        rdma::fillProtoEndpoint(local, response->mutable_coin_endpoint());
+        LOG(INFO) << "OpenDataPlane node=" << nodeId
+                  << " kind=" << static_cast<uint32_t>(local.kind)
+                  << " slots=" << local.slotCount
+                  << " stride=" << local.slotStride;
         return grpc::Status::OK;
     }
 
@@ -407,6 +447,10 @@ namespace openpni::distributed::streaming
         response->set_success(true);
         response->set_assigned_node_id(nodeId);
         response->set_message("Node " + std::to_string(nodeId) + " registered successfully");
+        response->set_data_plane_kind(
+            rdma::RdmaDevice::hasVerbsDevice()
+                ? coincidence::DATA_PLANE_RDMA_ROCE_V2
+                : coincidence::DATA_PLANE_INPROCESS);
 
         LOG(INFO) << "Node " << nodeId
                   << " registered from " << request->node_address()
@@ -521,6 +565,10 @@ namespace openpni::distributed::streaming
     {
         m_serverStopping.store(true, std::memory_order_release);
         m_orchestrationCv.notify_all();
+        if (m_rdmaServer)
+        {
+            m_rdmaServer->stop();
+        }
     }
 
     void CoincidenceServiceImpl::clearServerStoppingState()
@@ -621,8 +669,10 @@ namespace openpni::distributed::streaming
         builder.AddListeningPort(address, grpc::InsecureServerCredentials());
         builder.RegisterService(&service);
 
-        builder.SetMaxReceiveMessageSize(100 * 1024 * 1024);
-        builder.SetMaxSendMessageSize(10 * 1024 * 1024);
+        builder.SetMaxReceiveMessageSize(256 * 1024 * 1024);
+        builder.SetMaxSendMessageSize(16 * 1024 * 1024);
+        builder.AddChannelArgument("grpc.http2.initial_window_size", 64 * 1024 * 1024);
+        builder.AddChannelArgument("grpc.http2.max_frame_size", 16777215);
 
         LOG(INFO) << "Starting on " << address;
         return builder.BuildAndStart();
@@ -665,8 +715,10 @@ namespace openpni::distributed::streaming
         builder.AddListeningPort(m_address, grpc::InsecureServerCredentials());
         builder.RegisterService(&m_service);
 
-        builder.SetMaxReceiveMessageSize(100 * 1024 * 1024);
-        builder.SetMaxSendMessageSize(10 * 1024 * 1024);
+        builder.SetMaxReceiveMessageSize(256 * 1024 * 1024);
+        builder.SetMaxSendMessageSize(16 * 1024 * 1024);
+        builder.AddChannelArgument("grpc.http2.initial_window_size", 64 * 1024 * 1024);
+        builder.AddChannelArgument("grpc.http2.max_frame_size", 16777215);
 
         m_server = builder.BuildAndStart();
         if (!m_server)

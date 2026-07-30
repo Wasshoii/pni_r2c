@@ -1,7 +1,9 @@
 #include "grpcService/CoincidenceClient.hpp"
+#include "core/streaming/PackedSingle.hpp"
+#include "dataplane/rdma/ProtoConvert.hpp"
 
 #include <chrono>
-#include <iostream>
+#include <cstring>
 #include <limits>
 #include <thread>
 #include <utility>
@@ -9,6 +11,7 @@
 
 namespace openpni::distributed::streaming
 {
+    namespace rdma = openpni::distributed::dataplane::rdma;
 
     CoincidenceClient::CoincidenceClient(const CoincidenceClientConfig &config)
         : m_config(config)
@@ -47,13 +50,19 @@ namespace openpni::distributed::streaming
             }
         }
 
+        if (!openRdmaDataPlane())
+        {
+            m_running = false;
+            return false;
+        }
+
         m_senderThread = std::thread([this]()
                                      { senderLoop(); });
 
         m_heartbeatThread = std::thread([this]()
                                         { heartbeatLoop(); });
 
-        LOG(INFO) << "Started for node " << m_config.nodeId;
+        LOG(INFO) << "Started RDMA client for node " << m_config.nodeId;
         return true;
     }
 
@@ -75,7 +84,49 @@ namespace openpni::distributed::streaming
             m_heartbeatThread.join();
         }
 
+        if (m_rdmaSender)
+        {
+            m_rdmaSender->close();
+            m_rdmaSender.reset();
+        }
+
         LOG(INFO) << "Stopped";
+    }
+
+    bool CoincidenceClient::openRdmaDataPlane()
+    {
+        rdma::RdmaWriteSender::Config sc;
+        sc.nodeId = m_config.nodeId;
+        m_rdmaSender = std::make_unique<rdma::RdmaWriteSender>(std::move(sc));
+
+        rdma::RdmaEndpointInfo localEp{};
+        if (!m_rdmaSender->prepareLocalEndpoint(&localEp))
+        {
+            LOG(ERROR) << "prepareLocalEndpoint failed";
+            return false;
+        }
+
+        grpc::ClientContext context;
+        coincidence::OpenDataPlaneRequest req;
+        req.set_node_id(m_config.nodeId);
+        rdma::fillProtoEndpoint(localEp, req.mutable_node_endpoint());
+
+        coincidence::OpenDataPlaneResponse resp;
+        grpc::Status status = m_stub->OpenDataPlane(&context, req, &resp);
+        if (!status.ok() || !resp.success())
+        {
+            LOG(ERROR) << "OpenDataPlane failed: "
+                       << (status.ok() ? resp.message() : status.error_message());
+            return false;
+        }
+
+        if (!m_rdmaSender->connect(rdma::fromProtoEndpoint(resp.coin_endpoint())))
+        {
+            LOG(ERROR) << "RDMA connect failed";
+            return false;
+        }
+        m_connected = true;
+        return true;
     }
 
     bool CoincidenceClient::sendSingles(
@@ -88,43 +139,43 @@ namespace openpni::distributed::streaming
             return false;
         }
 
-        auto msg = std::make_unique<coincidence::SingleChunkMessage>();
-        msg->set_node_id(m_config.nodeId);
-        msg->set_chunk_id(m_chunkIdCounter++);
-        msg->set_computer_clock_ms(computerClock_ms);
-        msg->set_duration_ms(duration_ms);
+        auto chunk = std::make_unique<PendingChunk>();
+        chunk->chunkId = m_chunkIdCounter++;
+        chunk->computerClockMs = computerClock_ms;
+        chunk->durationMs = duration_ms;
+        chunk->singlesCount = static_cast<uint32_t>(singles.size());
+        chunk->packed.resize(singles.size() * kPackedSingleSize);
 
-        for (const auto &s : singles)
+        if (m_config.remapLocalToGlobalChannels)
         {
-            auto *event = msg->add_singles();
-            uint32_t channelIndexToSend = s.channelIndex;
-            uint32_t crystalIndexToSend = s.crystalIndex;
-
-            if (m_config.remapLocalToGlobalChannels)
+            auto *dst = reinterpret_cast<Single *>(chunk->packed.data());
+            for (size_t i = 0; i < singles.size(); ++i)
             {
-                const uint64_t globalChannel = static_cast<uint64_t>(channelIndexToSend) +
+                const auto &s = singles[i];
+                const uint64_t globalChannel = static_cast<uint64_t>(s.channelIndex) +
                                                static_cast<uint64_t>(m_config.globalChannelOffset);
-                if (globalChannel > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()))
+                if (globalChannel > static_cast<uint64_t>(std::numeric_limits<uint16_t>::max()))
                 {
                     LOG(ERROR) << "remapped channel index overflow: " << globalChannel;
                     return false;
                 }
 
-                channelIndexToSend = static_cast<uint32_t>(globalChannel);
+                dst[i].channelIndex = static_cast<uint16_t>(globalChannel);
+                dst[i].crystalIndex = s.crystalIndex;
+                dst[i].timevalue_100fs = s.timevalue_100fs;
+                dst[i].energy = s.energy;
 
-                if (!m_remapSampleLogged.exchange(true))
+                if (i == 0 && !m_remapSampleLogged.exchange(true))
                 {
                     LOG(INFO) << "remap sample node=" << m_config.nodeId
                               << " local_channel=" << s.channelIndex
-                              << " global_channel=" << channelIndexToSend
-                              << " local_crystal=" << s.crystalIndex;
+                              << " global_channel=" << dst[i].channelIndex;
                 }
             }
-
-            event->set_channel_index(channelIndexToSend);
-            event->set_crystal_index(crystalIndexToSend);
-            event->set_energy(s.energy);
-            event->set_time_pico(s.timevalue_100fs);
+        }
+        else
+        {
+            packSinglesToBinary(singles.data(), singles.size(), chunk->packed.data());
         }
 
         {
@@ -141,7 +192,7 @@ namespace openpni::distributed::streaming
                 return false;
             }
 
-            m_pendingMessages.push(std::move(msg));
+            m_pendingMessages.push(std::move(chunk));
         }
 
         m_cv.notify_one();
@@ -206,10 +257,6 @@ namespace openpni::distributed::streaming
             if (!status.ok())
             {
                 LOG(ERROR) << "WaitForStart RPC failed: " << status.error_message();
-            }
-            else
-            {
-                LOG(WARNING) << "WaitForStart not ready: " << response.message();
             }
 
             if (timeoutMs > 0)
@@ -286,7 +333,7 @@ namespace openpni::distributed::streaming
     {
         while (m_running.load())
         {
-            std::unique_ptr<coincidence::SingleChunkMessage> msg;
+            std::unique_ptr<PendingChunk> msg;
 
             {
                 std::unique_lock<std::mutex> lock(m_mutex);
@@ -307,44 +354,27 @@ namespace openpni::distributed::streaming
 
             if (msg)
             {
-                sendMessage(*msg);
+                sendChunk(*msg);
             }
         }
 
         flushPendingMessages();
     }
 
-    bool CoincidenceClient::sendMessage(const coincidence::SingleChunkMessage &msg)
+    bool CoincidenceClient::sendChunk(const PendingChunk &chunk)
     {
-        uint32_t attempts = 0;
-
-        while (attempts < m_config.maxReconnectAttempts && m_running.load())
+        if (!m_rdmaSender)
         {
-            grpc::ClientContext context;
-            coincidence::StreamResponse response;
-
-            auto writer = m_stub->StreamSingles(&context, &response);
-
-            if (writer->Write(msg) && writer->WritesDone())
-            {
-                grpc::Status status = writer->Finish();
-                if (status.ok())
-                {
-                    m_connected = true;
-                    return true;
-                }
-            }
-
-            m_connected = false;
-            attempts++;
-            LOG(WARNING) << "Send failed, attempt "
-                         << attempts << "/" << m_config.maxReconnectAttempts;
-
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(m_config.reconnectDelayMs));
+            return false;
         }
-
-        return false;
+        const bool ok = m_rdmaSender->sendPackedSingles(
+            chunk.chunkId,
+            chunk.computerClockMs,
+            chunk.durationMs,
+            chunk.packed.data(),
+            chunk.singlesCount);
+        m_connected = ok;
+        return ok;
     }
 
     void CoincidenceClient::flushPendingMessages()
@@ -354,7 +384,7 @@ namespace openpni::distributed::streaming
         while (!m_pendingMessages.empty())
         {
             auto &msg = m_pendingMessages.front();
-            sendMessage(*msg);
+            sendChunk(*msg);
             m_pendingMessages.pop();
         }
     }

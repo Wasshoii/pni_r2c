@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/streaming/StreamingCoincidence.hpp"
+#include "dataplane/rdma/RdmaRecvServer.hpp"
 #include "protos/coincidence.grpc.pb.h"
 
 #include <grpcpp/grpcpp.h>
@@ -46,10 +47,25 @@ namespace openpni::distributed::streaming
         explicit CoincidenceServiceImpl(StreamingTimeAligner &aligner);
         CoincidenceServiceImpl(StreamingTimeAligner &aligner, OrchestrationConfig orchestration);
 
+        /** Shared ingest used by RDMA receive path (and legacy helpers). */
+        bool ingestPackedSinglesChunk(
+            uint32_t nodeId,
+            uint64_t chunkId,
+            uint64_t computerClockMs,
+            uint32_t durationMs,
+            const void *singlesPacked,
+            uint32_t singlesCount,
+            std::string *errorMessage = nullptr);
+
         grpc::Status StreamSingles(
             grpc::ServerContext *context,
             grpc::ServerReader<coincidence::SingleChunkMessage> *reader,
             coincidence::StreamResponse *response) override;
+
+        grpc::Status OpenDataPlane(
+            grpc::ServerContext *context,
+            const coincidence::OpenDataPlaneRequest *request,
+            coincidence::OpenDataPlaneResponse *response) override;
 
         grpc::Status WaitForStart(
             grpc::ServerContext *context,
@@ -92,6 +108,8 @@ namespace openpni::distributed::streaming
         void notifyServerStopping();
         void clearServerStoppingState();
 
+        openpni::distributed::dataplane::rdma::RdmaRecvServer &rdmaServer() { return *m_rdmaServer; }
+
     private:
         static uint64_t nowMs();
 
@@ -102,6 +120,7 @@ namespace openpni::distributed::streaming
         bool issueStartSignalLocked(uint64_t startTimeMs, const std::string &reason);
         void maybeAutoStartAfterRegister();
         void updateNodeStats(uint32_t nodeId, uint64_t singlesCount);
+        void startRdmaIngest();
 
         StreamingTimeAligner &m_aligner;
         OrchestrationConfig m_orchestration;
@@ -116,6 +135,8 @@ namespace openpni::distributed::streaming
         std::atomic<bool> m_startSignalIssued{false};
         std::atomic<uint64_t> m_plannedStartTimeMs{0};
         std::atomic<bool> m_serverStopping{false};
+
+        std::unique_ptr<openpni::distributed::dataplane::rdma::RdmaRecvServer> m_rdmaServer;
     };
 
     std::unique_ptr<grpc::Server> createCoincidenceServer(

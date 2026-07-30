@@ -14,9 +14,12 @@
 #include <thread>
 #include <unordered_map>
 
+#include "dataplane/rdma/ProtoConvert.hpp"
+#include "dataplane/rdma/RdmaRecvServer.hpp"
 #include "protos/coincidence.grpc.pb.h"
 
 namespace coincidence = openpni::distributed::coincidence;
+namespace rdma = openpni::distributed::dataplane::rdma;
 
 namespace
 {
@@ -30,7 +33,7 @@ namespace
     struct ProgramOptions
     {
         std::string address = "127.0.0.1:50061";
-        uint32_t expectedNodeCount = 3;
+        uint32_t expectedNodeCount = 2;
         uint32_t startLeadTimeMs = 1000;
         uint32_t defaultWaitForStartTimeoutMs = 30000;
         uint32_t statusPrintIntervalMs = 2000;
@@ -63,111 +66,70 @@ namespace
             : m_opts(std::move(opts))
         {
             m_lastActivityNs.store(nowNs(), std::memory_order_relaxed);
+            m_rdma = std::make_unique<rdma::RdmaRecvServer>(rdma::RdmaRecvServer::Config{});
+            m_rdma->setIngest([this](const rdma::SlotChunkView &view) {
+                m_totalChunksReceived.fetch_add(1, std::memory_order_relaxed);
+                m_totalSinglesReceived.fetch_add(view.singlesCount, std::memory_order_relaxed);
+                m_lastActivityNs.store(nowNs(), std::memory_order_relaxed);
+                std::lock_guard<std::mutex> lock(m_mutex);
+                auto &node = m_nodes[view.nodeId];
+                node.connected = true;
+                node.registered = true;
+                if (node.hasLastChunk && view.chunkId != node.lastChunkId + 1)
+                    node.chunkGapCount++;
+                node.lastChunkId = view.chunkId;
+                node.hasLastChunk = true;
+                node.chunksReceived += 1;
+                node.singlesReceived += view.singlesCount;
+                return true;
+            });
+            m_rdma->start();
+        }
+        ~LocalCoincidenceReceiverService() override
+        {
+            if (m_rdma) m_rdma->stop();
         }
 
+
         grpc::Status StreamSingles(
-            grpc::ServerContext * /*context*/,
-            grpc::ServerReader<coincidence::SingleChunkMessage> *reader,
-            coincidence::StreamResponse *response) override
+            grpc::ServerContext *,
+            grpc::ServerReader<coincidence::SingleChunkMessage> *,
+            coincidence::StreamResponse *) override
         {
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "use OpenDataPlane");
+        }
+
+        grpc::Status OpenDataPlane(
+            grpc::ServerContext *,
+            const coincidence::OpenDataPlaneRequest *request,
+            coincidence::OpenDataPlaneResponse *response) override
+        {
+            if (!m_rdma)
             {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                if (!m_startSignalIssued)
+                response->set_success(false);
+                response->set_message("rdma server missing");
+                return grpc::Status::OK;
+            }
+            auto session = m_rdma->ensureSession(request->node_id());
+            if (!session)
+            {
+                response->set_success(false);
+                response->set_message("ensureSession failed");
+                return grpc::Status::OK;
+            }
+            if (request->has_node_endpoint() && session->kind() == rdma::DataPlaneKind::RdmaRoceV2)
+            {
+                if (!session->acceptRemote(rdma::fromProtoEndpoint(request->node_endpoint())))
                 {
-                    return grpc::Status(
-                        grpc::StatusCode::FAILED_PRECONDITION,
-                        "Start signal not issued yet. Node must wait for WaitForStart.");
+                    response->set_success(false);
+                    response->set_message("acceptRemote failed");
+                    return grpc::Status::OK;
                 }
             }
-
-            coincidence::SingleChunkMessage msg;
-            uint64_t totalReceivedInRpc = 0;
-
-            while (reader->Read(&msg))
-            {
-                const uint32_t nodeId = msg.node_id();
-                const uint64_t singlesCount = static_cast<uint64_t>(msg.singles_size());
-                const uint64_t segmentCount =
-                    msg.segment_metas_size() > 0 ? static_cast<uint64_t>(msg.segment_metas_size()) : 1ULL;
-
-                m_totalChunksReceived.fetch_add(segmentCount, std::memory_order_relaxed);
-                m_totalSinglesReceived.fetch_add(singlesCount, std::memory_order_relaxed);
-                totalReceivedInRpc += singlesCount;
-                m_lastActivityNs.store(nowNs(), std::memory_order_relaxed);
-
-                {
-                    std::lock_guard<std::mutex> lock(m_mutex);
-                    auto &node = m_nodes[nodeId];
-                    node.connected = true;
-                    node.registered = true;
-
-                    if (msg.segment_metas_size() > 0)
-                    {
-                        uint64_t singlesFromMeta = 0;
-                        for (const auto &meta : msg.segment_metas())
-                        {
-                            const uint64_t chunkId = meta.chunk_id();
-                            const uint64_t segmentSingles = static_cast<uint64_t>(meta.singles_count());
-
-                            if (node.hasLastChunk && chunkId != node.lastChunkId + 1)
-                            {
-                                node.chunkGapCount += 1;
-                                std::cerr << "[CoinReceiver] chunk gap node=" << nodeId
-                                          << " prev=" << node.lastChunkId
-                                          << " current=" << chunkId << std::endl;
-                            }
-
-                            node.lastChunkId = chunkId;
-                            node.hasLastChunk = true;
-                            node.chunksReceived += 1;
-                            node.singlesReceived += segmentSingles;
-                            singlesFromMeta += segmentSingles;
-
-                            if (node.chunksReceived == 1 || node.chunksReceived % 200 == 0)
-                            {
-                                std::cout << "[CoinReceiver] node=" << nodeId
-                                          << " chunks=" << node.chunksReceived
-                                          << " singles=" << node.singlesReceived
-                                          << " totalSingles=" << m_totalSinglesReceived.load(std::memory_order_relaxed)
-                                          << std::endl;
-                            }
-                        }
-
-                        if (singlesFromMeta < singlesCount)
-                        {
-                            node.singlesReceived += (singlesCount - singlesFromMeta);
-                        }
-                    }
-                    else
-                    {
-                        if (node.hasLastChunk && msg.chunk_id() != node.lastChunkId + 1)
-                        {
-                            node.chunkGapCount += 1;
-                            std::cerr << "[CoinReceiver] chunk gap node=" << nodeId
-                                      << " prev=" << node.lastChunkId
-                                      << " current=" << msg.chunk_id() << std::endl;
-                        }
-
-                        node.lastChunkId = msg.chunk_id();
-                        node.hasLastChunk = true;
-                        node.chunksReceived += 1;
-                        node.singlesReceived += singlesCount;
-
-                        if (node.chunksReceived == 1 || node.chunksReceived % 200 == 0)
-                        {
-                            std::cout << "[CoinReceiver] node=" << nodeId
-                                      << " chunks=" << node.chunksReceived
-                                      << " singles=" << node.singlesReceived
-                                      << " totalSingles=" << m_totalSinglesReceived.load(std::memory_order_relaxed)
-                                      << std::endl;
-                        }
-                    }
-                }
-            }
-
+            const auto local = session->localEndpoint();
             response->set_success(true);
-            response->set_singles_received(totalReceivedInRpc);
-            response->set_message("receiver-only stream accepted");
+            response->set_data_plane_kind(rdma::toProto(local.kind));
+            rdma::fillProtoEndpoint(local, response->mutable_coin_endpoint());
             return grpc::Status::OK;
         }
 
@@ -552,6 +514,7 @@ namespace
         uint64_t m_plannedStartTimeMs = 0;
 
         std::atomic<uint64_t> m_totalSinglesReceived{0};
+        std::unique_ptr<rdma::RdmaRecvServer> m_rdma;
         std::atomic<uint64_t> m_totalChunksReceived{0};
         std::atomic<uint64_t> m_lastActivityNs{0};
     };
@@ -725,8 +688,8 @@ int main(int argc, char **argv)
     grpc::ServerBuilder builder;
     builder.AddListeningPort(opts.address, grpc::InsecureServerCredentials());
     builder.RegisterService(&service);
-    builder.SetMaxReceiveMessageSize(100 * 1024 * 1024);
-    builder.SetMaxSendMessageSize(10 * 1024 * 1024);
+    builder.SetMaxReceiveMessageSize(256 * 1024 * 1024);
+    builder.SetMaxSendMessageSize(16 * 1024 * 1024);
 
     auto server = builder.BuildAndStart();
     if (!server)
@@ -786,11 +749,18 @@ int main(int argc, char **argv)
 
 /*
 Build:
-  make test-local-grpc-coin
+  cmake --build --preset build-tests-pni --target test_local_grpc_coin
 
-Terminal 1 (coin receiver):
-  ./bin/test_local_grpc_coin --address 127.0.0.1:50061 --expected-node-count 3
+Terminal 1 (coin receiver, orchestration only — no real StreamingTimeAligner):
+  ./bin/test/test_local_grpc_coin --address 127.0.0.1:50061 --expected-node-count 2
 
-Terminal 2 (r2s nodes only):
-  ./bin/test_local_grpc_r2s_bdm2 --address 127.0.0.1:50061 --node-count 3 --no-local-receiver
+Terminal 2 (9120 dual-node R2S; parallel required so both Register before start):
+  ./bin/test/test_local_grpc_r2s --no-local-receiver --parallel --address 127.0.0.1:50061
+
+For real R2S→coincidence E2E (multi-GPU only, single process):
+  ./bin/test/test_local_grpc_r2s_coin
+
+Preferred single-GPU alternatives (replay .lsingle, no R2S CUDA):
+  L2 ingress:  ./bin/test/test_local_grpc_singles_ingress --data-root /media/lenovo/1TB/50100data/test_9120
+  L3 coin:     ./bin/test/test_local_grpc_coin_stream --data-root /media/lenovo/1TB/50100data/test_9120 --disable-multi-gpu
 */

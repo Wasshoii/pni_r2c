@@ -48,7 +48,8 @@ public:
     bool initialize(const CoincidenceMultiGpuEngineConfig &config);
 
     // Lease must remain alive while returned spans are used.
-    SegmentCoinResult processSinglesSync(std::span<const Single> singles);
+    SegmentCoinResult processSinglesSync(std::span<const Single> singles,
+                                         uint64_t carryCutoffTime_100fs = 0);
 
     void finalize();
 

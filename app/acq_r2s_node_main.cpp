@@ -291,9 +291,7 @@ int main(int argc, char **argv)
     }
 
     r2s::AsyncRawDataToR2SBridge::Config bridgeConfig;
-    bridgeConfig.queue.capacity = cfg.bridge.queueCapacity;
-    bridgeConfig.queue.reservePacketsPerSlot = cfg.bridge.reservePacketsPerSlot;
-    bridgeConfig.queue.reserveBytesPerSlot = cfg.bridge.reserveBytesPerSlot;
+    bridgeConfig.leaseQueueCapacity = cfg.bridge.leaseQueueCapacity;
     bridgeConfig.blockWhenQueueFull = cfg.bridge.blockWhenQueueFull;
     bridgeConfig.queueFullWarnEvery = cfg.bridge.queueFullWarnEvery;
 
@@ -305,16 +303,6 @@ int main(int argc, char **argv)
         {
             std::cerr << "[AcqR2SNode] failed to start CoincidenceClient" << std::endl;
             return 3;
-        }
-    }
-
-    if (cfg.bridge.enabled)
-    {
-        if (!bridge.start(cfg.bridge.inputChannelCount))
-        {
-            std::cerr << "[AcqR2SNode] failed to start AsyncRawDataToR2SBridge" << std::endl;
-            coinClient.stop();
-            return 4;
         }
     }
 
@@ -347,6 +335,14 @@ int main(int argc, char **argv)
     grpcnode::AcquisitionGrpcNode node(nodeOpt);
     if (cfg.bridge.enabled)
     {
+        node.setDeferRawDataRelease(true);
+        bridge.setReleaseFn(node.makeRawDataReleaseFn());
+        if (!bridge.start(cfg.bridge.inputChannelCount))
+        {
+            std::cerr << "[AcqR2SNode] failed to start AsyncRawDataToR2SBridge" << std::endl;
+            coinClient.stop();
+            return 4;
+        }
         node.setRawDataReadyCallback(bridge.makeRawDataCallback());
     }
 

@@ -1,6 +1,6 @@
 /**
  * @file test_local_grpc_r2s_coin_r2s_runner.cpp
- * @brief Implements 9120 R2S→gRPC node run without including streaming/coin headers.
+ * @brief Implements 9120 R2S→RDMA node run without including streaming/coin headers.
  */
 
 #include "tests/test_local_grpc_r2s_coin_r2s_runner.hpp"
@@ -53,8 +53,7 @@ R2SRunnerStats run9120R2SGrpcNode(
         true,
         0,
         opts.waitForStartTimeoutMs,
-        1000,
-        opts.batchSegmentsPerMessage);
+        1000);
 
     std::cout << "[Node " << node.nodeId << "] R2S start, dir=" << node.rawdataPath;
     if (!node.channels.empty())
@@ -69,14 +68,14 @@ R2SRunnerStats run9120R2SGrpcNode(
     std::cout << "[Node " << node.nodeId << "] R2S done, success="
               << (s.success ? "true" : "false")
               << " callbacks=" << s.callbackCount
-              << " grpcMessages=" << s.grpcMessagesSent
+              << " rdmaChunks=" << s.rdmaChunksSent
               << " singlesSent=" << s.singlesSent << std::endl;
 
     R2SRunnerStats out;
     out.success = s.success;
     out.callbackCount = s.callbackCount;
     out.singlesSent = s.singlesSent;
-    out.grpcMessagesSent = s.grpcMessagesSent;
+    out.rdmaChunksSent = s.rdmaChunksSent;
     return out;
 }
 

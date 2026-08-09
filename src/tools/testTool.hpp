@@ -955,7 +955,7 @@ bool export_singles_payload_only(
                 single.channelIndex = data.channel_index1[i];
                 single.crystalIndex = data.local_crystal_index1[i];
                 single.timevalue_100fs = data.absolute_timestamp1_100fs[i];
-                single.energy = data.energy1[i];
+                single.energy_ev = data.energy1[i];
             }
 
             output.write(reinterpret_cast<const char *>(buffer.data()),
@@ -1255,7 +1255,7 @@ bool convert_single_to_RS_listmode(const std::string &singlePath,
                 evt.ch = static_cast<uint16_t>(mappedCh + chBase);
 
                 float energyKev = 0.0f;
-                const double energyEv = static_cast<double>(single.energy);
+                const double energyEv = static_cast<double>(single.energy_ev);
                 if (std::isfinite(energyEv))
                 {
                     rawEnergyMin = std::min(rawEnergyMin, energyEv);
@@ -1545,7 +1545,7 @@ bool convert_RS_listmode_to_single(const std::string &rsPath,
                     minEnergyEv = std::min(minEnergyEv, energyEv);
                     maxEnergyEv = std::max(maxEnergyEv, energyEv);
                 }
-                s.energy = static_cast<float>(energyEv);
+                s.energy_ev = static_cast<float>(energyEv);
 
                 const double timeVal = static_cast<double>(evt.time) * timeScale;
                 if (!std::isfinite(timeVal) || timeVal < 0.0)

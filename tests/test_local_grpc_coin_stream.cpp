@@ -121,7 +121,7 @@ int main(int argc, char **argv)
                   << "  --disable-multi-gpu               Disable multi-GPU (default)\n"
                   << "  --enable-multi-gpu                Enable multi-GPU\n"
                   << "  --singles-per-sec <n>             Rate limit (0=burst)\n"
-                  << "  --push-chunk <n>                  Singles per ordered chunk"
+                  << "  --push-chunk <n>                  Singles per RDMA chunk"
                      " (e.g. 2000000/4000000)\n"
                   << "  --max-files <n>                   Max files per node\n"
                   << "  --skip-lmf-analysis               Skip LMF content checks\n"
@@ -139,7 +139,7 @@ int main(int argc, char **argv)
     std::cout << "coinOutputDir     : " << opts.coinOutputDir << std::endl;
     std::cout << "disableMultiGpu   : " << (opts.disableMultiGpu ? "true" : "false") << std::endl;
     std::cout << "pushChunk         : " << opts.pushChunkSingles
-              << " (" << (opts.pushChunkSingles * 16ULL) / (1024 * 1024) << " MiB/msg, ordered)" << std::endl;
+              << " (" << (opts.pushChunkSingles * 16ULL) / (1024 * 1024) << " MiB/chunk)" << std::endl;
     std::cout << "singlesPerSec     : " << opts.singlesPerSec << std::endl;
 
     // Validate inputs

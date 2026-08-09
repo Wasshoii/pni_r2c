@@ -717,28 +717,47 @@ namespace openpni::distributed::streaming
 
             consecutiveEmptyRounds = 0;
 
-            std::vector<Single> allSingles;
+            std::vector<Single> newSingles;
 
             for (auto &buf : m_nodeBuffers)
             {
                 auto singles = buf->extractSinglesBefore(watermark);
                 if (!singles.empty())
                 {
-                    allSingles.insert(allSingles.end(),
+                    newSingles.insert(newSingles.end(),
                                       std::make_move_iterator(singles.begin()),
                                       std::make_move_iterator(singles.end()));
                 }
             }
 
-            if (!allSingles.empty())
+            if (!newSingles.empty())
             {
-                m_stats.totalSinglesReceived += allSingles.size();
-                processCoincidence(allSingles);
+                const uint64_t carryCutoff =
+                    m_carrySingles.empty() ? 0 : m_lastWatermark;
+                const size_t newCount = newSingles.size();
 
-                m_stats.totalSinglesProcessed += allSingles.size();
+                std::vector<Single> batch;
+                batch.reserve(m_carrySingles.size() + newCount);
+                batch.insert(batch.end(), m_carrySingles.begin(), m_carrySingles.end());
+                batch.insert(batch.end(),
+                             std::make_move_iterator(newSingles.begin()),
+                             std::make_move_iterator(newSingles.end()));
+                newSingles.clear();
+
+                m_stats.totalSinglesReceived += newCount;
+                processCoincidence(batch, carryCutoff);
+                m_stats.totalSinglesProcessed += newCount;
                 m_stats.chunksProcessed++;
+
+                updateCarrySingles(batch, watermark);
+            }
+            else if (!m_carrySingles.empty())
+            {
+                // 水位推进但无新事件：按新窗口裁剪尾部，避免陈旧 carry。
+                updateCarrySingles(m_carrySingles, watermark);
             }
 
+            m_lastWatermark = watermark;
             lastWatermark = watermark;
             m_stats.currentTimeBoundary_pico = watermark;
 
@@ -753,7 +772,42 @@ namespace openpni::distributed::streaming
         flushRemaining();
     }
 
-    void StreamingTimeAligner::processCoincidence(const std::vector<Single> &singles)
+    uint64_t StreamingTimeAligner::overlapLength_100fs() const
+    {
+        const uint64_t coinWindow_ps =
+            static_cast<uint64_t>(m_config.coinProtocol.timeWindow_ps);
+        const uint64_t delayWindow_ps =
+            static_cast<uint64_t>(m_config.coinProtocol.delayTime_ps);
+        return (coinWindow_ps + delayWindow_ps) * 10ull;
+    }
+
+    void StreamingTimeAligner::updateCarrySingles(
+        const std::vector<Single> &processedSingles, uint64_t watermark)
+    {
+        std::vector<Single> nextCarry;
+        if (processedSingles.empty() || watermark == 0)
+        {
+            m_carrySingles = std::move(nextCarry);
+            return;
+        }
+
+        const uint64_t overlap = overlapLength_100fs();
+        const uint64_t carryBegin =
+            watermark > overlap ? watermark - overlap : 0;
+
+        nextCarry.reserve(processedSingles.size() / 8 + 8);
+        for (const auto &s : processedSingles)
+        {
+            if (s.timevalue_100fs > carryBegin && s.timevalue_100fs <= watermark)
+            {
+                nextCarry.push_back(s);
+            }
+        }
+        m_carrySingles = std::move(nextCarry);
+    }
+
+    void StreamingTimeAligner::processCoincidence(
+        const std::vector<Single> &singles, uint64_t carryCutoffTime_100fs)
     {
         if (singles.empty())
         {
@@ -764,7 +818,7 @@ namespace openpni::distributed::streaming
             if (m_useMultiGpu && m_multiGpuEngine)
             {
                 const auto result = m_multiGpuEngine->processSinglesSync(
-                    std::span<const Single>(singles));
+                    std::span<const Single>(singles), carryCutoffTime_100fs);
 
                 if (!result.prompt.empty() && m_promptOpened)
                 {
@@ -780,12 +834,18 @@ namespace openpni::distributed::streaming
                 return;
             }
 
+            // UniPtr keeps CUDA capacity from the largest batch; SyncToCuda then calls
+            // cuda_unique_ptr::CopyFromHost which requires exact element-count match.
+            // Clear() before copy so a smaller subsequent batch does not hit
+            // "size mismatch when copying from host, expected N, got M".
+            m_singleBuffer.Clear();
             m_singleBuffer.CopyFromHost(std::span<const Single>(singles));
 
             std::vector<std::span<Single const>> inputList;
             inputList.push_back(m_singleBuffer.CudaRStdSpan());
 
-            auto [prompt, delay] = m_coinNode.getDListmode(inputList, m_config.coinProtocol);
+            auto [prompt, delay] = m_coinNode.getDListmode(
+                inputList, m_config.coinProtocol, carryCutoffTime_100fs);
 
             if (!prompt.empty() && m_promptOpened)
             {
@@ -852,15 +912,64 @@ namespace openpni::distributed::streaming
             }
         }
 
-        if (!remaining.empty())
+        if (remaining.empty())
         {
-            LOG(INFO) << "[StreamingTimeAligner] Processing " << remaining.size()
-                      << " remaining singles...";
-            m_stats.totalSinglesReceived += remaining.size();
-            processCoincidence(remaining);
-            m_stats.totalSinglesProcessed += remaining.size();
+            m_carrySingles.clear();
+            LOG(INFO) << "[StreamingTimeAligner] Flush complete (no remaining singles)";
+            return;
         }
 
+        constexpr size_t kFlushBatch = 65536;
+        LOG(INFO) << "[StreamingTimeAligner] Processing " << remaining.size()
+                  << " remaining singles (+ carry " << m_carrySingles.size()
+                  << ") in batches of " << kFlushBatch << "...";
+        m_stats.totalSinglesReceived += remaining.size();
+
+        // Sort remaining by time so flush sub-batches form contiguous time ranges.
+        std::sort(remaining.begin(), remaining.end(),
+                  [](const Single &a, const Single &b) {
+                      return a.timevalue_100fs < b.timevalue_100fs;
+                  });
+
+        uint64_t prevCutoff = m_lastWatermark;
+        size_t batchIndex = 0;
+        for (size_t offset = 0; offset < remaining.size(); offset += kFlushBatch)
+        {
+            const size_t n = std::min(kFlushBatch, remaining.size() - offset);
+            std::vector<Single> newBatch(
+                std::make_move_iterator(remaining.begin() + static_cast<std::ptrdiff_t>(offset)),
+                std::make_move_iterator(remaining.begin() + static_cast<std::ptrdiff_t>(offset + n)));
+
+            uint64_t batchMaxTime = 0;
+            for (const auto &s : newBatch)
+            {
+                batchMaxTime = std::max(batchMaxTime, s.timevalue_100fs);
+            }
+
+            const uint64_t carryCutoff = m_carrySingles.empty() ? 0 : prevCutoff;
+
+            std::vector<Single> batch;
+            batch.reserve(m_carrySingles.size() + newBatch.size());
+            batch.insert(batch.end(), m_carrySingles.begin(), m_carrySingles.end());
+            batch.insert(batch.end(),
+                         std::make_move_iterator(newBatch.begin()),
+                         std::make_move_iterator(newBatch.end()));
+
+            ++batchIndex;
+            LOG(INFO) << "[StreamingTimeAligner] Flush batch " << batchIndex
+                      << "/" << ((remaining.size() + kFlushBatch - 1) / kFlushBatch)
+                      << " size=" << batch.size() << " (new=" << n
+                      << ", carry=" << (batch.size() - n) << ")";
+
+            processCoincidence(batch, carryCutoff);
+            m_stats.totalSinglesProcessed += n;
+
+            updateCarrySingles(batch, batchMaxTime);
+            prevCutoff = batchMaxTime;
+            m_lastWatermark = batchMaxTime;
+        }
+
+        m_carrySingles.clear();
         LOG(INFO) << "[StreamingTimeAligner] Flush complete";
     }
 

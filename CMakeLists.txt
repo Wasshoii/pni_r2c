@@ -13,7 +13,6 @@ option(R2C_BUILD_TEST_BASIC "Build mock clock-sync test" ON)
 option(R2C_BUILD_TEST_STREAMING "Build streaming coincidence test (requires libpni, nvcc)" OFF)
 option(R2C_BUILD_TEST_LOCAL_GRPC_COIN "Build local gRPC coin receiver test (requires libpni, tbb, nvcc)" OFF)
 option(R2C_BUILD_TEST_ACQ_CONTROL_INIT "Build acquisition control init test (requires libpni, tbb)" OFF)
-option(R2C_BUILD_TEST_ACQ_DATAPATH_UDP "Build acquisition datapath UDP test (requires libpni, tbb)" OFF)
 
 # - cuda (nvcc + libpni + tbb + openmp)
 option(R2C_BUILD_TEST_PNI_R2C "Build PNI R2C test (requires libpni, nvcc, tbb)" OFF)
@@ -22,9 +21,10 @@ option(R2C_BUILD_TEST_LOCAL_GRPC_R2S "Build local gRPC R2S test (requires libpni
 option(R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN "Build local gRPC R2S→coincidence E2E test (requires libpni, nvcc, tbb)" OFF)
 option(R2C_BUILD_TEST_LOCAL_GRPC_SINGLES_INGRESS "Build L2 gRPC singles ingress test (requires libpni)" OFF)
 option(R2C_BUILD_TEST_LOCAL_GRPC_COIN_STREAM "Build L3 gRPC coincidence stream test (requires libpni, nvcc, tbb)" OFF)
-option(R2C_BUILD_TEST_ACQ_R2S_PIPELINE "Build acquisition to R2S pipeline test (requires libpni, nvcc, tbb)" OFF)
+option(R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE "Build BDM50100 NECR1 online Acq→R2S→Coin pipeline test (requires libpni, nvcc, tbb)" OFF)
 option(R2C_BUILD_TEST_R2S_MULTI_GPU "Build BDM50100 multi-GPU R2S test (requires libpni, nvcc, tbb)" OFF)
 option(R2C_BUILD_TEST_COIN_MULTI_GPU "Build coincidence multi-GPU consistency test (requires libpni, nvcc, tbb)" OFF)
+option(R2C_BUILD_TEST_COIN_CARRY_BOUNDARY "Build coincidence carry-boundary 3-mode comparison test (requires libpni)" OFF)
 
 # Build options: Apps
 # - basic (libpni + tbb + openmp; coin master needs nvcc for multi-GPU coincidence)
@@ -205,7 +205,7 @@ if(R2C_BUILD_TEST_GRPC)
   )
 endif()
 
-if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_COIN_MASTER OR R2C_BUILD_TEST_COIN_MULTI_GPU OR R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN OR R2C_BUILD_TEST_LOCAL_GRPC_SINGLES_INGRESS OR R2C_BUILD_TEST_LOCAL_GRPC_COIN_STREAM)
+if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_COIN_MASTER OR R2C_BUILD_TEST_COIN_MULTI_GPU OR R2C_BUILD_TEST_COIN_CARRY_BOUNDARY OR R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN OR R2C_BUILD_TEST_LOCAL_GRPC_SINGLES_INGRESS OR R2C_BUILD_TEST_LOCAL_GRPC_COIN_STREAM OR R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE)
   pkg_check_modules(R2C_PNI REQUIRED IMPORTED_TARGET libpni)
   pkg_check_modules(R2C_DPDK QUIET libdpdk)
 
@@ -315,6 +315,24 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
     )
     target_compile_options(test_coincidence_multi_gpu PRIVATE -O3 -march=native -pthread)
     target_link_libraries(test_coincidence_multi_gpu
+      PRIVATE
+        PkgConfig::R2C_PNI
+        PkgConfig::R2C_GLOG
+        dl
+    )
+  endif()
+
+  if(R2C_BUILD_TEST_COIN_CARRY_BOUNDARY)
+    add_executable(test_coin_carry_boundary
+      tests/test_coin_carry_boundary.cpp
+    )
+    target_include_directories(test_coin_carry_boundary
+      PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    target_compile_options(test_coin_carry_boundary PRIVATE -O3 -march=native -pthread)
+    target_link_libraries(test_coin_carry_boundary
       PRIVATE
         PkgConfig::R2C_PNI
         PkgConfig::R2C_GLOG
@@ -617,7 +635,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
   endif()
 endif()
 
-if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_ACQ_DATAPATH_UDP OR R2C_BUILD_TEST_ACQ_R2S_PIPELINE)
+if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE)
   pkg_check_modules(R2C_PNI REQUIRED IMPORTED_TARGET libpni)
   find_library(R2C_TBB_LIBRARY NAMES tbb REQUIRED)
   find_package(OpenMP REQUIRED)
@@ -750,38 +768,9 @@ if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_ACQ_DATAPATH_UDP OR R2C_BUI
     )
   endif()
 
-  if(R2C_BUILD_TEST_ACQ_DATAPATH_UDP)
-    add_executable(test_acquisition_datapath_udp
-      tests/test_acquisition_datapath_udp.cpp
-      $<TARGET_OBJECTS:r2c_grpc_service_acq_master_objs>
-      $<TARGET_OBJECTS:r2c_core_acq_objs>
-      $<TARGET_OBJECTS:r2c_grpc_node_acq_objs>
-      $<TARGET_OBJECTS:r2c_proto_objs>
-    )
-    target_include_directories(test_acquisition_datapath_udp
-      PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}"
-        "${R2C_PROTO_GEN_ROOT}"
-        "${R2C_PROTO_GEN_DIR}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    )
-    target_compile_options(test_acquisition_datapath_udp PRIVATE -O3 -march=native -fopenmp)
-    target_link_libraries(test_acquisition_datapath_udp
-      PRIVATE
-        PkgConfig::R2C_PNI
-        PkgConfig::R2C_GRPC
-        PkgConfig::R2C_IBVERBS
-        PkgConfig::R2C_GLOG
-        OpenMP::OpenMP_CXX
-        ${R2C_TBB_LIBRARY}
-        dl
-    )
-  endif()
 endif()
 
-if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRPC_R2S OR R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN OR R2C_BUILD_TEST_ACQ_R2S_PIPELINE OR R2C_BUILD_APP_ACQ_R2S_NODE OR R2C_BUILD_TEST_R2S_MULTI_GPU)
+if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRPC_R2S OR R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN OR R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE OR R2C_BUILD_APP_ACQ_R2S_NODE OR R2C_BUILD_TEST_R2S_MULTI_GPU)
   pkg_check_modules(R2C_PNI REQUIRED IMPORTED_TARGET libpni)
   pkg_check_modules(R2C_DPDK QUIET libdpdk)
   find_library(R2C_TBB_LIBRARY NAMES tbb REQUIRED)
@@ -1209,17 +1198,37 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
     endif()
   endif()
 
-  if(R2C_BUILD_TEST_ACQ_R2S_PIPELINE)
-    add_executable(test_acquisition_r2s_pipeline
-      tests/test_acquisition_r2s_pipeline.cpp
+  if(R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE)
+    if(NOT TARGET r2c_core_streaming_objs OR NOT TARGET r2c_grpc_service_coin_objs OR NOT TARGET r2c_grpc_node_coin_objs)
+      message(FATAL_ERROR
+        "R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE requires streaming/coin objects. "
+        "Ensure the streaming block is enabled (option itself pulls it in).")
+    endif()
+    if(NOT DEFINED R2C_S2C_COMPUTE_OBJ)
+      message(FATAL_ERROR "R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE requires R2C_S2C_COMPUTE_OBJ from streaming block")
+    endif()
+    if(NOT TARGET r2c_grpc_service_acq_master_objs)
+      message(FATAL_ERROR
+        "R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE requires AcquisitionMaster objects. "
+        "Ensure the acquisition or streaming block is enabled.")
+    endif()
+
+    add_executable(test_bdm50100_online_pipeline
+      tests/test_bdm50100_online_pipeline.cpp
+      tests/test_bdm50100_online_pipeline_r2s.cpp
       ${R2C_R2S_CUDA_OBJS}
+      ${R2C_S2C_COMPUTE_OBJ}
       $<TARGET_OBJECTS:r2c_grpc_service_acq_master_objs>
       $<TARGET_OBJECTS:r2c_core_acq_objs>
       $<TARGET_OBJECTS:r2c_core_r2s_objs>
       $<TARGET_OBJECTS:r2c_grpc_node_acq_objs>
+      $<TARGET_OBJECTS:r2c_grpc_service_coin_objs>
+      $<TARGET_OBJECTS:r2c_dataplane_rdma_objs>
+      $<TARGET_OBJECTS:r2c_grpc_node_coin_objs>
+      $<TARGET_OBJECTS:r2c_core_streaming_objs>
       $<TARGET_OBJECTS:r2c_proto_objs>
     )
-    target_include_directories(test_acquisition_r2s_pipeline
+    target_include_directories(test_bdm50100_online_pipeline
       PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${R2C_PROTO_GEN_ROOT}"
@@ -1228,8 +1237,8 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
     )
-    target_compile_options(test_acquisition_r2s_pipeline PRIVATE -O3 -march=native -fopenmp)
-    target_link_libraries(test_acquisition_r2s_pipeline
+    target_compile_options(test_bdm50100_online_pipeline PRIVATE -O3 -march=native -fopenmp)
+    target_link_libraries(test_bdm50100_online_pipeline
       PRIVATE
         PkgConfig::R2C_PNI
         PkgConfig::R2C_GRPC
@@ -1372,15 +1381,15 @@ r2c_set_output_dir(test_streaming_coincidence test)
 r2c_set_output_dir(test_coincidence_multi_gpu test)
 r2c_set_output_dir(test_local_grpc_coin test)
 r2c_set_output_dir(test_acquisition_control_init test)
-r2c_set_output_dir(test_acquisition_datapath_udp test)
 r2c_set_output_dir(test_pni_r2c test)
 r2c_set_output_dir(test_pni_coin test)
+r2c_set_output_dir(test_coin_carry_boundary test)
 r2c_set_output_dir(test_local_grpc_r2s test)
 r2c_set_output_dir(test_local_grpc_r2s_coin test)
 r2c_set_output_dir(test_local_grpc_singles_ingress test)
 r2c_set_output_dir(test_rdma_dataplane_loopback test)
 r2c_set_output_dir(test_local_grpc_coin_stream test)
-r2c_set_output_dir(test_acquisition_r2s_pipeline test)
+r2c_set_output_dir(test_bdm50100_online_pipeline test)
 r2c_set_output_dir(test_r2s50100_multi_gpu test)
 
 # CTest registration: only register targets that are enabled and built.
@@ -1407,10 +1416,10 @@ r2c_register_test(test_streaming_coincidence pni)
 r2c_register_test(test_coincidence_multi_gpu cuda)
 r2c_register_test(test_local_grpc_coin pni integration)
 r2c_register_test(test_acquisition_control_init pni)
-r2c_register_test(test_acquisition_datapath_udp pni)
 
 r2c_register_test(test_pni_r2c cuda)
 r2c_register_test(test_pni_coin cuda)
+r2c_register_test(test_coin_carry_boundary cuda)
 r2c_register_test(test_local_grpc_r2s cuda integration)
 r2c_register_test(test_local_grpc_r2s_coin cuda integration)
 if(BUILD_TESTING AND TARGET test_local_grpc_r2s_coin)
@@ -1422,5 +1431,8 @@ r2c_register_test(test_local_grpc_coin_stream cuda integration)
 if(BUILD_TESTING AND TARGET test_local_grpc_coin_stream)
   set_tests_properties(test_local_grpc_coin_stream PROPERTIES TIMEOUT 7200)
 endif()
-r2c_register_test(test_acquisition_r2s_pipeline cuda)
+r2c_register_test(test_bdm50100_online_pipeline cuda integration)
+if(BUILD_TESTING AND TARGET test_bdm50100_online_pipeline)
+  set_tests_properties(test_bdm50100_online_pipeline PROPERTIES TIMEOUT 7200)
+endif()
 r2c_register_test(test_r2s50100_multi_gpu cuda)

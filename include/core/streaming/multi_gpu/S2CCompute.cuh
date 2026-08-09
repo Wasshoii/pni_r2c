@@ -38,11 +38,21 @@ struct CoinResult
     uint64_t actualDelayCount{0};
 };
 
+/** MultiGPU 任务输入：singles + 可选跨段 cutoff（0 表示关闭）。 */
+struct S2CInput
+{
+    std::span<const Single> singles;
+    uint64_t carryCutoffTime_100fs = 0;
+
+    bool empty() const noexcept { return singles.empty(); }
+    size_t size() const noexcept { return singles.size(); }
+};
+
 struct CoinResultPolicy
 {
     CoinResult make_result() const { return CoinResult{}; }
 
-    void prepare_for_reuse(CoinResult &result, const std::span<Single const> *) const noexcept
+    void prepare_for_reuse(CoinResult &result, const S2CInput *) const noexcept
     {
         result.actualPromptCount = 0;
         result.actualDelayCount = 0;
@@ -56,12 +66,12 @@ struct S2CComputeConfig
     int gpuId = 0;
 };
 
-using IComputeS2C = ICompute<std::span<Single const>, CoinResult>;
+using IComputeS2C = ICompute<S2CInput, CoinResult>;
 
 class S2CCompute : public IComputeS2C
 {
 public:
-    using Data = std::span<Single const>;
+    using Data = S2CInput;
     using Result = CoinResult;
 
     explicit S2CCompute(const S2CComputeConfig &config);
@@ -85,7 +95,7 @@ private:
 };
 
 using S2CSPSCProcessor = SPSCProcessor<
-    std::span<Single const>,
+    S2CInput,
     CoinResult,
     CoinResultPolicy>;
 

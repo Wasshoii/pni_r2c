@@ -121,7 +121,7 @@ bool CoincidenceMultiGpuEngine::initialize(const CoincidenceMultiGpuEngineConfig
 }
 
 SegmentCoinResult CoincidenceMultiGpuEngine::processSinglesSync(
-    std::span<const Single> singles)
+    std::span<const Single> singles, uint64_t carryCutoffTime_100fs)
 {
     if (!initialized_ || !processor_)
     {
@@ -136,7 +136,8 @@ SegmentCoinResult CoincidenceMultiGpuEngine::processSinglesSync(
         return {};
     }
 
-    processor_->submit(&singles);
+    S2CInput input{singles, carryCutoffTime_100fs};
+    processor_->submit(&input);
     active_lease_ = processor_->next();
 
     if (active_lease_.failed())

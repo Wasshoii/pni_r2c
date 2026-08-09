@@ -50,7 +50,6 @@ namespace
         std::string calibrationDir = "/media/lenovo/1TB/50100data/pni_res/caliFile";
         std::string resultDir;
         size_t maxPendingSegments = 64;
-        uint32_t batchSegmentsPerMessage = 1;
         bool parallelNodes = false;
         bool noLocalReceiver = false;
         bool helpOnly = false;
@@ -232,8 +231,6 @@ namespace
             grpc::ServerBuilder builder;
             builder.AddListeningPort(m_address, grpc::InsecureServerCredentials());
             builder.RegisterService(&m_service);
-            builder.SetMaxReceiveMessageSize(256 * 1024 * 1024);
-            builder.SetMaxSendMessageSize(256 * 1024 * 1024);
 
             m_server = builder.BuildAndStart();
             if (!m_server)
@@ -274,7 +271,6 @@ namespace
                   << "  --calibration-dir <path>      Per-ring calibration directory (reused for both rings)\n"
                   << "  --result-dir <path>           Output directory for R2S config\n"
                   << "  --max-pending-segments <N>    Async sender queue length in segments (default: 64)\n"
-                  << "  --batch-segments <N>          Segments packed into one gRPC message (default: 1)\n"
                   << "  --no-local-receiver           Do not start built-in receiver; use external coin host\n"
                   << "  --serial                      Run nodes sequentially (default; safer on single GPU)\n"
                   << "  --parallel                    Run nodes in parallel (needs enough GPU VRAM for 2x 288ch)\n"
@@ -405,31 +401,6 @@ namespace
                 continue;
             }
 
-            if (arg == "--batch-segments")
-            {
-                const char *v = requireValue(arg);
-                if (!v)
-                {
-                    return false;
-                }
-
-                try
-                {
-                    const uint64_t parsed = std::stoull(v);
-                    if (parsed == 0)
-                    {
-                        std::cerr << "--batch-segments must be positive" << std::endl;
-                        return false;
-                    }
-                    opts.batchSegmentsPerMessage = static_cast<uint32_t>(parsed);
-                }
-                catch (const std::exception &)
-                {
-                    std::cerr << "Invalid --batch-segments value: " << v << std::endl;
-                    return false;
-                }
-                continue;
-            }
 
             std::cerr << "Unknown argument: " << arg << std::endl;
             printUsage(argv[0]);
@@ -627,8 +598,7 @@ namespace
             true,
             0,
             15000,
-            1000,
-            opts.batchSegmentsPerMessage);
+            1000);
 
         std::cout << "[Node " << node.nodeId << "] R2S start, dir=" << node.rawdataPath
                   << " channels=[" << node.channels.front() << ".." << node.channels.back() << "]"
@@ -639,18 +609,16 @@ namespace
         std::cout << "[Node " << node.nodeId << "] R2S done, success="
                   << (stats.success ? "true" : "false")
                   << " callbacks=" << stats.callbackCount
-                  << " grpcMessages=" << stats.grpcMessagesSent
+                  << " rdmaChunks=" << stats.rdmaChunksSent
                   << " singlesSent=" << stats.singlesSent << std::endl;
 
 #ifdef DEBUG
         const double enqueueAvgUs = stats.enqueueCalls > 0 ? (double)stats.enqueueTotalNs / stats.enqueueCalls / 1e3 : 0.0;
         const double enqueueWaitAvgUs = stats.enqueueCalls > 0 ? (double)stats.enqueueWaitNs / stats.enqueueCalls / 1e3 : 0.0;
-        const double serializeAvgUs = stats.grpcMessagesSent > 0 ? (double)stats.serializeBuildNs / stats.grpcMessagesSent / 1e3 : 0.0;
-        const double writeAvgUs = stats.grpcMessagesSent > 0 ? (double)stats.writeNs / stats.grpcMessagesSent / 1e3 : 0.0;
+        const double writeAvgUs = stats.rdmaChunksSent > 0 ? (double)stats.writeNs / stats.rdmaChunksSent / 1e3 : 0.0;
 
         std::cout << "[Node " << node.nodeId << "] Perf enqueue(avg/wait avg/max wait)="
                   << enqueueAvgUs << "/" << enqueueWaitAvgUs << "/" << (double)stats.maxEnqueueWaitNs / 1e3
-                  << " us, serialize avg=" << serializeAvgUs
                   << " us, write(avg/max)=" << writeAvgUs << "/" << (double)stats.maxWriteNs / 1e3
                   << " us" << std::endl;
         std::cout << "[Node " << node.nodeId << "] Memory queuePeak=" << stats.peakQueueSegments
@@ -722,7 +690,6 @@ int main(int argc, char **argv)
     std::cout << "calibrationDir: " << opts.calibrationDir << std::endl;
     std::cout << "resultDir    : " << opts.resultDir << std::endl;
     std::cout << "maxPendingSegments: " << opts.maxPendingSegments << std::endl;
-    std::cout << "batchSegmentsPerMessage: " << opts.batchSegmentsPerMessage << std::endl;
     std::cout << "parallelNodes: " << (opts.parallelNodes ? "true" : "false") << std::endl;
     std::cout << "noLocalReceiver: " << (opts.noLocalReceiver ? "true" : "false") << std::endl;
 
@@ -786,14 +753,12 @@ int main(int argc, char **argv)
 
     uint64_t totalCallbacks = 0;
     uint64_t totalSinglesSent = 0;
-    uint64_t totalGrpcMessages = 0;
+    uint64_t totalRdmaChunks = 0;
 #ifdef DEBUG
     uint64_t totalEnqueueCalls = 0;
     uint64_t totalEnqueueTotalNs = 0;
     uint64_t totalEnqueueWaitNs = 0;
-    uint64_t totalSerializeBuildNs = 0;
     uint64_t totalWriteNs = 0;
-    uint64_t totalEstimatedWireBytes = 0;
     uint64_t maxEnqueueWaitNsAll = 0;
     uint64_t maxWriteNsAll = 0;
     uint64_t maxPeakQueueBytes = 0;
@@ -807,14 +772,12 @@ int main(int argc, char **argv)
     {
         totalCallbacks += s.callbackCount;
         totalSinglesSent += s.singlesSent;
-        totalGrpcMessages += s.grpcMessagesSent;
+        totalRdmaChunks += s.rdmaChunksSent;
 #ifdef DEBUG
         totalEnqueueCalls += s.enqueueCalls;
         totalEnqueueTotalNs += s.enqueueTotalNs;
         totalEnqueueWaitNs += s.enqueueWaitNs;
-        totalSerializeBuildNs += s.serializeBuildNs;
         totalWriteNs += s.writeNs;
-        totalEstimatedWireBytes += s.estimatedWireBytes;
         maxEnqueueWaitNsAll = std::max(maxEnqueueWaitNsAll, s.maxEnqueueWaitNs);
         maxWriteNsAll = std::max(maxWriteNsAll, s.maxWriteNs);
         maxPeakQueueBytes = std::max(maxPeakQueueBytes, s.peakQueueBytes);
@@ -832,25 +795,18 @@ int main(int argc, char **argv)
     std::cout << "========== Test Summary ==========" << std::endl;
     std::cout << "All node conversions success: " << (allSuccess ? "true" : "false") << std::endl;
     std::cout << "Total callbacks: " << totalCallbacks << std::endl;
-    std::cout << "Total gRPC messages: " << totalGrpcMessages << std::endl;
+    std::cout << "Total RDMA chunks: " << totalRdmaChunks << std::endl;
     std::cout << "Total singles sent: " << totalSinglesSent << std::endl;
 #ifdef DEBUG
     const double enqueueAvgUs = totalEnqueueCalls > 0 ? (double)totalEnqueueTotalNs / totalEnqueueCalls / 1e3 : 0.0;
     const double enqueueWaitAvgUs = totalEnqueueCalls > 0 ? (double)totalEnqueueWaitNs / totalEnqueueCalls / 1e3 : 0.0;
-    const double serializeAvgUs = totalGrpcMessages > 0 ? (double)totalSerializeBuildNs / totalGrpcMessages / 1e3 : 0.0;
-    const double writeAvgUs = totalGrpcMessages > 0 ? (double)totalWriteNs / totalGrpcMessages / 1e3 : 0.0;
-    const double wireMiB = (double)totalEstimatedWireBytes / (1024.0 * 1024.0);
-    const double wireThroughputMiBs = elapsedMs > 0 ? wireMiB / ((double)elapsedMs / 1000.0) : 0.0;
+    const double writeAvgUs = totalRdmaChunks > 0 ? (double)totalWriteNs / totalRdmaChunks / 1e3 : 0.0;
 
     std::cout << "Perf enqueue(avg/wait avg/max wait): "
               << enqueueAvgUs << "/" << enqueueWaitAvgUs << "/" << (double)maxEnqueueWaitNsAll / 1e3
               << " us" << std::endl;
-    std::cout << "Perf serialize avg per message: " << serializeAvgUs
-              << " us, write(avg/max): " << writeAvgUs << "/" << (double)maxWriteNsAll / 1e3
+    std::cout << "Perf write(avg/max): " << writeAvgUs << "/" << (double)maxWriteNsAll / 1e3
               << " us" << std::endl;
-    std::cout << "Wire bytes (estimated proto): " << totalEstimatedWireBytes
-              << " bytes (" << wireMiB << " MiB), throughput=" << wireThroughputMiBs
-              << " MiB/s" << std::endl;
     std::cout << "Memory peak queue: " << maxPeakQueueSegments << " segments, "
               << maxPeakQueueSingles << " singles, " << (double)maxPeakQueueBytes / (1024.0 * 1024.0)
               << " MiB" << std::endl;
@@ -874,8 +830,7 @@ Run (9120 dual-node; default serial to avoid dual-GPU OOM on one card):
     --calibration-dir /media/lenovo/1TB/50100data/pni_res/caliFile \
     --result-dir /media/lenovo/1TB/50100data/test_9120/pni_singles_grpc \
     --max-pending-segments 32 \
-    --batch-segments 1
-
+    
 Parallel (requires enough free GPU VRAM for 2x 288ch R2S):
 ./bin/test/test_local_grpc_r2s --parallel
 
@@ -886,7 +841,7 @@ External coincidence host (protocol-only receiver):
 Real R2S→streaming coincidence E2E (CoinGrpcNode + dual R2S in one process, multi-GPU only):
 ./bin/test/test_local_grpc_r2s_coin
 
-L2 gRPC ingress (no CUDA, replays .lsingle files):
+L2 RDMA ingress (no CUDA, replays .lsingle files):
 ./bin/test/test_local_grpc_singles_ingress --data-root /media/lenovo/1TB/50100data/test_9120
 
 L3 gRPC + streaming coincidence (single-GPU safe, replays .lsingle files):

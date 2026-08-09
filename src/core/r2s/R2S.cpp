@@ -1249,8 +1249,9 @@ namespace openpni::distributed::r2s
         const R2SProcessConfig &r2sConfig,
         const Config &config)
         : m_r2sProcessor(r2sConfig),
-          m_queue(config.queue),
-          m_config(config)
+          m_config(config),
+          m_leaseQueue(std::make_unique<RawDataLeaseSpscRingQueue>(
+              m_config.leaseQueueCapacity > 0 ? m_config.leaseQueueCapacity : 2))
     {
     }
 
@@ -1259,11 +1260,23 @@ namespace openpni::distributed::r2s
         stop();
     }
 
+    void AsyncRawDataToR2SBridge::setReleaseFn(ReleaseFn releaseFn)
+    {
+        m_releaseFn = std::move(releaseFn);
+    }
+
     bool AsyncRawDataToR2SBridge::start(uint16_t inputChannelNum)
     {
         if (m_started.exchange(true, std::memory_order_acq_rel))
         {
             LOG(ERROR) << "[RawDataR2SBridge] already started";
+            return false;
+        }
+
+        if (!m_releaseFn)
+        {
+            LOG(ERROR) << "[RawDataR2SBridge] setReleaseFn() is required before start";
+            m_started.store(false, std::memory_order_release);
             return false;
         }
 
@@ -1295,8 +1308,34 @@ namespace openpni::distributed::r2s
             m_consumerThread.join();
         }
 
+        // Drain leftover leases so Acq ring slots are returned.
+        while (m_leaseQueue && m_leaseQueue->tryConsumeOne([](RawDataLease &lease)
+                                                          { lease.release(); }))
+        {
+        }
+
         const bool finalizeOk = m_r2sProcessor.finalize();
         return finalizeOk && !m_failed.load(std::memory_order_acquire);
+    }
+
+    bool AsyncRawDataToR2SBridge::enqueueZeroCopyLease(const openpni::RawDataView &view)
+    {
+        if (!m_leaseQueue || !m_releaseFn)
+        {
+            return false;
+        }
+
+        const uint64_t packetCount = view.count;
+        RawDataLease lease(
+            view,
+            [releaseFn = m_releaseFn, packetCount]()
+            {
+                if (releaseFn)
+                {
+                    releaseFn(packetCount);
+                }
+            });
+        return m_leaseQueue->tryPushLease(std::move(lease));
     }
 
     bool AsyncRawDataToR2SBridge::enqueueRawData(const openpni::RawDataView &view)
@@ -1308,7 +1347,7 @@ namespace openpni::distributed::r2s
 
         while (m_running.load(std::memory_order_acquire) && !m_failed.load(std::memory_order_acquire))
         {
-            if (m_queue.tryPushCopy(view))
+            if (enqueueZeroCopyLease(view))
             {
                 m_enqueuedSegments.fetch_add(1, std::memory_order_relaxed);
                 return true;
@@ -1318,13 +1357,18 @@ namespace openpni::distributed::r2s
             if (m_config.queueFullWarnEvery > 0 && fullHits % m_config.queueFullWarnEvery == 0)
             {
                 LOG(ERROR) << "[RawDataR2SBridge] queue is full, depth="
-                           << m_queue.size() << "/" << m_queue.capacity();
+                           << (m_leaseQueue ? m_leaseQueue->size() : 0) << "/"
+                           << (m_leaseQueue ? m_leaseQueue->capacity() : 0);
             }
 
             if (!m_config.blockWhenQueueFull)
             {
                 if (m_config.dropWhenQueueFull)
                 {
+                    if (m_releaseFn)
+                    {
+                        m_releaseFn(view.count);
+                    }
                     m_droppedSegments.fetch_add(1, std::memory_order_relaxed);
                     return true;
                 }
@@ -1356,7 +1400,7 @@ namespace openpni::distributed::r2s
         s.processedSegments = m_processedSegments.load(std::memory_order_relaxed);
         s.droppedSegments = m_droppedSegments.load(std::memory_order_relaxed);
         s.enqueueFullHits = m_enqueueFullHits.load(std::memory_order_relaxed);
-        s.queuePeakDepth = m_queue.peakSize();
+        s.queuePeakDepth = m_leaseQueue ? m_leaseQueue->peakSize() : 0;
         s.healthy = !m_failed.load(std::memory_order_acquire);
         return s;
     }
@@ -1368,22 +1412,24 @@ namespace openpni::distributed::r2s
 
     void AsyncRawDataToR2SBridge::consumerLoop()
     {
-        while ((m_running.load(std::memory_order_acquire) || !m_queue.empty()) &&
+        while ((m_running.load(std::memory_order_acquire) ||
+                (m_leaseQueue && !m_leaseQueue->empty())) &&
                !m_failed.load(std::memory_order_acquire))
         {
-            const bool consumed = m_queue.tryConsumeOne(
-                [this](RawDataSegmentBuffer &segment)
-                {
-                    auto view = segment.toRawView();
-                    if (!m_r2sProcessor.processSegment(view))
-                    {
-                        m_failed.store(true, std::memory_order_release);
-                        m_running.store(false, std::memory_order_release);
-                        return;
-                    }
+            const bool consumed = m_leaseQueue && m_leaseQueue->tryConsumeOne(
+                                                      [this](RawDataLease &lease)
+                                                      {
+                                                          if (!m_r2sProcessor.processSegment(lease.view))
+                                                          {
+                                                              m_failed.store(true, std::memory_order_release);
+                                                              m_running.store(false, std::memory_order_release);
+                                                              lease.release();
+                                                              return;
+                                                          }
 
-                    m_processedSegments.fetch_add(1, std::memory_order_relaxed);
-                });
+                                                          m_processedSegments.fetch_add(1, std::memory_order_relaxed);
+                                                          lease.release();
+                                                      });
 
             if (!consumed)
             {

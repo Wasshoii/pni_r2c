@@ -138,7 +138,7 @@ namespace
             singles[i].channelIndex = data.channel_index1[i];
             singles[i].crystalIndex = data.local_crystal_index1[i];
             singles[i].timevalue_100fs = data.absolute_timestamp1_100fs[i];
-            singles[i].energy = data.energy1 ? data.energy1[i] : 0.0f;
+            singles[i].energy_ev = data.energy1 ? data.energy1[i] : 0.0f;
         }
         return singles;
     }

@@ -32,8 +32,7 @@
         "R2C_BUILD_TEST_GRPC": "OFF",
         "R2C_BUILD_TEST_STREAMING": "ON",
         "R2C_BUILD_TEST_LOCAL_GRPC_COIN": "ON",
-        "R2C_BUILD_TEST_ACQ_CONTROL_INIT": "ON",
-        "R2C_BUILD_TEST_ACQ_DATAPATH_UDP": "ON"
+        "R2C_BUILD_TEST_ACQ_CONTROL_INIT": "ON"
       }
     },
     {
@@ -53,7 +52,7 @@
         "R2C_BUILD_TEST_LOCAL_GRPC_SINGLES_INGRESS": "ON",
         "R2C_BUILD_TEST_LOCAL_GRPC_COIN_STREAM": "ON",
         "R2C_BUILD_TEST_PNI_COIN": "ON",
-        "R2C_BUILD_TEST_ACQ_R2S_PIPELINE": "ON",
+        "R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE": "ON",
         "R2C_BUILD_TEST_R2S_MULTI_GPU": "ON",
         "R2C_BUILD_TEST_COIN_MULTI_GPU": "ON"
       }
@@ -76,8 +75,7 @@
         "R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN": "OFF",
         "R2C_BUILD_TEST_LOCAL_GRPC_COIN": "OFF",
         "R2C_BUILD_TEST_ACQ_CONTROL_INIT": "OFF",
-        "R2C_BUILD_TEST_ACQ_DATAPATH_UDP": "OFF",
-        "R2C_BUILD_TEST_ACQ_R2S_PIPELINE": "OFF",
+        "R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE": "OFF",
         "R2C_BUILD_APP_COIN_MASTER": "ON"
       }
     },
@@ -99,8 +97,7 @@
         "R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN": "OFF",
         "R2C_BUILD_TEST_LOCAL_GRPC_COIN": "OFF",
         "R2C_BUILD_TEST_ACQ_CONTROL_INIT": "OFF",
-        "R2C_BUILD_TEST_ACQ_DATAPATH_UDP": "OFF",
-        "R2C_BUILD_TEST_ACQ_R2S_PIPELINE": "OFF",
+        "R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE": "OFF",
         "R2C_BUILD_APP_ACQ_R2S_NODE": "ON"
       }
     },
@@ -122,8 +119,7 @@
         "R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN": "OFF",
         "R2C_BUILD_TEST_LOCAL_GRPC_COIN": "OFF",
         "R2C_BUILD_TEST_ACQ_CONTROL_INIT": "OFF",
-        "R2C_BUILD_TEST_ACQ_DATAPATH_UDP": "OFF",
-        "R2C_BUILD_TEST_ACQ_R2S_PIPELINE": "OFF",
+        "R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE": "OFF",
         "R2C_BUILD_APP_COIN_MASTER": "OFF",
         "R2C_BUILD_APP_ACQ_R2S_NODE": "OFF",
         "R2C_BUILD_TOOL_SHARDED_RAW_MERGE": "ON",
@@ -149,8 +145,7 @@
         "r2c_proto",
         "test_streaming_coincidence",
         "test_local_grpc_coin",
-        "test_acquisition_control_init",
-        "test_acquisition_datapath_udp"
+        "test_acquisition_control_init"
       ]
     },
     {
@@ -163,7 +158,7 @@
         "test_local_grpc_singles_ingress",
         "test_local_grpc_coin_stream",
         "test_pni_coin",
-        "test_acquisition_r2s_pipeline",
+        "test_bdm50100_online_pipeline",
         "test_r2s50100_multi_gpu"
       ]
     },

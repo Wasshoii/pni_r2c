@@ -176,6 +176,36 @@ namespace openpni::distributed::acquisition
             raw_data_ready_callback_ = std::move(cb);
         }
 
+        /**
+         * @brief 推迟 RawDataView 包槽归还（配合 ZeroCopy Bridge）。
+         * @note true 时：写文件（若启用）先于 callback；成功交给 callback 后由 Bridge Release；
+         *       false（默认）时：保持原顺序，由下一次 Read() 自动归还。
+         */
+        void SetDeferRawDataRelease(bool defer)
+        {
+            defer_raw_data_release_ = defer;
+        }
+
+        bool DeferRawDataRelease() const
+        {
+            return defer_raw_data_release_;
+        }
+
+        /**
+         * @brief 绑定到当前 Algo 的 Release，供 ZeroCopy Bridge 在 R2S 完成后归还包槽。
+         */
+        std::function<void(uint64_t)> MakeRawDataReleaseFn()
+        {
+            return [this](uint64_t packetCount)
+            {
+                std::lock_guard<std::mutex> lock(algo_mutex_);
+                if (algo_)
+                {
+                    algo_->Release(packetCount);
+                }
+            };
+        }
+
         // 启动采集
         bool Start()
         {
@@ -298,6 +328,11 @@ namespace openpni::distributed::acquisition
                 return;
             }
 
+            if (defer_raw_data_release_)
+            {
+                algo->SetDeferredRelease(true);
+            }
+
             int missTime = 0;
 
             // 采集循环
@@ -309,22 +344,55 @@ namespace openpni::distributed::acquisition
                 if (data_opt && data_opt->count > 0)
                 {
                     bool sinkOk = true;
+                    bool ownershipTransferred = false;
 
-                    if (raw_data_ready_callback_)
+                    if (defer_raw_data_release_)
                     {
-                        sinkOk = raw_data_ready_callback_(data_opt.value());
-                        if (!sinkOk)
+                        // 先落盘再交接，避免 Bridge 先 Release 导致 writer UAF。
+                        if (writer_ && !writer_->Write(data_opt.value()))
                         {
-                            NotifyError("Raw data callback failed, stopping acquisition");
+                            NotifyError("Raw data write failed, stopping acquisition");
                             running_.store(false, std::memory_order_release);
+                            sinkOk = false;
+                        }
+
+                        if (sinkOk && raw_data_ready_callback_)
+                        {
+                            sinkOk = raw_data_ready_callback_(data_opt.value());
+                            if (!sinkOk)
+                            {
+                                NotifyError("Raw data callback failed, stopping acquisition");
+                                running_.store(false, std::memory_order_release);
+                            }
+                            else
+                            {
+                                ownershipTransferred = true;
+                            }
+                        }
+
+                        if (!ownershipTransferred)
+                        {
+                            algo->Release(data_opt->count);
                         }
                     }
-
-                    // 写入文件（内部会自动处理分卷）
-                    if (sinkOk && writer_ && !writer_->Write(data_opt.value()))
+                    else
                     {
-                        NotifyError("Raw data write failed, stopping acquisition");
-                        running_.store(false, std::memory_order_release);
+                        if (raw_data_ready_callback_)
+                        {
+                            sinkOk = raw_data_ready_callback_(data_opt.value());
+                            if (!sinkOk)
+                            {
+                                NotifyError("Raw data callback failed, stopping acquisition");
+                                running_.store(false, std::memory_order_release);
+                            }
+                        }
+
+                        // 写入文件（内部会自动处理分卷）
+                        if (sinkOk && writer_ && !writer_->Write(data_opt.value()))
+                        {
+                            NotifyError("Raw data write failed, stopping acquisition");
+                            running_.store(false, std::memory_order_release);
+                        }
                     }
 
                     missTime = 0;
@@ -454,6 +522,7 @@ namespace openpni::distributed::acquisition
         IRawFileOutput::FileReadyCallback file_ready_callback_;
         RawDataReadyCallback raw_data_ready_callback_;
         StatusReportCallback status_report_callback_;
+        bool defer_raw_data_release_ = false;
 
         std::thread worker_thread_;
         std::thread monitor_thread_;

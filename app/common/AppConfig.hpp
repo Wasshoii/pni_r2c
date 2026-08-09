@@ -43,9 +43,7 @@ namespace openpni::distributed::app
     struct BridgeSection
     {
         bool enabled = true;
-        size_t queueCapacity = 256;
-        size_t reservePacketsPerSlot = 4096;
-        size_t reserveBytesPerSlot = 4 * 1024 * 1024;
+        size_t leaseQueueCapacity = 2;
         bool blockWhenQueueFull = true;
         uint64_t queueFullWarnEvery = 5000;
         uint16_t inputChannelCount = 4;

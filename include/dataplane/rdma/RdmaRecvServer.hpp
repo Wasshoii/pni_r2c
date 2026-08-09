@@ -12,7 +12,6 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
-#include <vector>
 
 struct ibv_mr;
 
@@ -20,10 +19,24 @@ namespace openpni::distributed::dataplane::rdma
 {
 
 using IngestSlotFn = std::function<bool(const SlotChunkView &view)>;
+/** Diagnostic: count singles and return credit without reading payload. */
+using CreditOnlyFn = std::function<void(uint32_t nodeId, uint32_t singlesCount)>;
+
+enum class IngestMode : uint8_t
+{
+    /** Zero-copy per-slot views into the receive ring (production default). */
+    Full = 0,
+    /** Advance credit only; optional count callback. Test/benchmark diagnostic. */
+    CreditOnly = 1,
+};
 
 /**
  * Per-node receive ring on the coincidence host.
  * Supports real RoCE RC (when verbs device exists) and in-process memcpy.
+ *
+ * Full mode delivers one SlotChunkView per slot (no host-side reassembly copy).
+ * Multi-slot logical chunks share chunkId; SOF/EOF/PARTIAL are in view.flags.
+ * Payload pointers remain valid only for the duration of the ingest callback.
  */
 class RdmaNodeRecvSession
 {
@@ -44,6 +57,8 @@ public:
     RdmaEndpointInfo localEndpoint() const;
     bool acceptRemote(const RdmaEndpointInfo &remote);
     void setIngest(IngestSlotFn fn);
+    void setIngestMode(IngestMode mode);
+    void setCreditOnly(CreditOnlyFn fn);
 
     /** Poll notify ring; returns number of slots ingested. */
     int pollOnce(int maxSlots = 8);
@@ -52,6 +67,7 @@ public:
     SlotRing &ring() noexcept { return m_ring; }
     uint64_t inprocessHandle() const noexcept { return m_inprocessHandle; }
     DataPlaneKind kind() const noexcept { return m_kind; }
+    IngestMode ingestMode() const noexcept { return m_mode; }
 
     void close();
 
@@ -59,11 +75,14 @@ private:
     bool prepareVerbs();
     bool prepareInProcess();
     bool ingestSlot(uint32_t slotIndex, const NotifyEntry &note);
+    bool releaseSlot(uint32_t slotIndex);
 
     Config m_cfg;
     DataPlaneKind m_kind = DataPlaneKind::InProcess;
     SlotRing m_ring;
     IngestSlotFn m_ingest;
+    CreditOnlyFn m_creditOnly;
+    IngestMode m_mode = IngestMode::Full;
 
     std::unique_ptr<RdmaDevice> m_device;
     std::unique_ptr<RdmaConnection> m_conn;
@@ -72,16 +91,6 @@ private:
     uint64_t m_inprocessHandle = 0;
     uint64_t m_nextExpectedNotifySeq = 1;
     std::atomic<bool> m_ready{false};
-
-    struct PendingChunk
-    {
-        bool active = false;
-        uint64_t chunkId = 0;
-        uint64_t computerClockMs = 0;
-        uint32_t durationMs = 0;
-        std::vector<uint8_t> packed;
-    };
-    PendingChunk m_pending;
 };
 
 /**
@@ -104,6 +113,8 @@ public:
     ~RdmaRecvServer();
 
     void setIngest(IngestSlotFn fn);
+    void setIngestMode(IngestMode mode);
+    void setCreditOnly(CreditOnlyFn fn);
 
     std::shared_ptr<RdmaNodeRecvSession> ensureSession(uint32_t nodeId);
     std::shared_ptr<RdmaNodeRecvSession> getSession(uint32_t nodeId) const;
@@ -115,9 +126,12 @@ public:
 
 private:
     void pollLoop();
+    void applyCallbacksLocked();
 
     Config m_cfg;
     IngestSlotFn m_ingest;
+    CreditOnlyFn m_creditOnly;
+    IngestMode m_mode = IngestMode::Full;
     mutable std::mutex m_mutex;
     std::unordered_map<uint32_t, std::shared_ptr<RdmaNodeRecvSession>> m_sessions;
     std::thread m_poller;

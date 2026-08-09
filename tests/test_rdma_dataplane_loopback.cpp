@@ -75,7 +75,7 @@ int main()
         singles[i].channelIndex = static_cast<uint16_t>(i % 100);
         singles[i].crystalIndex = 1;
         singles[i].timevalue_100fs = 1000ull + i;
-        singles[i].energy = 511.0f;
+        singles[i].energy_ev = 511.0f;
     }
 
     const int rounds = 50;

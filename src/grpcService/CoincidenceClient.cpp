@@ -163,7 +163,7 @@ namespace openpni::distributed::streaming
                 dst[i].channelIndex = static_cast<uint16_t>(globalChannel);
                 dst[i].crystalIndex = s.crystalIndex;
                 dst[i].timevalue_100fs = s.timevalue_100fs;
-                dst[i].energy = s.energy;
+                dst[i].energy_ev = s.energy_ev;
 
                 if (i == 0 && !m_remapSampleLogged.exchange(true))
                 {
@@ -349,6 +349,8 @@ namespace openpni::distributed::streaming
                 {
                     msg = std::move(m_pendingMessages.front());
                     m_pendingMessages.pop();
+                    // Wake producers blocked on maxPendingChunks (same CV as empty-wait).
+                    m_cv.notify_all();
                 }
             }
 

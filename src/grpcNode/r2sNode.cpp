@@ -96,19 +96,16 @@ namespace openpni::distributed::grpcnode
                 std::string detectorType = "BDM2";
                 uint32_t crystalsPerChannel = 0;
                 size_t maxPendingSegments = 128;
-                uint32_t batchSegmentsPerMessage = 1;
 
                 bool waitForStartSignal = true;
                 uint32_t waitForStartTimeoutMs = 0;
                 uint32_t waitForStartRpcTimeoutMs = 15000;
                 uint32_t waitForStartRetryIntervalMs = 1000;
-                uint32_t parallelStreams = 1;
             };
 
             explicit PersistentNodeStreamSender(Config cfg)
                 : m_cfg(std::move(cfg))
             {
-                m_cfg.parallelStreams = 1;
             }
 
             ~PersistentNodeStreamSender()
@@ -125,8 +122,9 @@ namespace openpni::distributed::grpcnode
                 }
 
                 grpc::ChannelArguments channelArgs;
-                channelArgs.SetInt("grpc.max_receive_message_length", 16 * 1024 * 1024);
-                channelArgs.SetInt("grpc.max_send_message_length", 16 * 1024 * 1024);
+                // Control-plane only (Register / WaitForStart / OpenDataPlane).
+                channelArgs.SetInt("grpc.max_receive_message_length", 4 * 1024 * 1024);
+                channelArgs.SetInt("grpc.max_send_message_length", 4 * 1024 * 1024);
                 channelArgs.SetInt("grpc.keepalive_time_ms", 20000);
                 channelArgs.SetInt("grpc.keepalive_timeout_ms", 10000);
 
@@ -171,7 +169,7 @@ namespace openpni::distributed::grpcnode
                 m_senderThread = std::thread([this] { senderLoop(); });
 
                 LOG(INFO) << "[Node " << m_cfg.nodeId
-                          << "] RDMA singles sender started (ordered)";
+                          << "] RDMA singles sender started";
                 return true;
             }
 
@@ -575,8 +573,7 @@ namespace openpni::distributed::grpcnode
         bool waitForStartSignal,
         uint32_t waitForStartTimeoutMs,
         uint32_t waitForStartRpcTimeoutMs,
-        uint32_t waitForStartRetryIntervalMs,
-        uint32_t batchSegmentsPerMessage)
+        uint32_t waitForStartRetryIntervalMs)
     {
         m_init.r2sConfig = r2sConfig;
         m_init.serverAddress = std::move(serverAddress);
@@ -585,7 +582,6 @@ namespace openpni::distributed::grpcnode
         m_init.channelCount = channelCount;
         m_init.detectorType = std::move(detectorType);
         m_init.maxPendingSegments = maxPendingSegments;
-        m_init.batchSegmentsPerMessage = std::max<uint32_t>(1, batchSegmentsPerMessage);
         m_init.progressLogInterval = progressLogInterval;
         m_init.waitForStartSignal = waitForStartSignal;
         m_init.waitForStartTimeoutMs = waitForStartTimeoutMs;
@@ -612,12 +608,10 @@ namespace openpni::distributed::grpcnode
         senderConfig.detectorType = m_init.detectorType;
         senderConfig.crystalsPerChannel = m_init.r2sConfig.crystalsPerChannel;
         senderConfig.maxPendingSegments = m_init.maxPendingSegments;
-        senderConfig.batchSegmentsPerMessage = std::max<uint32_t>(1, m_init.batchSegmentsPerMessage);
         senderConfig.waitForStartSignal = m_init.waitForStartSignal;
         senderConfig.waitForStartTimeoutMs = m_init.waitForStartTimeoutMs;
         senderConfig.waitForStartRpcTimeoutMs = m_init.waitForStartRpcTimeoutMs;
         senderConfig.waitForStartRetryIntervalMs = m_init.waitForStartRetryIntervalMs;
-        senderConfig.parallelStreams = std::max<uint32_t>(1, m_init.parallelStreams);
 
         PersistentNodeStreamSender sender(std::move(senderConfig));
         if (!sender.start())
@@ -687,7 +681,7 @@ namespace openpni::distributed::grpcnode
 #endif
 
         m_stats.singlesSent = sender.singlesSent();
-        m_stats.grpcMessagesSent = sender.messagesSent();
+        m_stats.rdmaChunksSent = sender.messagesSent();
         m_stats.success = r2sSuccess && streamSuccess;
 
 #ifdef DEBUG
@@ -696,10 +690,8 @@ namespace openpni::distributed::grpcnode
         m_stats.enqueueWaitNs = sender.enqueueWaitNs();
         m_stats.enqueuePushNs = sender.enqueuePushNs();
         m_stats.maxEnqueueWaitNs = sender.maxEnqueueWaitNs();
-        m_stats.serializeBuildNs = sender.serializeBuildNs();
         m_stats.writeNs = sender.writeNs();
         m_stats.maxWriteNs = sender.maxWriteNs();
-        m_stats.estimatedWireBytes = sender.estimatedWireBytes();
         m_stats.peakQueueSegments = sender.peakQueueSegments();
         m_stats.peakQueueSingles = sender.peakQueueSingles();
         m_stats.peakQueueBytes = sender.peakQueueBytes();

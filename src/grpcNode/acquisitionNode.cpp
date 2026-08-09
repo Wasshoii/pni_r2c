@@ -101,6 +101,8 @@ namespace openpni::distributed::grpcnode
             virtual void SetFileCompleteCallback(FileReadyCallback callback) = 0;
             virtual void SetRawDataReadyCallback(RawDataReadyCallback callback) = 0;
             virtual void SetStatusReportCallback(std::function<void(const acqproto::NodeStatus &)> callback) = 0;
+            virtual void SetDeferRawDataRelease(bool defer) = 0;
+            virtual void ReleaseRawData(uint64_t packetCount) = 0;
         };
 
         template <typename AlgoType>
@@ -137,6 +139,16 @@ namespace openpni::distributed::grpcnode
                 m_node->SetStatusReportCallback(std::move(callback));
             }
 
+            void SetDeferRawDataRelease(bool defer) override
+            {
+                m_node->SetDeferRawDataRelease(defer);
+            }
+
+            void ReleaseRawData(uint64_t packetCount) override
+            {
+                m_node->MakeRawDataReleaseFn()(packetCount);
+            }
+
         private:
             std::unique_ptr<acqproto::DistributedAcquisitionNode<AlgoType>> m_node;
         };
@@ -169,6 +181,29 @@ namespace openpni::distributed::grpcnode
             if (runtimeNode_ && rawDataReadyCallback_)
             {
                 runtimeNode_->SetRawDataReadyCallback(rawDataReadyCallback_);
+            }
+        }
+
+        void setDeferRawDataRelease(bool defer)
+        {
+            std::lock_guard<std::mutex> lock(runtimeMutex_);
+            deferRawDataRelease_ = defer;
+            if (runtimeNode_)
+            {
+                runtimeNode_->SetDeferRawDataRelease(defer);
+            }
+        }
+
+        void releaseRawData(uint64_t packetCount)
+        {
+            INodeRuntime *node = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(runtimeMutex_);
+                node = runtimeNode_.get();
+            }
+            if (node)
+            {
+                node->ReleaseRawData(packetCount);
             }
         }
 
@@ -754,6 +789,11 @@ namespace openpni::distributed::grpcnode
                     runtimeNode_->SetRawDataReadyCallback(rawDataReadyCallback_);
                 }
 
+                if (deferRawDataRelease_)
+                {
+                    runtimeNode_->SetDeferRawDataRelease(true);
+                }
+
                 runtimeNode_->SetStatusReportCallback(
                     [this](const acqproto::NodeStatus &status)
                     {
@@ -1129,6 +1169,7 @@ namespace openpni::distributed::grpcnode
         std::unique_ptr<INodeRuntime> runtimeNode_;
         FileReadyCallback fileReadyCallback_;
         RawDataReadyCallback rawDataReadyCallback_;
+        bool deferRawDataRelease_{false};
         bool dpdkInitialized_{false};
 
         mutable std::mutex statusMutex_;
@@ -1153,6 +1194,19 @@ namespace openpni::distributed::grpcnode
     void AcquisitionGrpcNode::setRawDataReadyCallback(RawDataReadyCallback callback)
     {
         m_impl->setRawDataReadyCallback(std::move(callback));
+    }
+
+    void AcquisitionGrpcNode::setDeferRawDataRelease(bool defer)
+    {
+        m_impl->setDeferRawDataRelease(defer);
+    }
+
+    std::function<void(uint64_t)> AcquisitionGrpcNode::makeRawDataReleaseFn()
+    {
+        return [this](uint64_t packetCount)
+        {
+            m_impl->releaseRawData(packetCount);
+        };
     }
 
     bool AcquisitionGrpcNode::run()

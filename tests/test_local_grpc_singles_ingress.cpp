@@ -35,6 +35,7 @@
 
 #include "dataplane/rdma/ProtoConvert.hpp"
 #include "dataplane/rdma/RdmaRecvServer.hpp"
+#include "dataplane/rdma/SlotProtocol.hpp"
 #include "protos/coincidence.grpc.pb.h"
 #include "tests/grpc_singles_replay.hpp"
 
@@ -60,7 +61,7 @@ namespace
         bool preload = true;
         size_t maxMemoryGB = 30; // per-node cap in GiB
         uint32_t sendRounds = 3;
-        bool sendOnly = true;        // black-hole receiver (send benchmark)
+        bool sendOnly = false;        // black-hole receiver (send benchmark)
         bool helpOnly = false;
 
         bool enableNode0() const { return nodes == "0" || nodes == "both"; }
@@ -179,9 +180,10 @@ namespace
             : m_orch(std::move(orch))
         {
             m_rdma = std::make_unique<rdma::RdmaRecvServer>(rdma::RdmaRecvServer::Config{});
-            m_rdma->setIngest([this](const rdma::SlotChunkView &view) {
-                m_totalSingles.fetch_add(view.singlesCount, std::memory_order_relaxed);
-                return true;
+            // Diagnostic: return credit without reading payload (not a production path).
+            m_rdma->setIngestMode(rdma::IngestMode::CreditOnly);
+            m_rdma->setCreditOnly([this](uint32_t /*nodeId*/, uint32_t singlesCount) {
+                m_totalSingles.fetch_add(singlesCount, std::memory_order_relaxed);
             });
             m_rdma->start();
         }
@@ -264,6 +266,13 @@ namespace
             response->set_success(true);
             response->set_data_plane_kind(rdma::toProto(local.kind));
             rdma::fillProtoEndpoint(local, response->mutable_coin_endpoint());
+            if (!m_loggedKind.exchange(true))
+            {
+                std::cout << "[BlackHole] dataPlaneKind="
+                          << (local.kind == rdma::DataPlaneKind::RdmaRoceV2 ? "RoCEv2" : "InProcess")
+                          << " slots=" << local.slotCount
+                          << " stride=" << local.slotStride << std::endl;
+            }
             return grpc::Status::OK;
         }
 
@@ -320,6 +329,7 @@ namespace
     private:
         std::shared_ptr<ReceiverOrchestration> m_orch;
         std::atomic<uint64_t> m_totalSingles{0};
+        std::atomic<bool> m_loggedKind{false};
         std::unique_ptr<rdma::RdmaRecvServer> m_rdma;
     };
 
@@ -331,18 +341,23 @@ namespace
             : m_expectedNodeCount(expectedNodes)
         {
             m_rdma = std::make_unique<rdma::RdmaRecvServer>(rdma::RdmaRecvServer::Config{});
+            m_rdma->setIngestMode(rdma::IngestMode::Full);
             m_rdma->setIngest([this](const rdma::SlotChunkView &view) {
                 m_totalSingles.fetch_add(view.singlesCount, std::memory_order_relaxed);
                 m_lastActivityNs.store(nowNs(), std::memory_order_relaxed);
                 std::lock_guard<std::mutex> lk(m_mu);
                 auto &node = m_nodes[view.nodeId];
                 node.registered = true;
+                node.singlesReceived += view.singlesCount;
+                // Logical chunk continuity: only commit on EOF (multi-slot shares chunkId).
+                const bool isEof = (view.flags & rdma::kSlotFlagEof) != 0;
+                if (!isEof)
+                    return true;
                 if (node.hasLastChunk && view.chunkId != node.lastChunkId + 1)
                     node.chunkGapCount++;
                 node.lastChunkId = view.chunkId;
                 node.hasLastChunk = true;
                 node.chunksReceived++;
-                node.singlesReceived += view.singlesCount;
                 return true;
             });
             m_rdma->start();
@@ -439,6 +454,13 @@ namespace
             response->set_success(true);
             response->set_data_plane_kind(rdma::toProto(local.kind));
             rdma::fillProtoEndpoint(local, response->mutable_coin_endpoint());
+            if (!m_loggedKind.exchange(true))
+            {
+                std::cout << "[Ingress] dataPlaneKind="
+                          << (local.kind == rdma::DataPlaneKind::RdmaRoceV2 ? "RoCEv2" : "InProcess")
+                          << " slots=" << local.slotCount
+                          << " stride=" << local.slotStride << std::endl;
+            }
             return grpc::Status::OK;
         }
 
@@ -550,6 +572,7 @@ namespace
         uint64_t m_startTimeMs = 0;
         std::atomic<uint64_t> m_totalSingles{0};
         std::atomic<uint64_t> m_lastActivityNs{0};
+        std::atomic<bool> m_loggedKind{false};
         std::unique_ptr<rdma::RdmaRecvServer> m_rdma;
     };
 
@@ -589,6 +612,7 @@ namespace
             if (arg == "--max-memory-gb") { auto v = val(); if (!v) return false; opts.maxMemoryGB = std::stoull(v); continue; }
             if (arg == "--send-rounds") { auto v = val(); if (!v) return false; opts.sendRounds = std::stoul(v); continue; }
             if (arg == "--send-only") { opts.sendOnly = true; continue; }
+            if (arg == "--no-send-only" || arg == "--full-recv") { opts.sendOnly = false; continue; }
 
             std::cerr << "Unknown argument: " << arg << std::endl;
             return false;
@@ -618,7 +642,8 @@ int main(int argc, char **argv)
                   << "  --no-preload            Stream from disk\n"
                   << "  --max-memory-gb <n>     Per-node preload cap in GiB (default 30)\n"
                   << "  --send-rounds <n>       Repeat preload send N times (default 3)\n"
-                  << "  --send-only             Black-hole receiver (send benchmark)\n";
+                  << "  --send-only             Black-hole CreditOnly receiver (send benchmark)\n"
+                  << "  --no-send-only          Full per-slot receiver + chunk gap check\n";
         return 0;
     }
     opts.resolveDerivedPaths();
@@ -640,6 +665,25 @@ int main(int argc, char **argv)
     std::cout << "node1Dir      : " << opts.node1Dir << std::endl;
     std::cout << "pushChunk     : " << opts.pushChunkSingles
               << " (" << (opts.pushChunkSingles * 16ULL) / (1024 * 1024) << " MiB/chunk)" << std::endl;
+    {
+        const size_t maxPerSlot = rdma::maxSinglesPerSlot(rdma::kDefaultSlotBytes);
+        const size_t slotsPerChunk = maxPerSlot == 0
+            ? 0
+            : (opts.pushChunkSingles + maxPerSlot - 1) / maxPerSlot;
+        std::cout << "slotBytes     : " << rdma::kDefaultSlotBytes
+                  << " (maxSingles/slot=" << maxPerSlot << ")" << std::endl;
+        std::cout << "slotsPerChunk : ~" << slotsPerChunk;
+        if (slotsPerChunk > 1)
+            std::cout << " (multi-slot; Full=per-slot zero-copy, no host reassembly)";
+        else
+            std::cout << " (fits in one slot)";
+        std::cout << std::endl;
+        std::cout << "recvPath      : " << (opts.sendOnly
+            ? "CreditOnly (diagnostic; no payload read)"
+            : "Full per-slot zero-copy into ring") << std::endl;
+        std::cout << "note          : InProcess localhost is diagnostic only; "
+                     "30 GiB/s needs dual-host RoCE" << std::endl;
+    }
     std::cout << "singlesPerSec : " << opts.singlesPerSec << std::endl;
     std::cout << "preload       : " << (opts.preload ? "true" : "false") << std::endl;
     std::cout << "sendRounds    : " << opts.sendRounds << std::endl;

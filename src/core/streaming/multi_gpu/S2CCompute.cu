@@ -64,10 +64,18 @@ void S2CCompute::compute(const Data *data, Result *out)
         cudaSetDevice(gpu_id_),
         "Failed to set CUDA device in S2CCompute::compute() for GPU " + std::to_string(gpu_id_));
 
-    d_singles_.Reserve(data->size());
-    d_singles_.CopyFromHost(std::span<const Single>(*data));
+    // CudaUniquePointer::Reserve never shrinks; CopyFromHost requires exact size match.
+    // Reallocate when the batch size changes (grow or shrink) to avoid size-mismatch throws
+    // or stale device buffers under concurrent R2S+Coin GPU load.
+    if (d_singles_.Elements() != data->size())
+    {
+        d_singles_.Clear();
+        d_singles_.Reserve(data->size());
+    }
+    d_singles_.CopyFromHost(data->singles);
 
-    const auto result = coincidence_.getDListmode(d_singles_.CSpan(), protocol_);
+    const auto result = coincidence_.getDListmode(
+        d_singles_.CSpan(data->size()), protocol_, data->carryCutoffTime_100fs);
 
     out->actualPromptCount = result.prompt.size();
     out->actualDelayCount = result.delay.size();

@@ -63,7 +63,7 @@ namespace
             SinglesKey key{
                 single.channelIndex,
                 single.crystalIndex,
-                single.energy,
+                single.energy_ev,
                 single.timevalue_100fs};
             ++hist[key];
         }

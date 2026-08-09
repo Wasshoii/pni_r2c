@@ -688,8 +688,6 @@ int main(int argc, char **argv)
     grpc::ServerBuilder builder;
     builder.AddListeningPort(opts.address, grpc::InsecureServerCredentials());
     builder.RegisterService(&service);
-    builder.SetMaxReceiveMessageSize(256 * 1024 * 1024);
-    builder.SetMaxSendMessageSize(16 * 1024 * 1024);
 
     auto server = builder.BuildAndStart();
     if (!server)

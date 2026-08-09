@@ -70,10 +70,6 @@ test-acq-control-init: check-dir-pni
 	@$(CTEST) --test-dir "$(PNI_DIR)" -R test_acquisition_control_init
 
 
-test-acq-datapath-udp: check-dir-pni
-	@$(CTEST) --test-dir "$(PNI_DIR)" -R test_acquisition_datapath_udp
-
-
 test-local-grpc-coin: check-dir-pni
 	@$(CTEST) --test-dir "$(PNI_DIR)" -R test_local_grpc_coin
 
@@ -91,8 +87,8 @@ test-local-grpc-r2s: check-dir-cuda
 	@$(CTEST) --test-dir "$(CUDA_DIR)" -R test_local_grpc_r2s
 
 
-test-acq-r2s-pipeline: check-dir-cuda
-	@$(CTEST) --test-dir "$(CUDA_DIR)" -R test_acquisition_r2s_pipeline
+test-bdm50100-online-pipeline: check-dir-cuda
+	@$(CTEST) --test-dir "$(CUDA_DIR)" -R test_bdm50100_online_pipeline
 
 # Legacy target (compile-only in old Makefile). Keep for interface compatibility.
 

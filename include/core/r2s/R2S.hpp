@@ -289,129 +289,89 @@ namespace openpni::distributed::r2s
         uint16_t globalChannelIndex);
 
     /**
-     * @brief RawData 段缓存（拥有数据所有权）
-     *
-     * 用于把采集线程中的 RawDataView 深拷贝到可跨线程持有的内存。
+     * @brief 零拷贝租约：持有 Acq RawDataView，析构/release 时归还包槽。
      */
-    struct RawDataSegmentBuffer
+    struct RawDataLease
     {
-        std::vector<uint8_t> data;
-        std::vector<uint16_t> length;
-        std::vector<uint64_t> offset;
-        std::vector<uint16_t> channel;
-        uint64_t clock_ms = 0;
-        uint64_t duration_ms = 0;
+        openpni::RawDataView view{};
+        std::function<void()> releaseFn;
+        bool released = true;
 
-        void reserve(size_t packetCapacity, size_t byteCapacity)
+        RawDataLease() = default;
+
+        RawDataLease(openpni::RawDataView v, std::function<void()> release)
+            : view(v), releaseFn(std::move(release)), released(false)
         {
-            length.reserve(packetCapacity);
-            offset.reserve(packetCapacity);
-            channel.reserve(packetCapacity);
-            data.reserve(byteCapacity);
         }
 
-        bool copyFrom(const openpni::RawDataView &view)
+        RawDataLease(const RawDataLease &) = delete;
+        RawDataLease &operator=(const RawDataLease &) = delete;
+
+        RawDataLease(RawDataLease &&other) noexcept
         {
-            if (view.count == 0)
-            {
-                data.clear();
-                length.clear();
-                offset.clear();
-                channel.clear();
-                clock_ms = view.clock_ms;
-                duration_ms = view.duration_ms;
-                return true;
-            }
-
-            if (!view.length || !view.offset || !view.channel)
-            {
-                return false;
-            }
-
-            uint64_t maxEnd = 0;
-            for (uint64_t i = 0; i < view.count; ++i)
-            {
-                const uint64_t end = view.offset[i] + static_cast<uint64_t>(view.length[i]);
-                if (end > maxEnd)
-                {
-                    maxEnd = end;
-                }
-            }
-
-            if (maxEnd > static_cast<uint64_t>(std::numeric_limits<size_t>::max()))
-            {
-                return false;
-            }
-
-            if (maxEnd > 0 && !view.data)
-            {
-                return false;
-            }
-
-            const size_t dataBytes = static_cast<size_t>(maxEnd);
-            data.resize(dataBytes);
-            if (dataBytes > 0)
-            {
-                std::memcpy(data.data(), view.data, dataBytes);
-            }
-
-            length.assign(view.length, view.length + view.count);
-            offset.assign(view.offset, view.offset + view.count);
-            channel.assign(view.channel, view.channel + view.count);
-            clock_ms = view.clock_ms;
-            duration_ms = view.duration_ms;
-            return true;
+            *this = std::move(other);
         }
 
-        openpni::RawDataView toRawView()
+        RawDataLease &operator=(RawDataLease &&other) noexcept
         {
-            openpni::RawDataView view;
-            view.data = data.empty() ? nullptr : data.data();
-            view.length = length.empty() ? nullptr : length.data();
-            view.offset = offset.empty() ? nullptr : offset.data();
-            view.channel = channel.empty() ? nullptr : channel.data();
-            view.count = length.size();
-            view.clock_ms = clock_ms;
-            view.duration_ms = duration_ms;
-            return view;
+            if (this != &other)
+            {
+                release();
+                view = other.view;
+                releaseFn = std::move(other.releaseFn);
+                released = other.released;
+                other.released = true;
+                other.releaseFn = nullptr;
+                other.view = {};
+            }
+            return *this;
+        }
+
+        ~RawDataLease()
+        {
+            release();
+        }
+
+        void release()
+        {
+            if (released)
+            {
+                return;
+            }
+            released = true;
+            if (releaseFn)
+            {
+                auto fn = std::move(releaseFn);
+                releaseFn = nullptr;
+                fn();
+            }
+        }
+
+        /** @brief 取消归还回调（用于入队失败，避免析构时误 Release）。 */
+        void disarm()
+        {
+            released = true;
+            releaseFn = nullptr;
         }
     };
 
     /**
-     * @brief 单生产者单消费者无锁环形队列（RawData 段）
+     * @brief 单生产者单消费者无锁环形队列（零拷贝租约）
      *
      * 约束：
-     * - 仅允许一个生产者线程调用 tryPushCopy。
+     * - 仅允许一个生产者线程调用 tryPushLease。
      * - 仅允许一个消费者线程调用 tryConsumeOne。
      */
-    class RawDataSpscRingQueue
+    class RawDataLeaseSpscRingQueue
     {
     public:
-        struct Config
+        explicit RawDataLeaseSpscRingQueue(size_t capacity = 2)
         {
-            size_t capacity = 128;               // 槽位数量（segment 级别）
-            size_t reservePacketsPerSlot = 4096; // 每个槽位预留包数
-            size_t reserveBytesPerSlot = 4 * 1024 * 1024;
-        };
-
-        RawDataSpscRingQueue()
-            : RawDataSpscRingQueue(Config())
-        {
-        }
-
-        explicit RawDataSpscRingQueue(const Config &config)
-            : m_config(config)
-        {
-            if (m_config.capacity == 0)
+            if (capacity == 0)
             {
-                throw std::invalid_argument("RawDataSpscRingQueue capacity must be > 0");
+                throw std::invalid_argument("RawDataLeaseSpscRingQueue capacity must be > 0");
             }
-
-            m_slots.resize(m_config.capacity);
-            for (auto &slot : m_slots)
-            {
-                slot.reserve(m_config.reservePacketsPerSlot, m_config.reserveBytesPerSlot);
-            }
+            m_slots.resize(capacity);
         }
 
         size_t capacity() const
@@ -428,9 +388,7 @@ namespace openpni::distributed::r2s
 
         bool empty() const
         {
-            const uint64_t head = m_head.load(std::memory_order_acquire);
-            const uint64_t tail = m_tail.load(std::memory_order_acquire);
-            return head == tail;
+            return size() == 0;
         }
 
         size_t peakSize() const
@@ -438,22 +396,19 @@ namespace openpni::distributed::r2s
             return static_cast<size_t>(m_peakDepth.load(std::memory_order_relaxed));
         }
 
-        bool tryPushCopy(const openpni::RawDataView &view)
+        bool tryPushLease(RawDataLease &&lease)
         {
             const uint64_t head = m_head.load(std::memory_order_relaxed);
             const uint64_t tail = m_tail.load(std::memory_order_acquire);
 
             if (head - tail >= static_cast<uint64_t>(m_slots.size()))
             {
+                // Caller still owns the Acq view; must not Release on failed push.
+                lease.disarm();
                 return false;
             }
 
-            auto &slot = m_slots[head % m_slots.size()];
-            if (!slot.copyFrom(view))
-            {
-                return false;
-            }
-
+            m_slots[head % m_slots.size()] = std::make_unique<RawDataLease>(std::move(lease));
             m_head.store(head + 1, std::memory_order_release);
             updatePeakDepth(head + 1 - tail);
             return true;
@@ -471,8 +426,12 @@ namespace openpni::distributed::r2s
             }
 
             auto &slot = m_slots[tail % m_slots.size()];
-            std::forward<Consumer>(consumer)(slot);
+            std::unique_ptr<RawDataLease> lease = std::move(slot);
             m_tail.store(tail + 1, std::memory_order_release);
+            if (lease)
+            {
+                std::forward<Consumer>(consumer)(*lease);
+            }
             return true;
         }
 
@@ -490,9 +449,7 @@ namespace openpni::distributed::r2s
             }
         }
 
-        Config m_config;
-        std::vector<RawDataSegmentBuffer> m_slots;
-
+        std::vector<std::unique_ptr<RawDataLease>> m_slots;
         alignas(64) std::atomic<uint64_t> m_head{0};
         alignas(64) std::atomic<uint64_t> m_tail{0};
         std::atomic<uint64_t> m_peakDepth{0};
@@ -570,18 +527,21 @@ namespace openpni::distributed::r2s
     };
 
     /**
-     * @brief 采集 RawData -> 无锁队列 -> R2S 异步桥接器
+     * @brief 采集 RawData -> 零拷贝租约队列 -> R2S 异步桥接器
      *
      * 设计目标：
-     * - 采集线程只做入队，减少在采集热路径上的 R2S 计算阻塞。
-     * - R2S 在独立线程消费队列，支持反压或可选丢弃策略。
+     * - 采集线程只做入队（传递 RawDataView 租约），不复制 packet bytes。
+     * - R2S 在独立线程消费；处理后调用 Release 归还 Acq 包槽。
+     * - 支持反压或可选丢弃策略（丢弃时仍归还包槽）。
      */
     class AsyncRawDataToR2SBridge
     {
     public:
+        using ReleaseFn = std::function<void(uint64_t packetCount)>;
+
         struct Config
         {
-            RawDataSpscRingQueue::Config queue;
+            size_t leaseQueueCapacity = 2;  // 在途段数（建议 1～2）
             bool blockWhenQueueFull = true; // true: 反压等待空槽；false: 立即返回
             bool dropWhenQueueFull = false; // 仅在 !blockWhenQueueFull 时生效
             uint32_t queueFullBackoffUs = 50;
@@ -611,6 +571,11 @@ namespace openpni::distributed::r2s
 
         bool stop();
 
+        /**
+         * @brief 设置包槽归还回调（通常绑定 Acq::Release）。必须在 start 前设置。
+         */
+        void setReleaseFn(ReleaseFn releaseFn);
+
         bool enqueueRawData(const openpni::RawDataView &view);
 
         std::function<bool(const openpni::RawDataView &)> makeRawDataCallback();
@@ -621,10 +586,12 @@ namespace openpni::distributed::r2s
 
     private:
         void consumerLoop();
+        bool enqueueZeroCopyLease(const openpni::RawDataView &view);
 
         R2SStreamProcessor m_r2sProcessor;
-        RawDataSpscRingQueue m_queue;
         Config m_config;
+        ReleaseFn m_releaseFn;
+        std::unique_ptr<RawDataLeaseSpscRingQueue> m_leaseQueue;
 
         std::thread m_consumerThread;
         std::atomic<bool> m_started{false};

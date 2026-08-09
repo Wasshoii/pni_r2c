@@ -203,7 +203,9 @@ namespace openpni::distributed::streaming
         void finalizeOutput();
         uint64_t calculateWatermark() const;
         void processingLoop();
-        void processCoincidence(const std::vector<Single> &singles);
+        void processCoincidence(const std::vector<Single> &singles, uint64_t carryCutoffTime_100fs);
+        void updateCarrySingles(const std::vector<Single> &processedSingles, uint64_t watermark);
+        uint64_t overlapLength_100fs() const;
         void saveCoincidenceResult(
             openpni::distributed::coreio::RollingFileWriter<
                 openpni::distributed::coreio::ListmodeFileWriter,
@@ -223,6 +225,10 @@ namespace openpni::distributed::streaming
 
         std::unique_ptr<multi_gpu::CoincidenceMultiGpuEngine> m_multiGpuEngine;
         bool m_useMultiGpu = false;
+
+        // 上一段尾部保留（长度见 overlapLength_100fs），供下一段隔段匹配。
+        std::vector<Single> m_carrySingles;
+        uint64_t m_lastWatermark = 0;
 
         openpni::distributed::coreio::RollingFileWriter<
             openpni::distributed::coreio::ListmodeFileWriter,

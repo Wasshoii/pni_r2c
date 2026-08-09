@@ -34,6 +34,16 @@ void RdmaNodeRecvSession::setIngest(IngestSlotFn fn)
     m_ingest = std::move(fn);
 }
 
+void RdmaNodeRecvSession::setIngestMode(IngestMode mode)
+{
+    m_mode = mode;
+}
+
+void RdmaNodeRecvSession::setCreditOnly(CreditOnlyFn fn)
+{
+    m_creditOnly = std::move(fn);
+}
+
 bool RdmaNodeRecvSession::prepare()
 {
     close();
@@ -173,12 +183,17 @@ bool RdmaNodeRecvSession::acceptRemote(const RdmaEndpointInfo &remote)
     return true;
 }
 
+bool RdmaNodeRecvSession::releaseSlot(uint32_t slotIndex)
+{
+    NotifyEntry *n = &m_ring.notifyBase()[slotIndex];
+    std::atomic_thread_fence(std::memory_order_release);
+    n->seq = 0;
+    m_ring.consumerSeq()->fetch_add(1, std::memory_order_release);
+    return true;
+}
+
 bool RdmaNodeRecvSession::ingestSlot(uint32_t slotIndex, const NotifyEntry &note)
 {
-    if (!m_ingest)
-    {
-        return false;
-    }
     if (slotIndex >= m_ring.slotCount())
     {
         return false;
@@ -193,64 +208,44 @@ bool RdmaNodeRecvSession::ingestSlot(uint32_t slotIndex, const NotifyEntry &note
         LOG(WARNING) << "Notify/header singlesCount mismatch node=" << m_cfg.nodeId;
     }
 
-    const uint16_t flags = hdr->flags;
-    const bool isSof = (flags & kSlotFlagSof) != 0;
-    const bool isEof = (flags & kSlotFlagEof) != 0;
-    const size_t payloadBytes = static_cast<size_t>(hdr->singlesCount) * kPackedSingleBytes;
-    const void *payload = m_ring.slotPayload(slotIndex);
-
-    if (isSof || !m_pending.active)
+    if (m_mode == IngestMode::CreditOnly)
     {
-        m_pending = {};
-        m_pending.active = true;
-        m_pending.chunkId = hdr->chunkId;
-        m_pending.computerClockMs = hdr->computerClockMs;
-        m_pending.durationMs = hdr->durationMs;
-    }
-    else if (m_pending.chunkId != hdr->chunkId)
-    {
-        LOG(WARNING) << "chunkId mismatch node=" << m_cfg.nodeId
-                     << " pending=" << m_pending.chunkId << " slot=" << hdr->chunkId;
-        m_pending = {};
-        m_pending.active = true;
-        m_pending.chunkId = hdr->chunkId;
-        m_pending.computerClockMs = hdr->computerClockMs;
-        m_pending.durationMs = hdr->durationMs;
-    }
-
-    const size_t off = m_pending.packed.size();
-    m_pending.packed.resize(off + payloadBytes);
-    std::memcpy(m_pending.packed.data() + off, payload, payloadBytes);
-
-    if (isEof)
-    {
-        SlotChunkView view;
-        view.nodeId = hdr->nodeId;
-        view.chunkId = m_pending.chunkId;
-        view.computerClockMs = m_pending.computerClockMs;
-        view.durationMs = m_pending.durationMs;
-        view.flags = flags;
-        view.singlesCount = static_cast<uint32_t>(m_pending.packed.size() / kPackedSingleBytes);
-        view.singlesPacked = m_pending.packed.data();
-
-        if (!m_ingest(view))
+        if (m_creditOnly)
         {
-            return false;
+            m_creditOnly(hdr->nodeId, hdr->singlesCount);
         }
-        m_pending = {};
+        return releaseSlot(slotIndex);
     }
 
-    // Clear notify and advance consumer credit.
-    NotifyEntry *n = &m_ring.notifyBase()[slotIndex];
-    std::atomic_thread_fence(std::memory_order_release);
-    n->seq = 0;
-    m_ring.consumerSeq()->fetch_add(1, std::memory_order_release);
-    return true;
+    if (!m_ingest)
+    {
+        return false;
+    }
+
+    // Per-slot zero-copy: payload stays in the receive ring for the duration of m_ingest.
+    SlotChunkView view;
+    view.nodeId = hdr->nodeId;
+    view.chunkId = hdr->chunkId;
+    view.computerClockMs = hdr->computerClockMs;
+    view.durationMs = hdr->durationMs;
+    view.flags = hdr->flags;
+    view.singlesCount = hdr->singlesCount;
+    view.singlesPacked = m_ring.slotPayload(slotIndex);
+
+    if (!m_ingest(view))
+    {
+        return false;
+    }
+    return releaseSlot(slotIndex);
 }
 
 int RdmaNodeRecvSession::pollOnce(int maxSlots)
 {
-    if (!m_ready.load(std::memory_order_acquire) || !m_ingest)
+    if (!m_ready.load(std::memory_order_acquire))
+    {
+        return 0;
+    }
+    if (m_mode == IngestMode::Full && !m_ingest)
     {
         return 0;
     }
@@ -290,7 +285,6 @@ int RdmaNodeRecvSession::pollOnce(int maxSlots)
 void RdmaNodeRecvSession::close()
 {
     m_ready = false;
-    m_pending = {};
     m_nextExpectedNotifySeq = 1;
     if (m_inprocessHandle != 0)
     {
@@ -321,12 +315,33 @@ RdmaRecvServer::~RdmaRecvServer()
 
 void RdmaRecvServer::setIngest(IngestSlotFn fn)
 {
-    m_ingest = std::move(fn);
     std::lock_guard<std::mutex> lock(m_mutex);
+    m_ingest = std::move(fn);
+    applyCallbacksLocked();
+}
+
+void RdmaRecvServer::setIngestMode(IngestMode mode)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_mode = mode;
+    applyCallbacksLocked();
+}
+
+void RdmaRecvServer::setCreditOnly(CreditOnlyFn fn)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_creditOnly = std::move(fn);
+    applyCallbacksLocked();
+}
+
+void RdmaRecvServer::applyCallbacksLocked()
+{
     for (auto &[id, session] : m_sessions)
     {
         (void)id;
         session->setIngest(m_ingest);
+        session->setCreditOnly(m_creditOnly);
+        session->setIngestMode(m_mode);
     }
 }
 
@@ -348,6 +363,8 @@ std::shared_ptr<RdmaNodeRecvSession> RdmaRecvServer::ensureSession(uint32_t node
 
     auto session = std::make_shared<RdmaNodeRecvSession>(std::move(sc));
     session->setIngest(m_ingest);
+    session->setCreditOnly(m_creditOnly);
+    session->setIngestMode(m_mode);
     if (!session->prepare())
     {
         return nullptr;

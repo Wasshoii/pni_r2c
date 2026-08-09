@@ -1,6 +1,6 @@
 /**
  * @file test_local_grpc_r2s_coin.cpp
- * @brief 9120 dual-node end-to-end: R2S → gRPC StreamSingles → StreamingTimeAligner
+ * @brief 9120 dual-node end-to-end: R2S → RDMA singles → StreamingTimeAligner
  *
  * Single-process harness: CoinGrpcNode + two parallel R2SGrpcNode instances.
  * R2S node logic lives in test_local_grpc_r2s_coin_r2s_runner.cpp to avoid
@@ -60,7 +60,6 @@ namespace
         std::string resultDir;
         std::string coinOutputDir;
         size_t maxPendingSegments = 64;
-        uint32_t batchSegmentsPerMessage = 1;
         uint32_t startLeadTimeMs = 1000;
         uint32_t waitForStartTimeoutMs = 30000;
         uint64_t networkLatencyMarginPs = 5'000'000; // 5 ms
@@ -95,7 +94,7 @@ namespace
     {
         std::cerr
             << "Usage: " << argv0 << " [options]\n"
-            << "  9120 dual-node R2S → gRPC → streaming coincidence (single process)\n\n"
+            << "  9120 dual-node R2S → RDMA → streaming coincidence (single process)\n\n"
             << "Options:\n"
             << "  --address <host:port>           Coin gRPC listen address (default 127.0.0.1:50061)\n"
             << "  --data-root <dir>               9120 data root\n"
@@ -105,7 +104,6 @@ namespace
             << "  --result-dir <dir>              R2S side output dir\n"
             << "  --coin-output-dir <dir>         Coincidence LMF output dir\n"
             << "  --max-pending-segments <n>     R2S gRPC send queue depth (default 64)\n"
-            << "  --batch-segments <n>           Segments per gRPC message (default 1)\n"
             << "  --network-latency-margin-ps <n> Aligner network margin in ps (default 5e6)\n"
             << "  --processing-interval-ms <n>   Aligner poll interval (default 100)\n"
             << "  --disable-multi-gpu            Disable multi-GPU coincidence engine\n"
@@ -175,10 +173,6 @@ namespace
                     static_cast<size_t>(std::stoul(needValue("--max-pending-segments")));
                 continue;
             }
-            if (arg == "--batch-segments")
-            {
-                opts.batchSegmentsPerMessage =
-                    static_cast<uint32_t>(std::stoul(needValue("--batch-segments")));
                 continue;
             }
             if (arg == "--network-latency-margin-ps")
@@ -446,7 +440,6 @@ int main(int argc, char **argv)
     r2sOpts.calibrationDir = opts.calibrationDir;
     r2sOpts.resultDir = opts.resultDir;
     r2sOpts.maxPendingSegments = opts.maxPendingSegments;
-    r2sOpts.batchSegmentsPerMessage = opts.batchSegmentsPerMessage;
     r2sOpts.waitForStartTimeoutMs = opts.waitForStartTimeoutMs;
     r2sOpts.energyCutLow = k9120EnergyLower_eV;
     r2sOpts.energyCutHigh = k9120EnergyUpper_eV;

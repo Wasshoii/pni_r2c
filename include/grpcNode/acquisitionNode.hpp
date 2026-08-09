@@ -60,8 +60,9 @@ namespace openpni::distributed::grpcnode
         ~AcquisitionGrpcNode();
 
         void setFileReadyCallback(FileReadyCallback callback);
-
         void setRawDataReadyCallback(RawDataReadyCallback callback);
+        void setDeferRawDataRelease(bool defer);
+        std::function<void(uint64_t)> makeRawDataReleaseFn();
 
         bool run();
 

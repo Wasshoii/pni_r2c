@@ -428,17 +428,19 @@ namespace openpni::distributed::app
                 {
                     return fail(err, "bridge.enabled must be bool");
                 }
-                if (!readUInt(*sec, "queueCapacity", &cfg->bridge.queueCapacity))
+                if (!readUInt(*sec, "leaseQueueCapacity", &cfg->bridge.leaseQueueCapacity))
+                {
+                    return fail(err, "bridge.leaseQueueCapacity must be non-negative integer");
+                }
+                // Backward-compatible alias: queueCapacity -> leaseQueueCapacity
+                size_t legacyQueueCapacity = 0;
+                if (!readUInt(*sec, "queueCapacity", &legacyQueueCapacity))
                 {
                     return fail(err, "bridge.queueCapacity must be non-negative integer");
                 }
-                if (!readUInt(*sec, "reservePacketsPerSlot", &cfg->bridge.reservePacketsPerSlot))
+                if (legacyQueueCapacity > 0 && cfg->bridge.leaseQueueCapacity == 2)
                 {
-                    return fail(err, "bridge.reservePacketsPerSlot must be non-negative integer");
-                }
-                if (!readUInt(*sec, "reserveBytesPerSlot", &cfg->bridge.reserveBytesPerSlot))
-                {
-                    return fail(err, "bridge.reserveBytesPerSlot must be non-negative integer");
+                    cfg->bridge.leaseQueueCapacity = legacyQueueCapacity;
                 }
                 if (!readBool(*sec, "blockWhenQueueFull", &cfg->bridge.blockWhenQueueFull))
                 {

@@ -98,7 +98,7 @@ ctest --test-dir build/tests/core -L core --output-on-failure
 ```
 
 2. PNI Tests（libpni + tbb + openmp，无 CUDA）
-- 目标：`test_streaming_coincidence`、`test_local_grpc_coin`、`test_acquisition_control_init`、`test_acquisition_datapath_udp`
+- 目标：`test_streaming_coincidence`、`test_local_grpc_coin`、`test_acquisition_control_init`
 
 ```bash
 cmake --preset linux-release-tests-pni
@@ -113,7 +113,7 @@ ctest --test-dir build/tests/pni -R test_local_grpc_coin --output-on-failure
 ```
 
 3. CUDA Tests（nvcc + libpni + tbb + openmp）
-- 目标：`test_pni_r2c`、`test_local_grpc_r2s`、`test_pni_coin`、`test_acquisition_r2s_pipeline`
+- 目标：`test_pni_r2c`、`test_local_grpc_r2s`、`test_pni_coin`、`test_bdm50100_online_pipeline`
 
 ```bash
 cmake --preset linux-release-tests-cuda

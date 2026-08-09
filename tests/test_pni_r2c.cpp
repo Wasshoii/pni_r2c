@@ -222,7 +222,7 @@ void test_bdm2_callback()
             {
                 std::cout << "  First single: channelIdx=" << singles[0].channelIndex
                           << ", crystalIdx=" << singles[0].crystalIndex
-                          << ", energy=" << singles[0].energy
+                          << ", energy=" << singles[0].energy_ev
                           << ", time_pico=" << singles[0].timevalue_100fs << std::endl;
             }
         }
@@ -273,7 +273,8 @@ void test_50100_930_callback(bool saveSinglesFile = true)
     constexpr std::size_t kMaxEnergySamplesPerCallback = 20000;
 
     namespace fs = std::filesystem;
-    const fs::path rawdataDir = path_pre + "/pni_raw_ring0";
+    fs::path rawdataDir = path_pre + "/pni_raw_ring0";
+    rawdataDir = "/media/lenovo/1TB/50100data/pni_res/NECR1";
     const std::string rawPrefix = "pniRaw-";
     const std::string rawExt = ".bin";
 
@@ -477,6 +478,7 @@ void test_50100_930_callback(bool saveSinglesFile = true)
         config.useEnergyCut = true;
         config.energyCutLow = enengy_low;
         config.energyCutHigh = enengy_high;
+        config.crossTalkEnabled = false;
 
         config.onSinglesSpanReady =
             [&](std::span<r2s::Single const> singles,
@@ -496,7 +498,7 @@ void test_50100_930_callback(bool saveSinglesFile = true)
             const std::size_t sampleCount = std::min<std::size_t>(singles.size(), kMaxEnergySamplesPerCallback);
             for (std::size_t i = 0; i < sampleCount; ++i)
             {
-                const double energy = static_cast<double>(singles[i].energy);
+                const double energy = static_cast<double>(singles[i].energy_ev);
                 if (!std::isfinite(energy))
                 {
                     energyNonFinite++;
@@ -534,7 +536,7 @@ void test_50100_930_callback(bool saveSinglesFile = true)
                 {
                     std::cout << "  First single: channelIdx=" << singles[0].channelIndex
                               << ", crystalIdx=" << singles[0].crystalIndex
-                              << ", energy=" << singles[0].energy
+                              << ", energy=" << singles[0].energy_ev
                               << ", time_pico=" << singles[0].timevalue_100fs << std::endl;
                 }
 
@@ -1132,18 +1134,18 @@ int main(int argc, char **argv)
     // // 工具调用，批量转换50100原始数据
     // convert_50100_rawdata_batch_process(3);
 
-     constexpr bool kSaveSinglesFile = true;
-    // //单环测试（930） 
-    // std::cout << "[Test 3] Testing 50100 callback mode..." << std::endl;
-    // test_50100_930_callback(kSaveSinglesFile);
+    constexpr bool kSaveSinglesFile = true;
+    //单环测试（930） 
+    std::cout << "[Test 3] Testing 50100 callback mode..." << std::endl;
+    test_50100_930_callback(kSaveSinglesFile);
 
     // //9120：合并与 R2S 分开调用（合并只需跑一次，之后可反复跑 R2S）
     // std::cout << "[Tool 9120] Merge both nodes rawdata..." << std::endl;
     // merge_9120_both_nodes_rawdata();
 
-    // 9120： 两环R2S 测试
-    std::cout << "[Test 9120] Two-ring (0+1) R2S..." << std::endl;
-    test_9120_two_ring_r2s(kSaveSinglesFile);
+    // // 9120： 两环R2S 测试
+    // std::cout << "[Test 9120] Two-ring (0+1) R2S..." << std::endl;
+    // test_9120_two_ring_r2s(kSaveSinglesFile);
 
 
     // //工具调用，批量转换50100单事件数据

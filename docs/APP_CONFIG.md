@@ -2,9 +2,36 @@
 
 本文档说明 pni_r2c/app/config 下 app 所需 JSON 配置字段的含义与用法。
 
-## acq_r2s_node.json
+当前多机实验配置按 **cluster / dataplane / coincidence / source** 分层。示例见 `app/config/examples/` 与 `app/config/rdma_cluster/`。跨机步骤见 `docs/app以及实验配置/RDMA多机实验.md`。
 
-### acqNode
+`dataplane.requireRoce` 默认 **true**。无 RNIC 的本机联调需显式设 `requireRoce=false` 且 `forceInProcess=true`。
+
+## acq_r2s_node.json（worker）
+
+### cluster（覆盖 coinClient 连接字段）
+- serverAddress: Coin gRPC 地址。
+- nodeId: Coincidence 节点 ID（0..N-1）。
+- nodeAddress: 本机上报地址（RoCE GID 选择参考）。
+- channelCount: 本节点通道数。
+
+### dataplane
+- requireRoce: 为 true 时拒绝 InProcess 回退。
+- forceInProcess: 强制同进程 memcpy（仅本机测试）。
+- deviceName: RNIC 名，空则自动。
+- gidIndex: GID 索引，-1 自动。
+- txSlotCount / slotCount / slotBytes: TX 槽协商（0 表示服务端默认）。
+
+### source
+- type: `synthetic` | `lsingle_replay` | `acquisition`（本阶段 acquisition 只留 StubRawIngress）。
+- lsinglePath: replay 时的 `.lsingle` 文件或目录。
+- promptPairs / delayPairs / delayTimePs: synthetic 真值规模。
+- singlesPerSec / pushChunkSingles: 发送节流与分块。
+- peerNodeId / localChannel / peerChannel: 双节点 synthetic 配对。
+
+### rawIngress
+- enabled: 仅 `source.type=acquisition` 时有意义。本阶段启动 stub、不产生 raw。
+
+### acqNode（采集预留，synthetic/replay 不用）
 - masterAddress: 采集控制主控地址（gRPC）。
 - nodeId: 采集节点 ID（用于日志和业务标识）。
 - nodeAddress: 节点对外上报码/对齐使用的地址。
@@ -52,7 +79,7 @@
 - crystalsPerChannel: 每通道晶体数。
 - maxPendingChunks: 最大待发送 chunk 数。
 - batchSize: 批量发送大小。
-- heartbeatIntervalMs: 心跳间隔。
+- heartbeatIntervalMs: 心跳间隔（默认 1000 ms）。主控通过心跳下发 Pause/Stop 并收集速率/缓冲。
 - waitForStartSignal: 是否等待启动信号。
 - waitForStartTimeoutMs: 启动等待超时。
 - waitForStartRpcTimeoutMs: RPC 等待超时。
@@ -92,5 +119,28 @@
   }
 }
 ```
+
+## coin_master.json（coincidence-only）
+
+### cluster
+- listenAddress: 符合服务监听地址。
+- expectedNodeCount: 预期 worker 数。Start 条件为 `registered==N && dataplane_open==N`。
+
+### dataplane
+- 同 worker：`requireRoce` / `deviceName` / `gidIndex` / slot 参数。
+
+### coincidence
+- detectorProfile: `BDM2` 或 `BDM50100_9120`。
+- outputDir: LMF 输出目录。
+- protocol: timeWindowPs / delayTimePs / energyLowerEV / energyUpperEV。
+
+### runtime
+- runSeconds: 0 表示等到 `allProducersComplete` 或 SIGINT。
+- statusIntervalMs: 状态打印间隔。
+
+### acquisitionControl
+- **本阶段忽略**。若 `enabled=true` 会 warn 并强制关闭。采集主控不再是 coin 的默认职责。
+
+旧 `coinMaster` / `aligner` 段仍可解析，便于过渡。
 
 备注：环境变量仍可作为覆盖手段（如 PNI_R2C_RAW_OUTPUT_ROOTS/PNI_R2C_RAW_SHARD_STRATEGY），但建议以 JSON 为主配置来源。

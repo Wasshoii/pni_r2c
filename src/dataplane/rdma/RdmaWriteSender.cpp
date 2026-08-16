@@ -2,8 +2,10 @@
 #include "dataplane/rdma/RdmaRecvServer.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstring>
+#include <new>
 #include <thread>
 
 #include <infiniband/verbs.h>
@@ -15,6 +17,12 @@
 namespace openpni::distributed::dataplane::rdma
 {
 
+namespace
+{
+constexpr int kAccessLocal = IBV_ACCESS_LOCAL_WRITE;
+constexpr int kAccessCredit = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE;
+} // namespace
+
 RdmaWriteSender::RdmaWriteSender(Config cfg)
     : m_cfg(std::move(cfg))
 {
@@ -25,31 +33,18 @@ RdmaWriteSender::~RdmaWriteSender()
     close();
 }
 
-bool RdmaWriteSender::connect(const RdmaEndpointInfo &coinEndpoint)
+uint8_t *RdmaWriteSender::txSlotBase(uint32_t localIndex) noexcept
 {
-    m_remote = coinEndpoint;
-    m_slotCount = coinEndpoint.slotCount;
-    m_slotStride = coinEndpoint.slotStride;
-    m_producerSeq = 0;
-
-    if (coinEndpoint.kind == DataPlaneKind::InProcess || coinEndpoint.inprocessHandle != 0)
+    auto *base = static_cast<uint8_t *>(m_txArena.data());
+    if (!base)
     {
-        // Drop any half-prepared verbs resources.
-        if (m_conn && m_stagingMr)
-        {
-            m_conn->deregister(m_stagingMr);
-            m_stagingMr = nullptr;
-        }
-        m_conn.reset();
-        m_device.reset();
-        return connectInProcess(coinEndpoint);
+        base = static_cast<uint8_t *>(m_inprocessTxArena.data());
     }
-    if (!RdmaDevice::hasVerbsDevice() && !m_conn)
+    if (!base)
     {
-        LOG(ERROR) << "RdmaWriteSender: remote expects verbs but no local device";
-        return false;
+        return nullptr;
     }
-    return connectVerbs(coinEndpoint);
+    return base + static_cast<size_t>(localIndex) * m_slotStride;
 }
 
 bool RdmaWriteSender::prepareLocalEndpoint(RdmaEndpointInfo *outLocal)
@@ -59,16 +54,30 @@ bool RdmaWriteSender::prepareLocalEndpoint(RdmaEndpointInfo *outLocal)
         return false;
     }
     *outLocal = {};
+    if (m_cfg.forceInProcess)
+    {
+        outLocal->kind = DataPlaneKind::InProcess;
+        return true;
+    }
     if (!RdmaDevice::hasVerbsDevice())
     {
+        if (m_cfg.requireRoce)
+        {
+            LOG(ERROR) << "RdmaWriteSender: requireRoce but no verbs device";
+            return false;
+        }
         outLocal->kind = DataPlaneKind::InProcess;
         return true;
     }
 
     m_device = std::make_unique<RdmaDevice>();
-    if (!m_device->open(m_cfg.deviceName))
+    if (!m_device->open(m_cfg.deviceName, m_cfg.gidIndex))
     {
         m_device.reset();
+        if (m_cfg.requireRoce)
+        {
+            return false;
+        }
         outLocal->kind = DataPlaneKind::InProcess;
         return true;
     }
@@ -80,10 +89,13 @@ bool RdmaWriteSender::prepareLocalEndpoint(RdmaEndpointInfo *outLocal)
         return false;
     }
 
-    m_staging.resize(std::max(m_cfg.stagingSlotBytes, kDefaultSlotBytes));
-    m_stagingMr = m_conn->registerMemory(
-        m_staging.data(), m_staging.size(), IBV_ACCESS_LOCAL_WRITE);
-    if (!m_stagingMr)
+    if (!m_creditArena.allocate(4096, false))
+    {
+        return false;
+    }
+    m_creditMirror = new (m_creditArena.data()) std::atomic<uint64_t>(0);
+    m_creditMr = m_conn->registerMemory(m_creditArena.data(), m_creditArena.size(), kAccessCredit);
+    if (!m_creditMr)
     {
         return false;
     }
@@ -102,7 +114,43 @@ bool RdmaWriteSender::prepareLocalEndpoint(RdmaEndpointInfo *outLocal)
     outLocal->deviceName = m_device->name();
     outLocal->portNum = m_device->portNum();
     outLocal->gidIndex = static_cast<uint32_t>(m_device->gidIndex());
+    outLocal->creditMirrorRkey = m_creditMr->rkey;
+    outLocal->creditMirrorAddr = reinterpret_cast<uint64_t>(m_creditMirror);
     return true;
+}
+
+bool RdmaWriteSender::connect(const RdmaEndpointInfo &coinEndpoint)
+{
+    m_remote = coinEndpoint;
+    m_slotCount = coinEndpoint.slotCount;
+    m_slotStride = coinEndpoint.slotStride;
+    m_producerSeq = 0;
+
+    if (m_cfg.forceInProcess || coinEndpoint.kind == DataPlaneKind::InProcess ||
+        coinEndpoint.inprocessHandle != 0)
+    {
+        if (m_cfg.requireRoce)
+        {
+            LOG(ERROR) << "RdmaWriteSender: requireRoce but remote is InProcess";
+            return false;
+        }
+        if (m_conn && m_creditMr)
+        {
+            m_conn->deregister(m_creditMr);
+            m_creditMr = nullptr;
+        }
+        m_conn.reset();
+        m_device.reset();
+        m_creditArena.release();
+        m_creditMirror = nullptr;
+        return connectInProcess(coinEndpoint);
+    }
+    if (!RdmaDevice::hasVerbsDevice() && !m_conn)
+    {
+        LOG(ERROR) << "RdmaWriteSender: remote expects verbs but no local device";
+        return false;
+    }
+    return connectVerbs(coinEndpoint);
 }
 
 bool RdmaWriteSender::connectInProcess(const RdmaEndpointInfo &coin)
@@ -117,15 +165,50 @@ bool RdmaWriteSender::connectInProcess(const RdmaEndpointInfo &coin)
     m_remoteConsumer = m_localSession->ring().consumerSeq();
     m_slotCount = m_localSession->ring().slotCount();
     m_slotStride = m_localSession->ring().slotStride();
+    if (!setupTxArena())
+    {
+        return false;
+    }
     m_connected = true;
     LOG(INFO) << "RdmaWriteSender node=" << m_cfg.nodeId << " connected InProcess slots="
               << m_slotCount << " stride=" << m_slotStride;
     return true;
 }
 
+bool RdmaWriteSender::setupTxArena()
+{
+    m_txSlotCount = std::max<uint32_t>(2, m_cfg.txSlotCount);
+    if (m_slotStride == 0)
+    {
+        return false;
+    }
+    const size_t bytes = static_cast<size_t>(m_txSlotCount) * m_slotStride;
+    if (m_kind == DataPlaneKind::RdmaRoceV2)
+    {
+        if (!m_txArena.allocate(bytes, m_cfg.preferHugePages))
+        {
+            return false;
+        }
+        m_txMr = m_conn->registerMemory(m_txArena.data(), m_txArena.size(), kAccessLocal);
+        if (!m_txMr)
+        {
+            return false;
+        }
+        m_txBusy.assign(m_txSlotCount, 0);
+    }
+    else
+    {
+        if (!m_inprocessTxArena.allocate(bytes, false))
+        {
+            return false;
+        }
+        m_inprocessTxBusy.assign(m_txSlotCount, 0);
+    }
+    return true;
+}
+
 bool RdmaWriteSender::connectVerbs(const RdmaEndpointInfo &coin)
 {
-    // Local QP should already be in INIT via prepareLocalEndpoint(); if not, create now.
     if (!m_conn || !m_device)
     {
         RdmaEndpointInfo local{};
@@ -136,23 +219,12 @@ bool RdmaWriteSender::connectVerbs(const RdmaEndpointInfo &coin)
         }
     }
 
-    if (m_staging.size() < coin.slotStride)
-    {
-        // Cannot safely grow registered MR; require staging >= remote stride.
-        if (m_staging.size() < static_cast<size_t>(coin.slotStride))
-        {
-            LOG(WARNING) << "staging size " << m_staging.size()
-                         << " < remote slot stride " << coin.slotStride;
-        }
-    }
-
     std::array<uint8_t, 16> localGid{};
     if (!m_device->queryGid(&localGid, nullptr))
     {
         return false;
     }
 
-    // Already INIT: complete RTR + RTS toward coin.
     if (!m_conn->transitionToRtr(coin, m_device->portNum(), localGid) ||
         !m_conn->transitionToRts(m_conn->localPsn()))
     {
@@ -160,6 +232,10 @@ bool RdmaWriteSender::connectVerbs(const RdmaEndpointInfo &coin)
     }
 
     m_kind = DataPlaneKind::RdmaRoceV2;
+    if (!setupTxArena())
+    {
+        return false;
+    }
     m_connected = true;
     LOG(INFO) << "RdmaWriteSender node=" << m_cfg.nodeId << " connected RoCE qp="
               << m_conn->qpNum() << " remote_qp=" << coin.qpNum;
@@ -169,16 +245,30 @@ bool RdmaWriteSender::connectVerbs(const RdmaEndpointInfo &coin)
 void RdmaWriteSender::close()
 {
     m_connected = false;
-    if (m_conn && m_stagingMr)
+    if (m_conn)
     {
-        m_conn->deregister(m_stagingMr);
-        m_stagingMr = nullptr;
+        m_conn->drainSendCompletions();
+        if (m_txMr)
+        {
+            m_conn->deregister(m_txMr);
+            m_txMr = nullptr;
+        }
+        if (m_creditMr)
+        {
+            m_conn->deregister(m_creditMr);
+            m_creditMr = nullptr;
+        }
     }
     m_conn.reset();
     m_device.reset();
     m_localSession.reset();
     m_remoteConsumer = nullptr;
-    m_staging.clear();
+    m_creditMirror = nullptr;
+    m_creditArena.release();
+    m_txArena.release();
+    m_inprocessTxArena.release();
+    m_txBusy.clear();
+    m_inprocessTxBusy.clear();
 }
 
 bool RdmaWriteSender::waitForCredit(uint64_t needProducerSeq)
@@ -191,48 +281,9 @@ bool RdmaWriteSender::waitForCredit(uint64_t needProducerSeq)
         {
             consumer = m_remoteConsumer->load(std::memory_order_acquire);
         }
-        else if (m_kind == DataPlaneKind::RdmaRoceV2 && m_conn && m_stagingMr)
+        else if (m_kind == DataPlaneKind::RdmaRoceV2 && m_creditMirror)
         {
-            // RDMA READ remote consumer into first 8 bytes of staging.
-            ibv_sge sge{};
-            sge.addr = reinterpret_cast<uintptr_t>(m_staging.data());
-            sge.length = sizeof(uint64_t);
-            sge.lkey = m_stagingMr->lkey;
-
-            ibv_send_wr wr{};
-            wr.wr_id = 1;
-            wr.opcode = IBV_WR_RDMA_READ;
-            wr.sg_list = &sge;
-            wr.num_sge = 1;
-            wr.send_flags = IBV_SEND_SIGNALED;
-            wr.wr.rdma.remote_addr = m_remote.consumerAddr;
-            wr.wr.rdma.rkey = m_remote.consumerRkey;
-            ibv_send_wr *bad = nullptr;
-            if (ibv_post_send(m_conn->qp(), &wr, &bad) != 0)
-            {
-                LOG(ERROR) << "credit RDMA_READ post failed";
-                return false;
-            }
-            // Busy poll completion.
-            for (;;)
-            {
-                ibv_wc wc{};
-                const int n = ibv_poll_cq(m_conn->cq(), 1, &wc);
-                if (n > 0)
-                {
-                    if (wc.status != IBV_WC_SUCCESS)
-                    {
-                        LOG(ERROR) << "credit RDMA_READ wc failed";
-                        return false;
-                    }
-                    break;
-                }
-                if (n < 0)
-                {
-                    return false;
-                }
-            }
-            std::memcpy(&consumer, m_staging.data(), sizeof(consumer));
+            consumer = m_creditMirror->load(std::memory_order_acquire);
         }
         else
         {
@@ -243,95 +294,221 @@ bool RdmaWriteSender::waitForCredit(uint64_t needProducerSeq)
         {
             return true;
         }
+        if (m_kind == DataPlaneKind::RdmaRoceV2)
+        {
+            recycleTxCompletionsLocked();
+        }
         std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
     return false;
 }
 
-bool RdmaWriteSender::writeSlot(uint32_t slotIndex, const SlotHeader &hdr,
-                                const void *payload, size_t payloadBytes)
+uint64_t RdmaWriteSender::slotsInFlight() const noexcept
 {
-    if (m_kind == DataPlaneKind::InProcess)
+    uint64_t consumer = 0;
+    if (m_kind == DataPlaneKind::InProcess && m_remoteConsumer)
     {
-        if (!m_localSession)
-        {
-            return false;
-        }
-        SlotHeader *dst = m_localSession->ring().slotHeader(slotIndex);
-        uint8_t *pl = m_localSession->ring().slotPayload(slotIndex);
-        std::memcpy(pl, payload, payloadBytes);
-        std::atomic_thread_fence(std::memory_order_release);
-        *dst = hdr;
+        consumer = m_remoteConsumer->load(std::memory_order_relaxed);
+    }
+    else if (m_creditMirror)
+    {
+        consumer = m_creditMirror->load(std::memory_order_relaxed);
+    }
+    const uint64_t prod = m_producerSeq;
+    return prod > consumer ? prod - consumer : 0;
+}
+
+uint32_t RdmaWriteSender::creditRemaining() const noexcept
+{
+    if (m_slotCount == 0)
+    {
+        return 0;
+    }
+    const uint64_t inFlight = slotsInFlight();
+    if (inFlight >= static_cast<uint64_t>(m_slotCount))
+    {
+        return 0;
+    }
+    return static_cast<uint32_t>(static_cast<uint64_t>(m_slotCount) - inFlight);
+}
+
+bool RdmaWriteSender::recycleTxCompletionsLocked()
+{
+    if (!m_conn)
+    {
         return true;
     }
-
-    // Pack into staging then RDMA WRITE whole slot region (header+payload).
-    if (kSlotHeaderBytes + payloadBytes > m_staging.size())
-    {
-        LOG(ERROR) << "staging too small";
-        return false;
-    }
-    std::memcpy(m_staging.data(), &hdr, sizeof(hdr));
-    std::memcpy(m_staging.data() + kSlotHeaderBytes, payload, payloadBytes);
-    const uint32_t length = static_cast<uint32_t>(kSlotHeaderBytes + payloadBytes);
-    const uint64_t remote = m_remote.baseAddr + static_cast<uint64_t>(slotIndex) * m_slotStride;
-    if (!m_conn->postWrite(m_staging.data(), length, m_stagingMr->lkey,
-                           remote, m_remote.rkey, /*wrId=*/2, /*signaled=*/true))
+    RdmaWorkCompletion wcs[16];
+    const int n = m_conn->pollCq(wcs, 16);
+    if (n < 0)
     {
         return false;
     }
-    // Wait completion.
-    for (;;)
+    for (int i = 0; i < n; ++i)
     {
-        bool timedOut = false;
-        if (!m_conn->pollOne(&timedOut))
+        if (wcs[i].status != 0)
         {
             return false;
         }
-        if (!timedOut)
+        if (wcs[i].isRecv)
         {
-            break;
+            continue;
+        }
+        const uint64_t wr = wcs[i].wrId;
+        if (wr >= 1 && wr <= m_txSlotCount)
+        {
+            m_txBusy[static_cast<size_t>(wr - 1)] = 0;
         }
     }
     return true;
 }
 
-bool RdmaWriteSender::writeNotify(uint32_t slotIndex, const NotifyEntry &note)
+bool RdmaWriteSender::acquireTxSlotLocked(TxSlotLease *out)
 {
-    if (m_kind == DataPlaneKind::InProcess)
+    if (!out)
     {
-        if (!m_localSession)
-        {
-            return false;
-        }
-        NotifyEntry *dst = &m_localSession->ring().notifyBase()[slotIndex];
-        dst->slotIndex = note.slotIndex;
-        dst->singlesCount = note.singlesCount;
-        dst->chunkId = note.chunkId;
-        std::atomic_thread_fence(std::memory_order_release);
-        dst->seq = note.seq;
-        return true;
+        return false;
     }
-
-    std::memcpy(m_staging.data(), &note, sizeof(note));
-    const uint64_t remote = m_remote.notifyAddr + static_cast<uint64_t>(slotIndex) * sizeof(NotifyEntry);
-    if (!m_conn->postWrite(m_staging.data(), sizeof(note), m_stagingMr->lkey,
-                           remote, m_remote.notifyRkey, /*wrId=*/3, /*signaled=*/true))
+    auto &busy = (m_kind == DataPlaneKind::RdmaRoceV2) ? m_txBusy : m_inprocessTxBusy;
+    if (busy.empty())
     {
         return false;
     }
     for (;;)
     {
-        bool timedOut = false;
-        if (!m_conn->pollOne(&timedOut))
+        if (m_kind == DataPlaneKind::RdmaRoceV2 && !recycleTxCompletionsLocked())
         {
             return false;
         }
-        if (!timedOut)
+        for (uint32_t i = 0; i < m_txSlotCount; ++i)
         {
-            break;
+            if (busy[i] == 0)
+            {
+                busy[i] = 1;
+                uint8_t *base = txSlotBase(i);
+                if (!base)
+                {
+                    busy[i] = 0;
+                    return false;
+                }
+                out->localIndex = i;
+                out->header = reinterpret_cast<SlotHeader *>(base);
+                out->payload = base + kSlotHeaderBytes;
+                out->payloadCapacity = m_slotStride - kSlotHeaderBytes;
+                return true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(10));
+        if (!m_connected)
+        {
+            return false;
         }
     }
+}
+
+bool RdmaWriteSender::acquireTxSlot(TxSlotLease *out)
+{
+    std::lock_guard<std::mutex> lock(m_sendMutex);
+    if (!m_connected)
+    {
+        return false;
+    }
+    return acquireTxSlotLocked(out);
+}
+
+bool RdmaWriteSender::postRemoteSlotLocked(uint32_t localIndex, uint32_t remoteSlot,
+                                           uint32_t length, uint64_t seq)
+{
+    uint8_t *base = txSlotBase(localIndex);
+    const uint64_t remote = m_remote.baseAddr + static_cast<uint64_t>(remoteSlot) * m_slotStride;
+    if (!m_conn->postWriteImm(base, length, m_txMr->lkey, remote, m_remote.rkey,
+                              seqToImm(seq), /*wrId=*/localIndex + 1, /*signaled=*/true))
+    {
+        m_txBusy[localIndex] = 0;
+        return false;
+    }
+    return true;
+}
+
+bool RdmaWriteSender::writeSlotInProcess(uint32_t slotIndex, const SlotHeader &hdr,
+                                         const void *payload, size_t payloadBytes)
+{
+    if (!m_localSession)
+    {
+        return false;
+    }
+    SlotHeader *dst = m_localSession->ring().slotHeader(slotIndex);
+    uint8_t *pl = m_localSession->ring().slotPayload(slotIndex);
+    std::memcpy(pl, payload, payloadBytes);
+    std::atomic_thread_fence(std::memory_order_release);
+    *dst = hdr;
+
+    NotifyEntry *note = &m_localSession->ring().notifyBase()[slotIndex];
+    note->slotIndex = slotIndex;
+    note->singlesCount = hdr.singlesCount;
+    note->chunkId = hdr.chunkId;
+    std::atomic_thread_fence(std::memory_order_release);
+    note->seq = hdr.seq == 0 ? 1 : hdr.seq;
+    return true;
+}
+
+bool RdmaWriteSender::commitTxSlot(const TxSlotLease &lease, const SlotHeader &hdr, uint32_t singlesCount)
+{
+    std::lock_guard<std::mutex> lock(m_sendMutex);
+    if (!m_connected || lease.header == nullptr)
+    {
+        return false;
+    }
+    if (!waitForCredit(m_producerSeq + 1))
+    {
+        if (m_kind == DataPlaneKind::RdmaRoceV2 && lease.localIndex < m_txBusy.size())
+        {
+            m_txBusy[lease.localIndex] = 0;
+        }
+        else if (lease.localIndex < m_inprocessTxBusy.size())
+        {
+            m_inprocessTxBusy[lease.localIndex] = 0;
+        }
+        return false;
+    }
+    const uint32_t slotIndex = static_cast<uint32_t>(m_producerSeq % m_slotCount);
+    SlotHeader local = hdr;
+    local.magic = kSlotMagic;
+    local.version = kSlotVersion;
+    local.nodeId = m_cfg.nodeId;
+    local.singlesCount = singlesCount;
+    local.seq = static_cast<uint32_t>(m_producerSeq + 1);
+    *lease.header = local;
+
+    const size_t payloadBytes = static_cast<size_t>(singlesCount) * kPackedSingleBytes;
+    if (m_kind == DataPlaneKind::InProcess)
+    {
+        if (!writeSlotInProcess(slotIndex, local, lease.payload, payloadBytes))
+        {
+            if (lease.localIndex < m_inprocessTxBusy.size())
+            {
+                m_inprocessTxBusy[lease.localIndex] = 0;
+            }
+            return false;
+        }
+        auto &busy = m_inprocessTxBusy;
+        if (lease.localIndex < busy.size())
+        {
+            busy[lease.localIndex] = 0;
+        }
+    }
+    else
+    {
+        const uint32_t length = static_cast<uint32_t>(kSlotHeaderBytes + payloadBytes);
+        if (!postRemoteSlotLocked(lease.localIndex, slotIndex, length, m_producerSeq + 1))
+        {
+            return false;
+        }
+    }
+
+    ++m_producerSeq;
+    m_slotsSent.fetch_add(1, std::memory_order_relaxed);
+    m_singlesSent.fetch_add(singlesCount, std::memory_order_relaxed);
     return true;
 }
 
@@ -367,6 +544,13 @@ bool RdmaWriteSender::sendPackedSingles(
             return false;
         }
 
+        TxSlotLease lease{};
+        if (!acquireTxSlotLocked(&lease))
+        {
+            LOG(ERROR) << "acquireTxSlot failed node=" << m_cfg.nodeId;
+            return false;
+        }
+
         const uint32_t slotIndex = static_cast<uint32_t>(m_producerSeq % m_slotCount);
         SlotHeader hdr{};
         clearSlotHeader(&hdr);
@@ -394,19 +578,25 @@ bool RdmaWriteSender::sendPackedSingles(
         const auto *src = static_cast<const uint8_t *>(singlesPacked) +
                           static_cast<size_t>(offset) * kPackedSingleBytes;
         const size_t payloadBytes = static_cast<size_t>(count) * kPackedSingleBytes;
-        if (!writeSlot(slotIndex, hdr, src, payloadBytes))
-        {
-            return false;
-        }
+        *lease.header = hdr;
+        std::memcpy(lease.payload, src, payloadBytes);
 
-        NotifyEntry note{};
-        note.seq = m_producerSeq + 1;
-        note.slotIndex = slotIndex;
-        note.singlesCount = count;
-        note.chunkId = chunkId;
-        if (!writeNotify(slotIndex, note))
+        if (m_kind == DataPlaneKind::InProcess)
         {
-            return false;
+            if (!writeSlotInProcess(slotIndex, hdr, lease.payload, payloadBytes))
+            {
+                m_inprocessTxBusy[lease.localIndex] = 0;
+                return false;
+            }
+            m_inprocessTxBusy[lease.localIndex] = 0;
+        }
+        else
+        {
+            const uint32_t length = static_cast<uint32_t>(kSlotHeaderBytes + payloadBytes);
+            if (!postRemoteSlotLocked(lease.localIndex, slotIndex, length, m_producerSeq + 1))
+            {
+                return false;
+            }
         }
 
         ++m_producerSeq;

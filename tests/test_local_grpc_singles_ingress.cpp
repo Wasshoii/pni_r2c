@@ -296,6 +296,16 @@ namespace
             return grpc::Status::OK;
         }
 
+        grpc::Status NotifyProducerComplete(
+            grpc::ServerContext *,
+            const coincidence::NotifyProducerCompleteRequest *,
+            coincidence::NotifyProducerCompleteResponse *response) override
+        {
+            response->set_success(true);
+            response->set_all_complete(true);
+            return grpc::Status::OK;
+        }
+
         grpc::Status Control(
             grpc::ServerContext *,
             const coincidence::ControlRequest *,
@@ -481,6 +491,16 @@ namespace
         {
             response->set_acknowledged(true);
             response->set_server_timestamp_ms(nowMs());
+            return grpc::Status::OK;
+        }
+
+        grpc::Status NotifyProducerComplete(
+            grpc::ServerContext *,
+            const coincidence::NotifyProducerCompleteRequest *,
+            coincidence::NotifyProducerCompleteResponse *response) override
+        {
+            response->set_success(true);
+            response->set_all_complete(true);
             return grpc::Status::OK;
         }
 

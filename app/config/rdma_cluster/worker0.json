@@ -7,7 +7,6 @@
   },
   "dataplane": {
     "requireRoce": true,
-    "forceInProcess": false,
     "deviceName": "",
     "gidIndex": 0
   },
@@ -17,7 +16,6 @@
     "channelCount": 4,
     "waitForStartSignal": true,
     "waitForStartTimeoutMs": 0,
-    "waitForStartRpcTimeoutMs": 15000,
     "heartbeatIntervalMs": 1000
   },
   "source": {
@@ -31,14 +29,5 @@
   },
   "rawIngress": {
     "enabled": false
-  },
-  "r2s": {
-    "calibrationDir": "Data/bdm2/calibration",
-    "resultDir": "Data/result/Bdm2/split",
-    "channelIndices": [0, 1, 2, 3]
-  },
-  "runtime": {
-    "shutdownGraceMs": 1000,
-    "enableCpuAffinity": false
   }
 }

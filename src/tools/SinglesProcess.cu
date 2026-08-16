@@ -25,7 +25,7 @@ namespace openpni::distributed::r2s
 
         __host__ __device__ bool operator()(Single const &s) const
         {
-            const float e = s.energy;
+            const float e = s.energy_ev;
             return !(e >= low && e <= high);
         }
     };

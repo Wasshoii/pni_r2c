@@ -53,6 +53,28 @@ message StatusRequest {
     bool include_node_stats = 1;
 }
 
+// Worker source / produce state reported over Heartbeat.
+enum SourceState {
+    SOURCE_STATE_UNSPECIFIED = 0;
+    SOURCE_STATE_IDLE = 1;
+    SOURCE_STATE_RUNNING = 2;
+    SOURCE_STATE_PAUSED = 3;
+    SOURCE_STATE_COMPLETE = 4;
+    SOURCE_STATE_ERROR = 5;
+}
+
+// Command piggy-backed on HeartbeatResponse (worker is the gRPC client).
+enum ProducerCommand {
+    CMD_NONE = 0;
+    CMD_START_PRODUCE = 1;
+    CMD_PAUSE_PRODUCE = 2;
+    CMD_STOP_PRODUCE = 3;
+    CMD_DRAIN = 4;
+    // Reserved; acquisition is not implemented this phase:
+    // CMD_START_ACQ = 10;
+    // CMD_STOP_ACQ = 11;
+}
+
 // 节点状态
 message NodeStatus {
     uint32 node_id = 1;
@@ -60,6 +82,24 @@ message NodeStatus {
     uint64 singles_received = 3;
     uint64 buffer_size = 4;
     bool connected = 5;
+    bool dataplane_open = 6;
+    DataPlaneKind data_plane_kind = 7;
+    uint64 singles_sent_heartbeat = 8;
+    bool producer_complete = 9;
+    SourceState source_state = 10;
+    uint64 chunks_pending = 11;
+    uint64 chunks_pending_cap = 12;
+    uint64 rdma_slots_in_flight = 13;
+    uint32 rdma_slot_count = 14;
+    uint64 rdma_credit_remaining = 15;
+    uint64 r2s_singles_out = 16;
+    uint64 r2s_lease_used = 17;
+    uint64 r2s_lease_cap = 18;
+    uint64 acq_packets_total = 19;
+    uint64 acq_bytes_total = 20;
+    bool acq_running = 21;
+    uint64 last_heartbeat_age_ms = 22;
+    uint64 last_rtt_ms = 23;
 }
 
 // 状态响应
@@ -78,6 +118,10 @@ message StatusResponse {
     uint32 expected_node_count = 10;
     uint32 connected_node_count = 11;
     bool start_signal_issued = 12;
+    DataPlaneKind data_plane_kind = 13;
+    uint32 dataplane_open_count = 14;
+    uint32 producers_complete_count = 15;
+    bool all_producers_complete = 16;
 }
 
 // 控制命令
@@ -88,6 +132,7 @@ message ControlRequest {
         PAUSE = 2;
         RESUME = 3;
         FLUSH = 4;
+        DRAIN = 5; // stop aligner after producers complete; do not restart
     }
     Command command = 1;
     bool wait_for_completion = 2; // 用于 STOP 命令
@@ -169,6 +214,8 @@ message RdmaEndpoint {
     uint32 port_num = 16;
     uint32 gid_index = 17;
     uint64 inprocess_handle = 18;
+    uint32 credit_mirror_rkey = 19;
+    uint64 credit_mirror_addr = 20;
 }
 
 message OpenDataPlaneRequest {
@@ -203,14 +250,43 @@ message WaitForStartResponse {
 // 心跳请求
 message HeartbeatRequest {
     uint32 node_id = 1;
-    uint64 timestamp_ms = 2;
+    uint64 timestamp_ms = 2; // client send time; echoed for RTT
     uint64 singles_sent = 3;
+    bool producer_complete = 4;
+    SourceState source_state = 5;
+    uint64 chunks_pending = 6;
+    uint64 chunks_pending_cap = 7;
+    uint64 rdma_slots_in_flight = 8;
+    uint32 rdma_slot_count = 9;
+    uint64 rdma_credit_remaining = 10;
+    uint64 r2s_singles_out = 11;
+    uint64 r2s_lease_used = 12;
+    uint64 r2s_lease_cap = 13;
+    uint64 acq_packets_total = 14; // reserved; stub reports 0
+    uint64 acq_bytes_total = 15;   // reserved; stub reports 0
+    bool acq_running = 16;         // reserved; stub reports false
+    uint64 last_rtt_ms = 17;
 }
 
 // 心跳响应
 message HeartbeatResponse {
     bool acknowledged = 1;
     uint64 server_timestamp_ms = 2;
+    uint64 echo_timestamp_ms = 3;
+    ProducerCommand command = 4;
+    bool start_signal_issued = 5;
+}
+
+message NotifyProducerCompleteRequest {
+    uint32 node_id = 1;
+    uint64 singles_sent = 2;
+}
+
+message NotifyProducerCompleteResponse {
+    bool success = 1;
+    string message = 2;
+    uint32 producers_complete_count = 3;
+    bool all_complete = 4;
 }
 
 // ==================== 服务定义 ====================
@@ -240,6 +316,9 @@ service CoincidenceService {
     
     // 心跳
     rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+    // Producer finished sending; coin drains the aligner when all nodes complete.
+    rpc NotifyProducerComplete(NotifyProducerCompleteRequest) returns (NotifyProducerCompleteResponse);
 }
 
 // 分布式节点服务（可选，用于主节点向从节点发送命令）

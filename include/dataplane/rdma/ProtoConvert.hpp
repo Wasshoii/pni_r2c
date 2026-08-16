@@ -58,6 +58,8 @@ inline void fillProtoEndpoint(const RdmaEndpointInfo &src, coincidence::RdmaEndp
     dst->set_port_num(src.portNum);
     dst->set_gid_index(src.gidIndex);
     dst->set_inprocess_handle(src.inprocessHandle);
+    dst->set_credit_mirror_rkey(src.creditMirrorRkey);
+    dst->set_credit_mirror_addr(src.creditMirrorAddr);
 }
 
 inline RdmaEndpointInfo fromProtoEndpoint(const coincidence::RdmaEndpoint &src)
@@ -84,6 +86,8 @@ inline RdmaEndpointInfo fromProtoEndpoint(const coincidence::RdmaEndpoint &src)
     dst.portNum = src.port_num() == 0 ? 1 : src.port_num();
     dst.gidIndex = src.gid_index();
     dst.inprocessHandle = src.inprocess_handle();
+    dst.creditMirrorRkey = src.credit_mirror_rkey();
+    dst.creditMirrorAddr = src.credit_mirror_addr();
     return dst;
 }
 

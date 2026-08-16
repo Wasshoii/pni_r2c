@@ -1,5 +1,7 @@
 #include "dataplane/rdma/RdmaContext.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <random>
@@ -43,7 +45,7 @@ std::vector<std::string> RdmaDevice::listDeviceNames()
     return names;
 }
 
-bool RdmaDevice::open(const std::string &deviceName)
+bool RdmaDevice::open(const std::string &deviceName, int gidIndex)
 {
     close();
     int num = 0;
@@ -93,7 +95,11 @@ bool RdmaDevice::open(const std::string &deviceName)
 
     m_port = 1;
     m_gidIndex = 0;
-    if (const char *env = std::getenv("OPENPNI_RDMA_GID_INDEX"))
+    if (gidIndex >= 0)
+    {
+        m_gidIndex = gidIndex;
+    }
+    else if (const char *env = std::getenv("OPENPNI_RDMA_GID_INDEX"))
     {
         m_gidIndex = std::atoi(env);
     }
@@ -141,6 +147,20 @@ bool RdmaDevice::queryGid(std::array<uint8_t, 16> *outGid, uint16_t *outLid) con
     return true;
 }
 
+int RdmaDevice::queryActiveMtu() const
+{
+    if (!m_ctx)
+    {
+        return 0;
+    }
+    ibv_port_attr attr{};
+    if (ibv_query_port(m_ctx, m_port, &attr) != 0)
+    {
+        return 0;
+    }
+    return static_cast<int>(attr.active_mtu);
+}
+
 RdmaConnection::~RdmaConnection()
 {
     destroy();
@@ -154,6 +174,8 @@ bool RdmaConnection::create(RdmaDevice &dev, int cqEntries, int maxSendWr, int m
         return false;
     }
     m_dev = &dev;
+    m_maxSendWr = maxSendWr;
+    m_maxRecvWr = maxRecvWr;
     m_cq = ibv_create_cq(dev.context(), cqEntries, nullptr, nullptr, 0);
     if (!m_cq)
     {
@@ -161,17 +183,27 @@ bool RdmaConnection::create(RdmaDevice &dev, int cqEntries, int maxSendWr, int m
         return false;
     }
 
-    ibv_qp_init_attr init{};
-    init.send_cq = m_cq;
-    init.recv_cq = m_cq;
-    init.cap.max_send_wr = maxSendWr;
-    init.cap.max_recv_wr = maxRecvWr;
-    init.cap.max_send_sge = 1;
-    init.cap.max_recv_sge = 1;
-    init.qp_type = IBV_QPT_RC;
+    auto tryCreateQp = [&](int inlineBytes) -> bool
+    {
+        ibv_qp_init_attr init{};
+        init.send_cq = m_cq;
+        init.recv_cq = m_cq;
+        init.cap.max_send_wr = maxSendWr;
+        init.cap.max_recv_wr = maxRecvWr;
+        init.cap.max_send_sge = 2;
+        init.cap.max_recv_sge = 1;
+        init.cap.max_inline_data = inlineBytes;
+        init.qp_type = IBV_QPT_RC;
+        m_qp = ibv_create_qp(dev.pd(), &init);
+        if (!m_qp)
+        {
+            return false;
+        }
+        m_inlineBytes = static_cast<int>(init.cap.max_inline_data);
+        return true;
+    };
 
-    m_qp = ibv_create_qp(dev.pd(), &init);
-    if (!m_qp)
+    if (!tryCreateQp(64) && !tryCreateQp(0))
     {
         LOG(ERROR) << "ibv_create_qp failed";
         destroy();
@@ -196,7 +228,11 @@ void RdmaConnection::destroy()
         m_cq = nullptr;
     }
     m_dev = nullptr;
-    m_outstanding = 0;
+    m_sendOutstanding = 0;
+    m_postedRecvs = 0;
+    m_maxSendWr = 0;
+    m_maxRecvWr = 0;
+    m_inlineBytes = 0;
 }
 
 ibv_mr *RdmaConnection::registerMemory(void *addr, size_t length, int accessFlags)
@@ -246,9 +282,28 @@ bool RdmaConnection::transitionToRtr(const RdmaEndpointInfo &remote, uint8_t loc
                                      const std::array<uint8_t, 16> &localGid)
 {
     (void)localGid;
+    ibv_mtu mtu = IBV_MTU_1024;
+    const int active = m_dev ? m_dev->queryActiveMtu() : 0;
+    if (active >= static_cast<int>(IBV_MTU_4096))
+    {
+        mtu = IBV_MTU_4096;
+    }
+    else if (active >= static_cast<int>(IBV_MTU_2048))
+    {
+        mtu = IBV_MTU_2048;
+    }
+    else if (active >= static_cast<int>(IBV_MTU_1024))
+    {
+        mtu = IBV_MTU_1024;
+    }
+    else if (active >= static_cast<int>(IBV_MTU_512))
+    {
+        mtu = IBV_MTU_512;
+    }
+
     ibv_qp_attr attr{};
     attr.qp_state = IBV_QPS_RTR;
-    attr.path_mtu = IBV_MTU_1024;
+    attr.path_mtu = mtu;
     attr.dest_qp_num = remote.qpNum;
     attr.rq_psn = remote.psn;
     attr.max_dest_rd_atomic = 1;
@@ -262,7 +317,7 @@ bool RdmaConnection::transitionToRtr(const RdmaEndpointInfo &remote, uint8_t loc
     std::memcpy(&attr.ah_attr.grh.dgid, remote.gid.data(), 16);
     attr.ah_attr.grh.flow_label = 0;
     attr.ah_attr.grh.sgid_index = static_cast<uint8_t>(m_dev->gidIndex());
-    attr.ah_attr.grh.hop_limit = 1;
+    attr.ah_attr.grh.hop_limit = 64;
     attr.ah_attr.grh.traffic_class = 0;
 
     const int flags = IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN |
@@ -305,6 +360,34 @@ bool RdmaConnection::connectTo(const RdmaEndpointInfo &remote, uint8_t localPort
 bool RdmaConnection::postWrite(const void *localAddr, uint32_t length, uint32_t lkey,
                                uint64_t remoteAddr, uint32_t rkey, uint64_t wrId, bool signaled)
 {
+    return postWriteCommon(localAddr, length, lkey, remoteAddr, rkey, wrId, signaled,
+                           /*withImm=*/false, 0);
+}
+
+bool RdmaConnection::postWriteImm(const void *localAddr, uint32_t length, uint32_t lkey,
+                                  uint64_t remoteAddr, uint32_t rkey, uint32_t imm,
+                                  uint64_t wrId, bool signaled)
+{
+    return postWriteCommon(localAddr, length, lkey, remoteAddr, rkey, wrId, signaled,
+                           /*withImm=*/true, imm);
+}
+
+bool RdmaConnection::postWriteCommon(const void *localAddr, uint32_t length, uint32_t lkey,
+                                     uint64_t remoteAddr, uint32_t rkey, uint64_t wrId, bool signaled,
+                                     bool withImm, uint32_t imm)
+{
+    if (!m_qp)
+    {
+        return false;
+    }
+    if (m_sendOutstanding >= m_maxSendWr - 1)
+    {
+        if (!drainSendCompletions())
+        {
+            return false;
+        }
+    }
+
     ibv_sge sge{};
     sge.addr = reinterpret_cast<uintptr_t>(localAddr);
     sge.length = length;
@@ -312,12 +395,16 @@ bool RdmaConnection::postWrite(const void *localAddr, uint32_t length, uint32_t 
 
     ibv_send_wr wr{};
     wr.wr_id = wrId;
-    wr.opcode = IBV_WR_RDMA_WRITE;
+    wr.opcode = withImm ? IBV_WR_RDMA_WRITE_WITH_IMM : IBV_WR_RDMA_WRITE;
     wr.sg_list = &sge;
     wr.num_sge = 1;
     wr.send_flags = signaled ? IBV_SEND_SIGNALED : 0;
     wr.wr.rdma.remote_addr = remoteAddr;
     wr.wr.rdma.rkey = rkey;
+    if (withImm)
+    {
+        wr.imm_data = imm;
+    }
 
     ibv_send_wr *bad = nullptr;
     if (ibv_post_send(m_qp, &wr, &bad) != 0)
@@ -327,9 +414,85 @@ bool RdmaConnection::postWrite(const void *localAddr, uint32_t length, uint32_t 
     }
     if (signaled)
     {
-        ++m_outstanding;
+        ++m_sendOutstanding;
     }
     return true;
+}
+
+bool RdmaConnection::postRecv(uint64_t wrId)
+{
+    if (!m_qp)
+    {
+        return false;
+    }
+    ibv_sge sge{};
+    sge.addr = 0;
+    sge.length = 0;
+    sge.lkey = 0;
+    ibv_recv_wr wr{};
+    wr.wr_id = wrId;
+    wr.num_sge = 1;
+    wr.sg_list = &sge;
+    ibv_recv_wr *bad = nullptr;
+    if (ibv_post_recv(m_qp, &wr, &bad) != 0)
+    {
+        LOG(ERROR) << "ibv_post_recv failed";
+        return false;
+    }
+    ++m_postedRecvs;
+    return true;
+}
+
+bool RdmaConnection::postRecvBatch(int count)
+{
+    for (int i = 0; i < count; ++i)
+    {
+        if (!postRecv(static_cast<uint64_t>(i + 1)))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+int RdmaConnection::pollCq(RdmaWorkCompletion *out, int maxCompletions)
+{
+    if (!m_cq || !out || maxCompletions <= 0)
+    {
+        return 0;
+    }
+    ibv_wc wcs[32];
+    const int nreq = std::min(maxCompletions, 32);
+    const int n = ibv_poll_cq(m_cq, nreq, wcs);
+    if (n < 0)
+    {
+        LOG(ERROR) << "ibv_poll_cq failed";
+        return -1;
+    }
+    for (int i = 0; i < n; ++i)
+    {
+        out[i].wrId = wcs[i].wr_id;
+        out[i].immData = wcs[i].imm_data;
+        out[i].status = static_cast<int>(wcs[i].status);
+        out[i].isRecv = (wcs[i].opcode == IBV_WC_RECV ||
+                         wcs[i].opcode == IBV_WC_RECV_RDMA_WITH_IMM);
+        out[i].hasImm = (wcs[i].wc_flags & IBV_WC_WITH_IMM) != 0;
+        if (!out[i].isRecv && m_sendOutstanding > 0)
+        {
+            --m_sendOutstanding;
+        }
+        if (out[i].isRecv && m_postedRecvs > 0)
+        {
+            --m_postedRecvs;
+        }
+        if (wcs[i].status != IBV_WC_SUCCESS)
+        {
+            LOG(ERROR) << "CQ wc status=" << wcs[i].status
+                       << " opcode=" << wcs[i].opcode
+                       << " wr_id=" << wcs[i].wr_id;
+        }
+    }
+    return n;
 }
 
 bool RdmaConnection::pollOne(bool *timedOut, int timeoutMs)
@@ -339,12 +502,16 @@ bool RdmaConnection::pollOne(bool *timedOut, int timeoutMs)
     {
         *timedOut = false;
     }
-    if (m_outstanding <= 0)
+    if (m_sendOutstanding <= 0)
     {
         return true;
     }
-    ibv_wc wc{};
-    const int n = ibv_poll_cq(m_cq, 1, &wc);
+    RdmaWorkCompletion wc{};
+    const int n = pollCq(&wc, 1);
+    if (n < 0)
+    {
+        return false;
+    }
     if (n == 0)
     {
         if (timedOut)
@@ -353,12 +520,38 @@ bool RdmaConnection::pollOne(bool *timedOut, int timeoutMs)
         }
         return true;
     }
-    if (n < 0 || wc.status != IBV_WC_SUCCESS)
+    return wc.status == 0;
+}
+
+bool RdmaConnection::drainSendCompletions()
+{
+    RdmaWorkCompletion wcs[16];
+    int spins = 0;
+    while (m_sendOutstanding > 0)
     {
-        LOG(ERROR) << "CQ poll failed status=" << (n < 0 ? -1 : static_cast<int>(wc.status));
-        return false;
+        const int n = pollCq(wcs, 16);
+        if (n < 0)
+        {
+            return false;
+        }
+        if (n == 0)
+        {
+            if (++spins > 10000000)
+            {
+                LOG(ERROR) << "drainSendCompletions timeout outstanding=" << m_sendOutstanding;
+                return false;
+            }
+            continue;
+        }
+        for (int i = 0; i < n; ++i)
+        {
+            if (wcs[i].status != 0)
+            {
+                return false;
+            }
+        }
+        spins = 0;
     }
-    --m_outstanding;
     return true;
 }
 

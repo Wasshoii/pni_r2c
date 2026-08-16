@@ -1,17 +1,16 @@
 {
   "cluster": {
     "listenAddress": "0.0.0.0:50061",
-    "expectedNodeCount": 1
+    "expectedNodeCount": 2
   },
   "dataplane": {
     "requireRoce": true,
-    "forceInProcess": false,
     "deviceName": "",
     "gidIndex": 0
   },
   "coincidence": {
     "detectorProfile": "BDM2",
-    "outputDir": "Data/result/Bdm2/pniCoin",
+    "outputDir": "Data/result/rdma_cluster/coin_2workers",
     "protocol": {
       "timeWindowPs": 2000,
       "delayTimePs": 2000000,

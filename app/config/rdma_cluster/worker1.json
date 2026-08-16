@@ -1,13 +1,12 @@
 {
   "cluster": {
     "serverAddress": "127.0.0.1:50061",
-    "nodeId": 0,
+    "nodeId": 1,
     "nodeAddress": "127.0.0.1",
     "channelCount": 4
   },
   "dataplane": {
     "requireRoce": true,
-    "forceInProcess": false,
     "deviceName": "",
     "gidIndex": 0
   },
@@ -17,7 +16,6 @@
     "channelCount": 4,
     "waitForStartSignal": true,
     "waitForStartTimeoutMs": 0,
-    "waitForStartRpcTimeoutMs": 15000,
     "heartbeatIntervalMs": 1000
   },
   "source": {
@@ -25,20 +23,11 @@
     "promptPairs": 10000,
     "delayPairs": 10000,
     "delayTimePs": 2000000,
-    "peerNodeId": 1,
+    "peerNodeId": 0,
     "localChannel": 0,
     "peerChannel": 1
   },
   "rawIngress": {
     "enabled": false
-  },
-  "r2s": {
-    "calibrationDir": "Data/bdm2/calibration",
-    "resultDir": "Data/result/Bdm2/split",
-    "channelIndices": [0, 1, 2, 3]
-  },
-  "runtime": {
-    "shutdownGraceMs": 1000,
-    "enableCpuAffinity": false
   }
 }

@@ -6,6 +6,43 @@
 
 namespace openpni::distributed::app
 {
+    struct DataplaneSection
+    {
+        bool requireRoce = true;
+        bool forceInProcess = false;
+        std::string deviceName;
+        int32_t gidIndex = -1;
+        uint32_t txSlotCount = 0;
+        uint32_t slotCount = 0;
+        uint32_t slotBytes = 0;
+    };
+
+    enum class WorkerSourceType
+    {
+        Synthetic,
+        LsingleReplay,
+        Acquisition
+    };
+
+    struct SourceSection
+    {
+        WorkerSourceType type = WorkerSourceType::Synthetic;
+        std::string lsinglePath;
+        uint64_t promptPairs = 10000;
+        uint64_t delayPairs = 10000;
+        uint64_t delayTimePs = 2'000'000;
+        uint64_t singlesPerSec = 0;
+        size_t pushChunkSingles = 200000;
+        uint32_t peerNodeId = 1;
+        uint16_t localChannel = 0;
+        uint16_t peerChannel = 1;
+    };
+
+    struct RawIngressSection
+    {
+        bool enabled = false;
+    };
+
     struct AcquisitionNodeSection
     {
         std::string masterAddress = "127.0.0.1:50093";
@@ -62,11 +99,12 @@ namespace openpni::distributed::app
         uint32_t crystalsPerChannel = 169 * 4;
         size_t maxPendingChunks = 128;
         size_t batchSize = 1;
-        uint32_t heartbeatIntervalMs = 5000;
+        uint32_t heartbeatIntervalMs = 1000;
         bool waitForStartSignal = true;
         uint32_t waitForStartTimeoutMs = 0;
         uint32_t waitForStartRpcTimeoutMs = 15000;
         uint32_t waitForStartRetryIntervalMs = 1000;
+        DataplaneSection dataplane;
     };
 
     struct RuntimeSection
@@ -87,6 +125,8 @@ namespace openpni::distributed::app
         R2SSection r2s;
         BridgeSection bridge;
         CoinClientSection coinClient;
+        SourceSection source;
+        RawIngressSection rawIngress;
         RuntimeSection runtime;
     };
 
@@ -95,11 +135,13 @@ namespace openpni::distributed::app
         std::string listenAddress = "0.0.0.0:50061";
         uint32_t expectedNodeCount = 1;
         bool autoStartWhenAllRegistered = true;
-        uint32_t startLeadTimeMs = 1000;
+        uint32_t startLeadTimeMs = 0;
         uint32_t waitForStartDefaultTimeoutMs = 30000;
         bool rejectStreamBeforeStart = true;
-        uint32_t statusPrintIntervalMs = 2000;
+        uint32_t statusPrintIntervalMs = 1000;
         uint32_t runSeconds = 0;
+        DataplaneSection dataplane;
+        std::string detectorProfile = "BDM2";
     };
 
     struct CoinProtocolSection

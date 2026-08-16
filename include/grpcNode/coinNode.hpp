@@ -5,6 +5,7 @@
 #include <string>
 
 #include "core/streaming/StreamingCoincidence.hpp"
+#include "protos/coincidence.pb.h"
 
 namespace openpni::distributed::grpcnode
 {
@@ -19,9 +20,16 @@ namespace openpni::distributed::grpcnode
             std::string listenAddress = "0.0.0.0:50051";
             uint32_t expectedNodeCount = 1;
             bool autoStartWhenAllRegistered = true;
-            uint32_t startLeadTimeMs = 1000;
+            uint32_t startLeadTimeMs = 0;
             uint32_t waitForStartDefaultTimeoutMs = 30000;
             bool rejectStreamBeforeStart = true;
+            bool requireRoce = false;
+            bool forceInProcess = false;
+            std::string rdmaDeviceName;
+            int gidIndex = -1;
+            uint32_t slotCount = 0;
+            size_t slotBytes = 0;
+            uint32_t heartbeatTimeoutMs = 3000;
         };
 
         explicit CoinGrpcNode(InitOptions init);
@@ -45,9 +53,13 @@ namespace openpni::distributed::grpcnode
         bool waitForStartSignal(uint32_t timeoutMs = 0) const;
 
         uint32_t connectedNodeCount() const;
+        uint32_t dataplaneOpenCount() const;
         uint32_t expectedNodeCount() const;
         bool startSignalIssued() const;
         uint64_t plannedStartTimeMs() const;
+        bool allProducersComplete() const;
+
+        bool copyStatus(openpni::distributed::coincidence::StatusResponse *out) const;
 
         const streaming::ProcessingStatistics &statistics() const;
 

@@ -210,6 +210,29 @@ namespace
             return grpc::Status::OK;
         }
 
+        grpc::Status WaitForStart(
+            grpc::ServerContext *,
+            const coincidence::WaitForStartRequest *,
+            coincidence::WaitForStartResponse *response) override
+        {
+            response->set_success(true);
+            response->set_start_signal_issued(true);
+            response->set_start_time_ms(0);
+            response->set_message("receiver-only start");
+            return grpc::Status::OK;
+        }
+
+        grpc::Status NotifyProducerComplete(
+            grpc::ServerContext *,
+            const coincidence::NotifyProducerCompleteRequest *,
+            coincidence::NotifyProducerCompleteResponse *response) override
+        {
+            response->set_success(true);
+            response->set_all_complete(true);
+            response->set_message("ok");
+            return grpc::Status::OK;
+        }
+
     private:
         std::mutex m_mutex;
         std::unordered_map<uint32_t, ReceiverNodeStats> m_nodes;

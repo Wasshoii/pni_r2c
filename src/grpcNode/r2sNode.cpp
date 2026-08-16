@@ -146,6 +146,13 @@ namespace openpni::distributed::grpcnode
                     return false;
                 }
 
+                if (!openRdmaDataPlane())
+                {
+                    LOG(ERROR) << "[Node " << m_cfg.nodeId << "] OpenDataPlane / RDMA connect failed";
+                    m_started = false;
+                    return false;
+                }
+
                 if (m_cfg.waitForStartSignal)
                 {
                     uint64_t plannedStartMs = 0;
@@ -155,14 +162,7 @@ namespace openpni::distributed::grpcnode
                         m_started = false;
                         return false;
                     }
-                    waitUntil(plannedStartMs);
-                }
-
-                if (!openRdmaDataPlane())
-                {
-                    LOG(ERROR) << "[Node " << m_cfg.nodeId << "] OpenDataPlane / RDMA connect failed";
-                    m_started = false;
-                    return false;
+                    (void)plannedStartMs;
                 }
 
                 m_running = true;
@@ -247,6 +247,16 @@ namespace openpni::distributed::grpcnode
                 if (m_senderThread.joinable())
                 {
                     m_senderThread.join();
+                }
+
+                if (m_stub)
+                {
+                    grpc::ClientContext context;
+                    coincidence::NotifyProducerCompleteRequest req;
+                    req.set_node_id(m_cfg.nodeId);
+                    req.set_singles_sent(m_singlesSent.load());
+                    coincidence::NotifyProducerCompleteResponse resp;
+                    (void)m_stub->NotifyProducerComplete(&context, req, &resp);
                 }
 
                 if (m_rdmaSender)

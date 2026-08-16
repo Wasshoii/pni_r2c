@@ -48,6 +48,10 @@ public:
         size_t slotBytes = kDefaultSlotBytes;
         bool preferHugePages = true;
         std::string deviceName;
+        bool forceInProcess = false;
+        bool requireRoce = false;
+        int gidIndex = -1;
+        int recvWr = 128;
     };
 
     explicit RdmaNodeRecvSession(Config cfg);
@@ -74,8 +78,11 @@ public:
 private:
     bool prepareVerbs();
     bool prepareInProcess();
-    bool ingestSlot(uint32_t slotIndex, const NotifyEntry &note);
+    bool ingestSlot(uint32_t slotIndex, const NotifyEntry *note);
     bool releaseSlot(uint32_t slotIndex);
+    int pollNotifyRing(int maxSlots);
+    int pollVerbsCompletions(int maxSlots);
+    bool postCreditWrite();
 
     Config m_cfg;
     DataPlaneKind m_kind = DataPlaneKind::InProcess;
@@ -88,6 +95,7 @@ private:
     std::unique_ptr<RdmaConnection> m_conn;
     ibv_mr *m_mr = nullptr;
     RdmaEndpointInfo m_localEp{};
+    RdmaEndpointInfo m_remoteEp{};
     uint64_t m_inprocessHandle = 0;
     uint64_t m_nextExpectedNotifySeq = 1;
     std::atomic<bool> m_ready{false};
@@ -107,6 +115,10 @@ public:
         std::string deviceName;
         bool startPoller = true;
         int pollSleepUs = 10;
+        bool forceInProcess = false;
+        bool requireRoce = false;
+        int gidIndex = -1;
+        int recvWr = 128;
     };
 
     explicit RdmaRecvServer(Config cfg);

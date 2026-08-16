@@ -9,6 +9,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -38,12 +39,20 @@ namespace openpni::distributed::streaming
         uint32_t reconnectDelayMs = 1000;
         uint32_t maxReconnectAttempts = 10;
 
-        uint32_t heartbeatIntervalMs = 5000;
+        uint32_t heartbeatIntervalMs = 1000;
 
         bool waitForStartSignal = true;
         uint32_t waitForStartTimeoutMs = 0;
         uint32_t waitForStartRpcTimeoutMs = 15000;
         uint32_t waitForStartRetryIntervalMs = 1000;
+
+        bool requireRoce = false;
+        bool forceInProcess = false;
+        std::string rdmaDeviceName;
+        int gidIndex = -1;
+        uint32_t txSlotCount = 0;
+        uint32_t requestedSlotCount = 0;
+        uint32_t requestedSlotBytes = 0;
     };
 
     struct PendingChunk
@@ -51,8 +60,18 @@ namespace openpni::distributed::streaming
         uint64_t chunkId = 0;
         uint64_t computerClockMs = 0;
         uint32_t durationMs = 0;
-        std::vector<uint8_t> packed;
+        std::vector<Single> singles;
         uint32_t singlesCount = 0;
+    };
+
+    struct WorkerTelemetry
+    {
+        uint64_t r2sSinglesOut = 0;
+        uint64_t r2sLeaseUsed = 0;
+        uint64_t r2sLeaseCap = 0;
+        uint64_t acqPacketsTotal = 0;
+        uint64_t acqBytesTotal = 0;
+        bool acqRunning = false;
     };
 
     class CoincidenceClient
@@ -76,12 +95,22 @@ namespace openpni::distributed::streaming
 
         bool isRunning() const;
         bool isConnected() const;
+        bool isPaused() const;
+        bool stopProduceRequested() const;
+        uint64_t lastRttMs() const;
+        coincidence::SourceState sourceState() const;
+        uint32_t rdmaSlotCount() const;
+        uint64_t rdmaSlotsInFlight() const;
+        uint32_t rdmaCreditRemaining() const;
 
         bool waitForServerStartSignal(uint32_t timeoutMs = 0);
+        bool notifyProducerComplete();
+        openpni::distributed::dataplane::rdma::DataPlaneKind dataPlaneKind() const;
+
+        void setTelemetryHook(std::function<WorkerTelemetry()> hook);
 
     private:
         static uint64_t nowMs();
-        void waitUntil(uint64_t plannedStartMs);
 
         bool registerNode();
         bool openRdmaDataPlane();
@@ -89,6 +118,9 @@ namespace openpni::distributed::streaming
         bool sendChunk(const PendingChunk &chunk);
         void flushPendingMessages();
         void heartbeatLoop();
+        void applyProducerCommand(coincidence::ProducerCommand command);
+        coincidence::SourceState currentSourceState() const;
+        void fillHeartbeatTelemetry(coincidence::HeartbeatRequest *request);
 
         CoincidenceClientConfig m_config;
 
@@ -105,9 +137,16 @@ namespace openpni::distributed::streaming
 
         std::atomic<bool> m_running{false};
         std::atomic<bool> m_connected{false};
+        std::atomic<bool> m_producerComplete{false};
+        std::atomic<bool> m_paused{false};
+        std::atomic<bool> m_stopProduce{false};
         std::atomic<bool> m_remapSampleLogged{false};
         std::atomic<uint64_t> m_chunkIdCounter{0};
         std::atomic<uint64_t> m_totalSinglesSent{0};
+        std::atomic<bool> m_sendInFlight{false};
+        std::atomic<uint64_t> m_lastRttMs{0};
+        std::mutex m_telemetryMutex;
+        std::function<WorkerTelemetry()> m_telemetryHook;
     };
 
 } // namespace openpni::distributed::streaming

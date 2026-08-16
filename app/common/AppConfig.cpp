@@ -927,6 +927,227 @@ namespace openpni::distributed::app
             return true;
         }
 
+        bool applyDataplaneSection(const Struct &root, DataplaneSection *dp, std::string *err)
+        {
+            const Struct *sec = findObject(root, "dataplane");
+            if (!sec)
+            {
+                return true;
+            }
+            if (!readBool(*sec, "requireRoce", &dp->requireRoce))
+            {
+                return fail(err, "dataplane.requireRoce must be bool");
+            }
+            if (!readBool(*sec, "forceInProcess", &dp->forceInProcess))
+            {
+                return fail(err, "dataplane.forceInProcess must be bool");
+            }
+            if (!readString(*sec, "deviceName", &dp->deviceName))
+            {
+                return fail(err, "dataplane.deviceName must be string");
+            }
+            if (!readInt(*sec, "gidIndex", &dp->gidIndex))
+            {
+                return fail(err, "dataplane.gidIndex must be integer");
+            }
+            if (!readUInt(*sec, "txSlotCount", &dp->txSlotCount))
+            {
+                return fail(err, "dataplane.txSlotCount must be non-negative integer");
+            }
+            if (!readUInt(*sec, "slotCount", &dp->slotCount))
+            {
+                return fail(err, "dataplane.slotCount must be non-negative integer");
+            }
+            if (!readUInt(*sec, "slotBytes", &dp->slotBytes))
+            {
+                return fail(err, "dataplane.slotBytes must be non-negative integer");
+            }
+            return true;
+        }
+
+        bool applyClusterToWorker(const Struct &root, AcqR2SNodeConfig *cfg, std::string *err)
+        {
+            const Struct *sec = findObject(root, "cluster");
+            if (!sec)
+            {
+                return true;
+            }
+            if (!readString(*sec, "serverAddress", &cfg->coinClient.serverAddress))
+            {
+                return fail(err, "cluster.serverAddress must be string");
+            }
+            if (!readUInt(*sec, "nodeId", &cfg->coinClient.nodeId))
+            {
+                return fail(err, "cluster.nodeId must be non-negative integer");
+            }
+            if (!readString(*sec, "nodeAddress", &cfg->coinClient.nodeAddress))
+            {
+                return fail(err, "cluster.nodeAddress must be string");
+            }
+            if (!readUInt(*sec, "channelCount", &cfg->coinClient.channelCount))
+            {
+                return fail(err, "cluster.channelCount must be non-negative integer");
+            }
+            return true;
+        }
+
+        bool applyClusterToCoin(const Struct &root, CoinMasterConfig *cfg, std::string *err)
+        {
+            const Struct *sec = findObject(root, "cluster");
+            if (!sec)
+            {
+                return true;
+            }
+            if (!readString(*sec, "listenAddress", &cfg->coinMaster.listenAddress))
+            {
+                return fail(err, "cluster.listenAddress must be string");
+            }
+            if (!readUInt(*sec, "expectedNodeCount", &cfg->coinMaster.expectedNodeCount))
+            {
+                return fail(err, "cluster.expectedNodeCount must be non-negative integer");
+            }
+            return true;
+        }
+
+        bool applySourceSection(const Struct &root, AcqR2SNodeConfig *cfg, std::string *err)
+        {
+            const Struct *sec = findObject(root, "source");
+            if (!sec)
+            {
+                return true;
+            }
+            std::string type;
+            if (!readString(*sec, "type", &type))
+            {
+                return fail(err, "source.type must be string");
+            }
+            if (!type.empty())
+            {
+                if (type == "synthetic")
+                {
+                    cfg->source.type = WorkerSourceType::Synthetic;
+                }
+                else if (type == "lsingle_replay" || type == "replay")
+                {
+                    cfg->source.type = WorkerSourceType::LsingleReplay;
+                }
+                else if (type == "acquisition")
+                {
+                    cfg->source.type = WorkerSourceType::Acquisition;
+                }
+                else
+                {
+                    return fail(err, "source.type must be synthetic, lsingle_replay, or acquisition");
+                }
+            }
+            if (!readString(*sec, "lsinglePath", &cfg->source.lsinglePath))
+            {
+                return fail(err, "source.lsinglePath must be string");
+            }
+            if (!readUInt(*sec, "promptPairs", &cfg->source.promptPairs))
+            {
+                return fail(err, "source.promptPairs must be non-negative integer");
+            }
+            if (!readUInt(*sec, "delayPairs", &cfg->source.delayPairs))
+            {
+                return fail(err, "source.delayPairs must be non-negative integer");
+            }
+            if (!readUInt(*sec, "delayTimePs", &cfg->source.delayTimePs))
+            {
+                return fail(err, "source.delayTimePs must be non-negative integer");
+            }
+            if (!readUInt(*sec, "singlesPerSec", &cfg->source.singlesPerSec))
+            {
+                return fail(err, "source.singlesPerSec must be non-negative integer");
+            }
+            if (!readUInt(*sec, "pushChunkSingles", &cfg->source.pushChunkSingles))
+            {
+                return fail(err, "source.pushChunkSingles must be non-negative integer");
+            }
+            if (!readUInt(*sec, "peerNodeId", &cfg->source.peerNodeId))
+            {
+                return fail(err, "source.peerNodeId must be non-negative integer");
+            }
+            if (!readUInt(*sec, "localChannel", &cfg->source.localChannel))
+            {
+                return fail(err, "source.localChannel must be non-negative integer");
+            }
+            if (!readUInt(*sec, "peerChannel", &cfg->source.peerChannel))
+            {
+                return fail(err, "source.peerChannel must be non-negative integer");
+            }
+            return true;
+        }
+
+        bool applyRuntimeToCoin(const Struct &root, CoinMasterConfig *cfg, std::string *err)
+        {
+            const Struct *sec = findObject(root, "runtime");
+            if (!sec)
+            {
+                return true;
+            }
+            if (!readUInt(*sec, "runSeconds", &cfg->coinMaster.runSeconds))
+            {
+                return fail(err, "runtime.runSeconds must be non-negative integer");
+            }
+            if (!readUInt(*sec, "statusIntervalMs", &cfg->coinMaster.statusPrintIntervalMs))
+            {
+                return fail(err, "runtime.statusIntervalMs must be non-negative integer");
+            }
+            return true;
+        }
+
+        bool applyRawIngressSection(const Struct &root, AcqR2SNodeConfig *cfg, std::string *err)
+        {
+            const Struct *sec = findObject(root, "rawIngress");
+            if (!sec)
+            {
+                return true;
+            }
+            if (!readBool(*sec, "enabled", &cfg->rawIngress.enabled))
+            {
+                return fail(err, "rawIngress.enabled must be bool");
+            }
+            return true;
+        }
+
+        bool applyCoincidenceProfile(const Struct &root, CoinMasterConfig *cfg, std::string *err)
+        {
+            const Struct *sec = findObject(root, "coincidence");
+            if (!sec)
+            {
+                return true;
+            }
+            if (!readString(*sec, "detectorProfile", &cfg->coinMaster.detectorProfile))
+            {
+                return fail(err, "coincidence.detectorProfile must be string");
+            }
+            if (!readString(*sec, "outputDir", &cfg->aligner.outputDir))
+            {
+                return fail(err, "coincidence.outputDir must be string");
+            }
+            if (const Struct *protoSec = findObject(*sec, "protocol"))
+            {
+                if (!readUInt(*protoSec, "timeWindowPs", &cfg->aligner.coinProtocol.timeWindowPs))
+                {
+                    return fail(err, "coincidence.protocol.timeWindowPs must be non-negative integer");
+                }
+                if (!readUInt(*protoSec, "delayTimePs", &cfg->aligner.coinProtocol.delayTimePs))
+                {
+                    return fail(err, "coincidence.protocol.delayTimePs must be non-negative integer");
+                }
+                if (!readFloat(*protoSec, "energyLowerEV", &cfg->aligner.coinProtocol.energyLowerEV))
+                {
+                    return fail(err, "coincidence.protocol.energyLowerEV must be number");
+                }
+                if (!readFloat(*protoSec, "energyUpperEV", &cfg->aligner.coinProtocol.energyUpperEV))
+                {
+                    return fail(err, "coincidence.protocol.energyUpperEV must be number");
+                }
+            }
+            return true;
+        }
+
     } // namespace
 
     bool loadAcqR2SNodeConfig(const std::string &path, AcqR2SNodeConfig *cfg, std::string *errorMessage)
@@ -946,7 +1167,11 @@ namespace openpni::distributed::app
                applyR2SSection(root, cfg, errorMessage) &&
                applyBridgeSection(root, cfg, errorMessage) &&
                applyCoinClientSection(root, cfg, errorMessage) &&
-               applyRuntimeSection(root, cfg, errorMessage);
+               applyRuntimeSection(root, cfg, errorMessage) &&
+               applyDataplaneSection(root, &cfg->coinClient.dataplane, errorMessage) &&
+               applyClusterToWorker(root, cfg, errorMessage) &&
+               applySourceSection(root, cfg, errorMessage) &&
+               applyRawIngressSection(root, cfg, errorMessage);
     }
 
     bool loadCoinMasterConfig(const std::string &path, CoinMasterConfig *cfg, std::string *errorMessage)
@@ -964,7 +1189,11 @@ namespace openpni::distributed::app
 
         return applyCoinMasterSection(root, cfg, errorMessage) &&
                applyAlignerSection(root, cfg, errorMessage) &&
-               applyAcqControlSection(root, cfg, errorMessage);
+               applyAcqControlSection(root, cfg, errorMessage) &&
+               applyDataplaneSection(root, &cfg->coinMaster.dataplane, errorMessage) &&
+               applyClusterToCoin(root, cfg, errorMessage) &&
+               applyCoincidenceProfile(root, cfg, errorMessage) &&
+               applyRuntimeToCoin(root, cfg, errorMessage);
     }
 
 } // namespace openpni::distributed::app

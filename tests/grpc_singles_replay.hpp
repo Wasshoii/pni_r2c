@@ -17,6 +17,7 @@ struct ReplayOptions
 {
     std::string serverAddress = "127.0.0.1:50061";
     uint32_t nodeId = 0;
+    std::string nodeAddress = "127.0.0.1";
     uint32_t channelCount = 288;
     std::string detectorType = "BDM50100";
 
@@ -32,6 +33,11 @@ struct ReplayOptions
     bool waitForStartSignal = true;
     uint32_t waitForStartTimeoutMs = 60000;
     bool preload = false;
+
+    bool requireRoce = false;
+    bool forceInProcess = false;
+    std::string rdmaDeviceName;
+    int gidIndex = -1;
 };
 
 struct ReplayStats

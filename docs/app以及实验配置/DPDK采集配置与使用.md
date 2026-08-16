@@ -98,7 +98,7 @@ sudo dpdk-devbind.py --status
 
 ## 4.2 app 配置准备
 
-在 `coin_master` 配置文件（如 `app/config/experiments/coin_master_correctness.json`）中，至少配置：
+在 `coin_master` 配置文件（如 `app/config/experiments/no_data_auto/coin_master_dpdk_nodata.auto.json`）中，至少配置：
 
 1. `acquisitionControl.acquisitionAlgorithm`（`socket` 或 `dpdk`）
 2. `acquisitionControl.dpdkCopyThreadNum`
@@ -465,5 +465,5 @@ build/apps/basic/app_dpdk_tx_replayer \
 可行落地方案：
 
 1. Phase-1（低风险）：保留当前全局配置，新增节点级覆盖配置（可选）。
-2. Phase-2（中风险）：在模板生成阶段（three/four_machine）按节点自动渲染 `dpdkBindIps` 与 DPDK 参数。
+2. Phase-2（中风险）：按节点 JSON 覆盖自动渲染 `dpdkBindIps` 与 DPDK 参数。
 3. Phase-3（高性能）：引入 NUMA/CPU 亲和参数并在节点侧执行约束检查。

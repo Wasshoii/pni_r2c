@@ -2,21 +2,18 @@
 
 ## 目录与程序
 
-app 目录包含三个核心可执行程序：
+app 目录包含两个当前实验用的可执行程序：
 
-1. `bin/app_acq_r2s_node`
-   - 采集子节点（受主控下发任务）
-   - 采集 UDP 原始包并完成单事件转换
-   - 通过 CoinClient 流式上送单事件
+1. `bin/app/app_acq_r2s_node`（worker）
+   - 同一进程：采集预留（`IRawIngress` stub）+ R2S + CoincidenceClient RDMA 发送
+   - 本阶段数据源：`synthetic` 或 `lsingle_replay`；`acquisition` 未实现
+   - 启动顺序：Coincidence 握手（Register → OpenDataPlane → Start）后再发数
 
-2. `bin/app_coin_master`
-   - Coin 主控节点
-   - 管理符合服务与流式处理
-   - 可选启用 AcquisitionMaster 对采集节点下发配置与启停控制
+2. `bin/app/app_coin_master`
+   - 符合-only：RDMA recv + 时间对齐 + 符合
+   - **不**启动 AcquisitionMaster（`acquisitionControl.enabled` 会被忽略）
 
-3. `bin/app_udp_raw_replayer`
-   - UDP 回放发包工具
-   - 用于实验联调、压测和稳定性测试
+跨机实验见 `RDMA多机实验.md`。DPDK 无业务 raw 冒烟见 `dpdk_config/run_dpdk_nodata_smoketest.sh`。
 
 ## 配置分层
 
@@ -24,33 +21,37 @@ app 目录包含三个核心可执行程序：
    - `app/config/examples/acq_r2s_node.example.json`
    - `app/config/examples/coin_master.example.json`
 
-2. 实验配置（单机与阶段测试）
-   - `app/config/experiments/*.json`
+2. RDMA 集群（当前）
+   - `app/config/rdma_cluster/*.json`
+   - 启动脚本：`app/experiments/rdma_cluster/`
 
-3. 三机模板（严格分布式）
-   - `app/config/three_machine/templates/*.template.json`
-   - 运行时渲染输出：`app/config/three_machine/runtime/*.json`
+3. DPDK 无数据冒烟（采集预留）
+   - `app/config/experiments/no_data_auto/*.json`
 
 ## 编译
 
 ```bash
-make app-acq-r2s-node
-make app-coin-master
-make app-udp-replayer
+cmake --preset linux-release-apps-basic
+cmake --build --preset build-apps-basic
+
+cmake --preset linux-release-apps-cuda
+cmake --build --preset build-apps-cuda
 ```
 
 ## 基础运行
 
 ```bash
-./bin/app_coin_master --config app/config/examples/coin_master.example.json
-./bin/app_acq_r2s_node --config app/config/examples/acq_r2s_node.example.json
+./bin/app/app_coin_master --config app/config/examples/coin_master.example.json
+./bin/app/app_acq_r2s_node --config app/config/examples/acq_r2s_node.example.json
 ```
+
+无 RNIC 时不要用示例里的 `requireRoce=true`；本机 InProcess 联调需 `dataplane.requireRoce=false` 且 `forceInProcess=true`。
 
 ## 配置校验（dry-run）
 
 ```bash
-./bin/app_coin_master --config app/config/examples/coin_master.example.json --dry-run
-./bin/app_acq_r2s_node --config app/config/examples/acq_r2s_node.example.json --dry-run
+./bin/app/app_coin_master --config app/config/examples/coin_master.example.json --dry-run
+./bin/app/app_acq_r2s_node --config app/config/examples/acq_r2s_node.example.json --dry-run
 ```
 
 ## 关于DPDK
@@ -71,5 +72,6 @@ pkill -KILL -f 'build/apps/(basic/app_coin_master|cuda/app_acq_r2s_node)'
 
 ## 关联文档
 
-1. 实验脚本与性能测试：`实验配置与脚本.md`
-2. 三机严格版：`三机严格版.md`
+1. 跨机 RDMA：`RDMA多机实验.md`
+2. 状态行与调参：`状态机与调试.md`
+3. DPDK 采集：`DPDK采集配置与使用.md`

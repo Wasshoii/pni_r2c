@@ -63,22 +63,25 @@ struct TimestampedSingleChunk {
 
 ### 4. CoincidenceServiceImpl
 
-gRPC 服务实现，提供以下接口：
-- `StreamSingles`: 流式接收单事件数据
-- `GetStatus`: 获取处理状态
-- `Control`: 控制命令（启动/停止/刷新）
-- `RegisterNode`: 节点注册
-- `Heartbeat`: 心跳
+gRPC 控制面。**热路径是 OpenDataPlane + RDMA（或本机 InProcess）**，不是 `StreamSingles`。
+
+编排顺序：
+
+1. `RegisterNode`：校验 nodeId / detector / channels；**不** Start
+2. `OpenDataPlane`：QP/GID/credit_mirror；`requireRoce` 拒绝 InProcess
+3. Start：`registered==N && dataplane_open==N`（或显式 `Control.START`）
+4. `NotifyProducerComplete` / Heartbeat `producer_complete` → drain 对齐器
+
+其它 RPC：`WaitForStart`、`GetStatus`（含 dataplane / producers_complete）、`Control`（含 DRAIN）、`Heartbeat`。
+
+`StreamSingles` 保留在 proto 中但不接线。
 
 ### 5. CoincidenceClient
 
-gRPC 客户端，供分布式节点使用。
+Worker 侧唯一发送入口（`sendSingles` / `acquireTxSlot` 路径）。
 
-**特性：**
-- 异步数据发送
-- 自动重连
-- 心跳机制
-- 缓冲队列管理
+启动：Register → OpenDataPlane → WaitForStart（不再按墙钟 sleep）。
+结束：`notifyProducerComplete()` 等 pending 清空后再通知服务端。
 
 ## 配置参数
 

@@ -11,6 +11,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 #include <glog/logging.h>
 
@@ -290,7 +291,29 @@ namespace
         return true;
     }
 
+    const char *sourceStateName(openpni::distributed::coincidence::SourceState s)
+    {
+        using S = openpni::distributed::coincidence::SourceState;
+        switch (s)
+        {
+        case S::SOURCE_STATE_IDLE:
+            return "idle";
+        case S::SOURCE_STATE_RUNNING:
+            return "run";
+        case S::SOURCE_STATE_PAUSED:
+            return "pause";
+        case S::SOURCE_STATE_COMPLETE:
+            return "done";
+        case S::SOURCE_STATE_ERROR:
+            return "err";
+        default:
+            return "?";
+        }
+    }
+
 } // namespace
+
+namespace coincidence = openpni::distributed::coincidence;
 
 int main(int argc, char **argv)
 {
@@ -314,13 +337,18 @@ int main(int argc, char **argv)
     }
 
     std::cout << "===========================================" << std::endl;
-    std::cout << "  App: Coin Master Node" << std::endl;
+    std::cout << "  App: Coin Master (coincidence-only)" << std::endl;
     std::cout << "===========================================" << std::endl;
     std::cout << "configPath               : " << configPath << std::endl;
     std::cout << "coin.listenAddress       : " << cfg.coinMaster.listenAddress << std::endl;
     std::cout << "coin.expectedNodeCount   : " << cfg.coinMaster.expectedNodeCount << std::endl;
+    std::cout << "coin.detectorProfile     : " << cfg.coinMaster.detectorProfile << std::endl;
+    std::cout << "dataplane.requireRoce    : " << (cfg.coinMaster.dataplane.requireRoce ? "true" : "false") << std::endl;
+    std::cout << "dataplane.deviceName     : " << (cfg.coinMaster.dataplane.deviceName.empty() ? "(auto)" : cfg.coinMaster.dataplane.deviceName) << std::endl;
+    std::cout << "dataplane.gidIndex       : " << cfg.coinMaster.dataplane.gidIndex << std::endl;
     std::cout << "aligner.outputDir        : " << cfg.aligner.outputDir << std::endl;
-    std::cout << "acqControl.enabled       : " << (cfg.acquisitionControl.enabled ? "true" : "false") << std::endl;
+    std::cout << "acqControl.enabled       : " << (cfg.acquisitionControl.enabled ? "true (IGNORED this phase)" : "false")
+              << std::endl;
     std::cout << "acqControl.algorithm     : "
               << (cfg.acquisitionControl.acquisitionAlgorithm == appcfg::AcqControlSection::AcquisitionAlgorithm::Dpdk ? "dpdk" : "socket")
               << std::endl;
@@ -338,8 +366,33 @@ int main(int argc, char **argv)
     std::signal(SIGTERM, onSignal);
 
     streaming::TimeAlignerConfig alignerConfig;
-    alignerConfig.outputDir = cfg.aligner.outputDir;
-    alignerConfig.channelNum = cfg.aligner.channelNum;
+    if (cfg.coinMaster.detectorProfile == "BDM50100_9120" ||
+        cfg.coinMaster.detectorProfile == "BDM50100")
+    {
+        openpni::CoincidenceProtocol proto;
+        proto.timeWindow_ps = cfg.aligner.coinProtocol.timeWindowPs;
+        proto.delayTime_ps = cfg.aligner.coinProtocol.delayTimePs;
+        proto.energyLower_eV = cfg.aligner.coinProtocol.energyLowerEV;
+        proto.energyUpper_eV = cfg.aligner.coinProtocol.energyUpperEV;
+        alignerConfig = streaming::createBDM50100_9120AlignerConfig(cfg.aligner.outputDir, proto);
+    }
+    else
+    {
+        openpni::CoincidenceProtocol proto;
+        proto.timeWindow_ps = cfg.aligner.coinProtocol.timeWindowPs;
+        proto.delayTime_ps = cfg.aligner.coinProtocol.delayTimePs;
+        proto.energyLower_eV = cfg.aligner.coinProtocol.energyLowerEV;
+        proto.energyUpper_eV = cfg.aligner.coinProtocol.energyUpperEV;
+        alignerConfig = streaming::createBDM2AlignerConfig(cfg.aligner.outputDir, proto);
+    }
+    if (!cfg.aligner.outputDir.empty())
+    {
+        alignerConfig.outputDir = cfg.aligner.outputDir;
+    }
+    if (cfg.aligner.channelNum > 0)
+    {
+        alignerConfig.channelNum = cfg.aligner.channelNum;
+    }
     alignerConfig.crystalsPerChannel = cfg.aligner.crystalsPerChannel;
     alignerConfig.networkLatencyMargin_pico = cfg.aligner.networkLatencyMarginPico;
     alignerConfig.processingIntervalMs = cfg.aligner.processingIntervalMs;
@@ -350,7 +403,6 @@ int main(int argc, char **argv)
     alignerConfig.saveDelay = cfg.aligner.saveDelay;
     alignerConfig.listmodeMaxFileSizeBytes = cfg.aligner.maxFileSizeMb * 1024ull * 1024ull;
     alignerConfig.listmodeOverwriteExisting = cfg.aligner.overwriteExisting;
-
     alignerConfig.coinProtocol.timeWindow_ps = cfg.aligner.coinProtocol.timeWindowPs;
     alignerConfig.coinProtocol.delayTime_ps = cfg.aligner.coinProtocol.delayTimePs;
     alignerConfig.coinProtocol.energyLower_eV = cfg.aligner.coinProtocol.energyLowerEV;
@@ -358,24 +410,10 @@ int main(int argc, char **argv)
 
     if (cfg.acquisitionControl.enabled)
     {
-        const size_t effectiveMappedChannels =
-            !cfg.acquisitionControl.detectorSources.empty()
-                ? cfg.acquisitionControl.detectorSources.size()
-                : static_cast<size_t>(cfg.acquisitionControl.channelCount);
-
-        if (effectiveMappedChannels == 0)
-        {
-            std::cerr << "[CoinMaster] invalid acquisitionControl mapping: no detector sources configured" << std::endl;
-            return 3;
-        }
-
-        if (effectiveMappedChannels > alignerConfig.channelNum)
-        {
-            std::cerr << "[CoinMaster] invalid mapping: detector source count=" << effectiveMappedChannels
-                      << " exceeds aligner.channelNum=" << alignerConfig.channelNum
-                      << ". Increase aligner.channelNum or reduce detectorSources." << std::endl;
-            return 3;
-        }
+        std::cerr << "[CoinMaster] acquisitionControl.enabled is ignored in this phase "
+                     "(coin node is coincidence-only). Unset acquisitionControl.enabled."
+                  << std::endl;
+        cfg.acquisitionControl.enabled = false;
     }
 
     grpcnode::CoinGrpcNode::InitOptions coinInit;
@@ -386,6 +424,12 @@ int main(int argc, char **argv)
     coinInit.startLeadTimeMs = cfg.coinMaster.startLeadTimeMs;
     coinInit.waitForStartDefaultTimeoutMs = cfg.coinMaster.waitForStartDefaultTimeoutMs;
     coinInit.rejectStreamBeforeStart = cfg.coinMaster.rejectStreamBeforeStart;
+    coinInit.requireRoce = cfg.coinMaster.dataplane.requireRoce;
+    coinInit.forceInProcess = cfg.coinMaster.dataplane.forceInProcess;
+    coinInit.rdmaDeviceName = cfg.coinMaster.dataplane.deviceName;
+    coinInit.gidIndex = cfg.coinMaster.dataplane.gidIndex;
+    coinInit.slotCount = cfg.coinMaster.dataplane.slotCount;
+    coinInit.slotBytes = cfg.coinMaster.dataplane.slotBytes;
 
     grpcnode::CoinGrpcNode coinNode(coinInit);
     if (!coinNode.start())
@@ -437,6 +481,9 @@ int main(int argc, char **argv)
     uint64_t lastPromptPairs = 0;
     uint64_t lastDelayPairs = 0;
     uint64_t lastAcqRxPackets = 0;
+    std::unordered_map<uint32_t, uint64_t> lastNodeSent;
+    std::unordered_map<uint32_t, uint64_t> lastNodeR2s;
+    std::unordered_map<uint32_t, uint64_t> lastNodeAcq;
 
     while (!g_stopRequested.load(std::memory_order_relaxed))
     {
@@ -475,29 +522,83 @@ int main(int argc, char **argv)
         const double promptRateMps = static_cast<double>(totalPromptPairs - lastPromptPairs) / dtSec / 1e6;
         const double delayRateMps = static_cast<double>(totalDelayPairs - lastDelayPairs) / dtSec / 1e6;
         const double acqRxRateMpps = static_cast<double>(acqTotalRxPackets - lastAcqRxPackets) / dtSec / 1e6;
+        const uint64_t windowsProcessed = stats.chunksProcessed.load(std::memory_order_relaxed);
+        const double avgProcMs = stats.avgProcessingTime_ms.load(std::memory_order_relaxed);
+
+        coincidence::StatusResponse status;
+        const bool haveNodeStatus = coinNode.copyStatus(&status);
+        const uint32_t producersCompleteCount =
+            haveNodeStatus ? status.producers_complete_count() : 0;
 
         std::cout << "[CoinMaster status] connected=" << coinNode.connectedNodeCount() << "/" << coinNode.expectedNodeCount()
+                  << " dataplaneOpen=" << coinNode.dataplaneOpenCount()
                   << " startIssued=" << (coinNode.startSignalIssued() ? "true" : "false")
+                  << " complete=" << producersCompleteCount << "/" << coinNode.expectedNodeCount()
+                  << " producersComplete=" << (coinNode.allProducersComplete() ? "true" : "false")
+                  << " windows=" << windowsProcessed
                   << " totalSinglesReceived=" << totalSinglesReceived
                   << " singlesProcessed=" << totalSinglesProcessed
                   << " promptPairs=" << totalPromptPairs
                   << " delayPairs=" << totalDelayPairs
                   << std::fixed << std::setprecision(3)
                   << std::endl;
-        std::cout << "[CoinMaster Total_acq_msg] acqRxRateMpps=" << acqRxRateMpps
-                  << " acqSpeedMpps=" << acqSpeedMpps
-                  << " acqBandwidthMbps=" << acqBandwidthMbps
-                  << std::fixed << std::setprecision(3)
-                  << std::endl;
+        if (acqMasterStarted)
+        {
+            std::cout << "[CoinMaster Total_acq_msg] acqRxRateMpps=" << acqRxRateMpps
+                      << " acqSpeedMpps=" << acqSpeedMpps
+                      << " acqBandwidthMbps=" << acqBandwidthMbps
+                      << std::fixed << std::setprecision(3)
+                      << std::endl;
+        }
         std::cout << "[CoinMaster Stream_coin] recvRateMSingles=" << recvRateMps
                   << " procRateMSingles=" << procRateMps
                   << " promptRateMPairs=" << promptRateMps
                   << " delayRateMPairs=" << delayRateMps
+                  << " avgProcMs=" << avgProcMs
                   << " memUsedMB=(" << memUsedMB
                   << " / " << memMaxMB << ")"
                   << " memUsagePct=" << memUsagePct << "% "
                   << std::fixed << std::setprecision(3)
                   << std::endl;
+
+        if (haveNodeStatus)
+        {
+            std::cout << "[CoinMaster nodes] id state live rtt_ms age_ms sent_k/s pending credit/slots buf lag r2s_k/s acq_k/s"
+                      << std::endl;
+            for (const auto &node : status.node_stats())
+            {
+                const uint64_t prevSent = lastNodeSent[node.node_id()];
+                const uint64_t prevR2s = lastNodeR2s[node.node_id()];
+                const uint64_t prevAcq = lastNodeAcq[node.node_id()];
+                const double sentRate = static_cast<double>(node.singles_sent_heartbeat() - prevSent) / dtSec / 1e3;
+                const double r2sRate = static_cast<double>(node.r2s_singles_out() - prevR2s) / dtSec / 1e3;
+                const double acqRate = static_cast<double>(node.acq_packets_total() - prevAcq) / dtSec / 1e3;
+                lastNodeSent[node.node_id()] = node.singles_sent_heartbeat();
+                lastNodeR2s[node.node_id()] = node.r2s_singles_out();
+                lastNodeAcq[node.node_id()] = node.acq_packets_total();
+                const int64_t lag = static_cast<int64_t>(node.singles_sent_heartbeat()) -
+                                    static_cast<int64_t>(node.singles_received());
+                std::cout << "  n" << node.node_id()
+                          << " " << sourceStateName(node.source_state())
+                          << " live=" << (node.connected() ? "y" : "n")
+                          << " rtt=" << node.last_rtt_ms()
+                          << " age=" << node.last_heartbeat_age_ms()
+                          << std::fixed << std::setprecision(2)
+                          << " sent=" << sentRate
+                          << " pend=" << node.chunks_pending() << "/" << node.chunks_pending_cap()
+                          << " rdma=" << node.rdma_credit_remaining() << "/" << node.rdma_slot_count()
+                          << " buf=" << node.buffer_size() << "/" << cfg.aligner.maxChunksPerNode
+                          << " lag=" << lag
+                          << " r2s=" << r2sRate
+                          << " acq=" << acqRate
+                          << (node.acq_running() ? " acqOn" : "");
+                if (node.r2s_lease_cap() > 0)
+                {
+                    std::cout << " lease=" << node.r2s_lease_used() << "/" << node.r2s_lease_cap();
+                }
+                std::cout << std::endl;
+            }
+        }
 
         lastTick = nowTick;
         lastSinglesReceived = totalSinglesReceived;
@@ -527,6 +628,12 @@ int main(int argc, char **argv)
                 startSent = true;
                 std::cout << "[CoinMaster] Acquisition START sent at plannedStartMs=" << coinNode.plannedStartTimeMs() << std::endl;
             }
+        }
+
+        if (coinNode.allProducersComplete())
+        {
+            std::cout << "[CoinMaster] all producers complete, stopping..." << std::endl;
+            break;
         }
 
         if (cfg.coinMaster.runSeconds > 0)

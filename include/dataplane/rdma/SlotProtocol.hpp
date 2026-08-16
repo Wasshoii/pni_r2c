@@ -71,4 +71,19 @@ inline void clearSlotHeader(SlotHeader *hdr)
     hdr->version = kSlotVersion;
 }
 
+/** Immediate data carries the 32-bit wrap of producer seq (1-based). */
+inline uint32_t seqToImm(uint64_t seq) noexcept
+{
+    return static_cast<uint32_t>(seq);
+}
+
+inline uint32_t slotIndexFromSeq(uint64_t seq, uint32_t slotCount) noexcept
+{
+    if (slotCount == 0)
+    {
+        return 0;
+    }
+    return static_cast<uint32_t>((seq - 1u) % static_cast<uint64_t>(slotCount));
+}
+
 } // namespace openpni::distributed::dataplane::rdma

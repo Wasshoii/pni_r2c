@@ -48,6 +48,7 @@ namespace
     {
         bool registered = false;
         bool connected = false;
+        bool dataplaneOpen = false;
         uint32_t channelCount = 0;
         std::string detectorType;
         std::string nodeAddress;
@@ -126,6 +127,29 @@ namespace
                     return grpc::Status::OK;
                 }
             }
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                auto &node = m_nodes[request->node_id()];
+                node.connected = true;
+                node.registered = true;
+                node.dataplaneOpen = true;
+                if (m_opts.autoStartWhenAllRegistered)
+                {
+                    uint32_t openCount = 0;
+                    for (const auto &kv : m_nodes)
+                    {
+                        if (kv.second.dataplaneOpen)
+                        {
+                            ++openCount;
+                        }
+                    }
+                    if (openCount >= m_opts.expectedNodeCount)
+                    {
+                        issueStartSignalLocked("all dataplanes open");
+                    }
+                }
+            }
+            m_cv.notify_all();
             const auto local = session->localEndpoint();
             response->set_success(true);
             response->set_data_plane_kind(rdma::toProto(local.kind));
@@ -302,12 +326,6 @@ namespace
                           << " connected=" << connectedNodeCountLocked()
                           << "/" << m_opts.expectedNodeCount << std::endl;
 
-                if (m_opts.autoStartWhenAllRegistered &&
-                    connectedNodeCountLocked() >= m_opts.expectedNodeCount)
-                {
-                    issueStartSignalLocked("all expected nodes registered");
-                }
-
                 fillOrchestrationFields(*response);
             }
 
@@ -332,6 +350,19 @@ namespace
 
             response->set_acknowledged(true);
             response->set_server_timestamp_ms(nowMs());
+            return grpc::Status::OK;
+        }
+
+        grpc::Status NotifyProducerComplete(
+            grpc::ServerContext *,
+            const coincidence::NotifyProducerCompleteRequest *request,
+            coincidence::NotifyProducerCompleteResponse *response) override
+        {
+            response->set_success(true);
+            response->set_producers_complete_count(1);
+            response->set_all_complete(true);
+            response->set_message("ok");
+            (void)request;
             return grpc::Status::OK;
         }
 

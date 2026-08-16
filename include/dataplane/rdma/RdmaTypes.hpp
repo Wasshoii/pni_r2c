@@ -30,6 +30,9 @@ struct RdmaEndpointInfo
     uint32_t notifyCapacity = 0;
     uint32_t consumerRkey = 0;
     uint64_t consumerAddr = 0;
+    /** Sender-local consumerSeq mirror; coin WRITEs credit here (verbs). */
+    uint32_t creditMirrorRkey = 0;
+    uint64_t creditMirrorAddr = 0;
     std::string deviceName;
     uint32_t portNum = 1;
     uint32_t gidIndex = 0;

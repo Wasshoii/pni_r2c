@@ -145,6 +145,7 @@
         "r2c_proto",
         "test_streaming_coincidence",
         "test_local_grpc_coin",
+        "test_rdma_orchestration",
         "test_acquisition_control_init"
       ]
     },

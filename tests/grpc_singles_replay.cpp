@@ -5,32 +5,27 @@
 
 #include "tests/grpc_singles_replay.hpp"
 #include "core/streaming/PackedSingle.hpp"
-#include "dataplane/rdma/RdmaWriteSender.hpp"
+#include "grpcService/CoincidenceClient.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
-#include <memory>
 #include <optional>
 #include <random>
 #include <string>
 #include <thread>
 #include <vector>
-#include "dataplane/rdma/ProtoConvert.hpp"
+
 #include <pni/io/IO.hpp>
 #include <pni/io/ListmodeIO.hpp>
-#include <grpcpp/grpcpp.h>
-
-#include "protos/coincidence.grpc.pb.h"
 
 namespace fs = std::filesystem;
 namespace coincidence = openpni::distributed::coincidence;
-namespace rdma = openpni::distributed::dataplane::rdma;
 using Single = openpni::Single;
-using openpni::distributed::streaming::kPackedSingleSize;
+using openpni::distributed::streaming::CoincidenceClient;
+using openpni::distributed::streaming::CoincidenceClientConfig;
 
 namespace grpc_singles_replay
 {
@@ -88,87 +83,8 @@ namespace
             std::this_thread::sleep_for(std::chrono::duration<double>(sleepSec));
     }
 
-    bool registerNode(coincidence::CoincidenceService::Stub &stub, const ReplayOptions &opts)
-    {
-        grpc::ClientContext ctx;
-        coincidence::RegisterNodeRequest req;
-        req.set_node_id(opts.nodeId);
-        req.set_node_address("127.0.0.1");
-        req.set_channel_count(opts.channelCount);
-        req.set_detector_type(opts.detectorType);
-        coincidence::RegisterNodeResponse resp;
-        const auto status = stub.RegisterNode(&ctx, req, &resp);
-        if (!status.ok())
-        {
-            std::cerr << "[Replay] Node " << opts.nodeId << " RegisterNode failed: "
-                      << status.error_message() << std::endl;
-            return false;
-        }
-        return true;
-    }
-
-    bool waitForStart(coincidence::CoincidenceService::Stub &stub, const ReplayOptions &opts)
-    {
-        if (!opts.waitForStartSignal)
-            return true;
-
-        const auto deadline = std::chrono::steady_clock::now()
-                              + std::chrono::milliseconds(opts.waitForStartTimeoutMs);
-        while (std::chrono::steady_clock::now() < deadline)
-        {
-            grpc::ClientContext ctx;
-            coincidence::WaitForStartRequest req;
-            req.set_node_id(opts.nodeId);
-            req.set_timeout_ms(5000);
-            coincidence::WaitForStartResponse resp;
-            const auto status = stub.WaitForStart(&ctx, req, &resp);
-            if (status.ok() && resp.success() && resp.start_signal_issued())
-                return true;
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        }
-
-        std::cerr << "[Replay] Node " << opts.nodeId << " WaitForStart timeout" << std::endl;
-        return false;
-    }
-
-    bool openRdmaSender(
-        coincidence::CoincidenceService::Stub &stub,
-        const ReplayOptions &opts,
-        std::unique_ptr<rdma::RdmaWriteSender> &outSender)
-    {
-        rdma::RdmaWriteSender::Config sc;
-        sc.nodeId = opts.nodeId;
-        outSender = std::make_unique<rdma::RdmaWriteSender>(std::move(sc));
-
-        rdma::RdmaEndpointInfo localEp{};
-        if (!outSender->prepareLocalEndpoint(&localEp))
-        {
-            std::cerr << "[Replay] Node " << opts.nodeId << " prepareLocalEndpoint failed\n";
-            return false;
-        }
-
-        grpc::ClientContext ctx;
-        coincidence::OpenDataPlaneRequest req;
-        req.set_node_id(opts.nodeId);
-        rdma::fillProtoEndpoint(localEp, req.mutable_node_endpoint());
-        coincidence::OpenDataPlaneResponse resp;
-        const auto status = stub.OpenDataPlane(&ctx, req, &resp);
-        if (!status.ok() || !resp.success())
-        {
-            std::cerr << "[Replay] Node " << opts.nodeId << " OpenDataPlane failed: "
-                      << (status.ok() ? resp.message() : status.error_message()) << std::endl;
-            return false;
-        }
-        if (!outSender->connect(rdma::fromProtoEndpoint(resp.coin_endpoint())))
-        {
-            std::cerr << "[Replay] Node " << opts.nodeId << " RDMA connect failed\n";
-            return false;
-        }
-        return true;
-    }
-
-    bool writeChunkRdma(
-        rdma::RdmaWriteSender &sender,
+    bool sendViaClient(
+        CoincidenceClient &client,
         const ReplayOptions &opts,
         const std::vector<Single> &singles,
         const ChunkSpec &spec,
@@ -179,12 +95,9 @@ namespace
         const uint64_t clockMs = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
-        if (!sender.sendPackedSingles(
-                spec.chunkId,
-                clockMs,
-                0,
-                singles.data() + spec.offset,
-                static_cast<uint32_t>(spec.count)))
+        std::vector<Single> slice(singles.begin() + static_cast<std::ptrdiff_t>(spec.offset),
+                                  singles.begin() + static_cast<std::ptrdiff_t>(spec.offset + spec.count));
+        if (!client.sendSingles(slice, clockMs, 0))
         {
             return false;
         }
@@ -192,6 +105,23 @@ namespace
         chunksSent += 1;
         throttleForRate(spec.count, opts.singlesPerSec, opts.rateJitterFraction, rng);
         return true;
+    }
+
+    CoincidenceClientConfig clientConfigFromOpts(const ReplayOptions &opts)
+    {
+        CoincidenceClientConfig cfg;
+        cfg.serverAddress = opts.serverAddress;
+        cfg.nodeId = opts.nodeId;
+        cfg.nodeAddress = opts.nodeAddress.empty() ? "127.0.0.1" : opts.nodeAddress;
+        cfg.channelCount = opts.channelCount;
+        cfg.detectorType = opts.detectorType;
+        cfg.waitForStartSignal = opts.waitForStartSignal;
+        cfg.waitForStartTimeoutMs = opts.waitForStartTimeoutMs;
+        cfg.requireRoce = opts.requireRoce;
+        cfg.forceInProcess = opts.forceInProcess;
+        cfg.rdmaDeviceName = opts.rdmaDeviceName;
+        cfg.gidIndex = opts.gidIndex;
+        return cfg;
     }
 
     std::vector<ChunkSpec> buildChunkPlan(
@@ -215,16 +145,12 @@ namespace
     }
 
     bool sendPreloaded(
-        coincidence::CoincidenceService::Stub &stub,
+        CoincidenceClient &client,
         const ReplayOptions &opts,
         const std::vector<Single> &preloadedSingles,
         uint64_t &outSinglesSent,
         uint64_t &outChunksSent)
     {
-        std::unique_ptr<rdma::RdmaWriteSender> sender;
-        if (!openRdmaSender(stub, opts, sender))
-            return false;
-
         const uint32_t roundCount = std::max<uint32_t>(1, opts.sendRounds);
         uint64_t nextChunkId = 0;
         const auto plan = buildChunkPlan(
@@ -236,7 +162,7 @@ namespace
 
         for (const auto &spec : plan)
         {
-            if (!writeChunkRdma(*sender, opts, preloadedSingles, spec, rng, chunksSent, singlesSent))
+            if (!sendViaClient(client, opts, preloadedSingles, spec, rng, chunksSent, singlesSent))
             {
                 std::cerr << "[Replay] Node " << opts.nodeId
                           << " RDMA write failed at chunk " << spec.chunkId << std::endl;
@@ -250,16 +176,12 @@ namespace
     }
 
     bool sendStreaming(
-        coincidence::CoincidenceService::Stub &stub,
+        CoincidenceClient &client,
         const ReplayOptions &opts,
         const std::vector<std::string> &files,
         uint64_t &outSinglesSent,
         uint64_t &outChunksSent)
     {
-        std::unique_ptr<rdma::RdmaWriteSender> sender;
-        if (!openRdmaSender(stub, opts, sender))
-            return false;
-
         std::mt19937 rng(opts.nodeId * 7919U + 42U);
         uint64_t chunkId = 0;
         uint64_t singlesSent = 0;
@@ -285,7 +207,7 @@ namespace
                     {
                         const size_t end = std::min(off + chunkSize, allSingles.size());
                         const ChunkSpec spec{off, end - off, chunkId++};
-                        if (!writeChunkRdma(*sender, opts, allSingles, spec, rng, chunksSent, singlesSent))
+                        if (!sendViaClient(client, opts, allSingles, spec, rng, chunksSent, singlesSent))
                             return false;
                     }
                 }
@@ -411,13 +333,12 @@ ReplayStats runNodeReplay(const std::vector<std::string> &filePaths, const Repla
     if (opts.maxFiles > 0 && files.size() > opts.maxFiles)
         files.resize(opts.maxFiles);
 
-    auto channel = grpc::CreateChannel(opts.serverAddress, grpc::InsecureChannelCredentials());
-    auto stub = coincidence::CoincidenceService::NewStub(channel);
-
-    if (!registerNode(*stub, opts))
+    CoincidenceClient client(clientConfigFromOpts(opts));
+    if (!client.start())
+    {
+        std::cerr << "[Replay] Node " << opts.nodeId << " CoincidenceClient start failed" << std::endl;
         return stats;
-    if (!waitForStart(*stub, opts))
-        return stats;
+    }
 
     std::vector<Single> preloadedSingles;
     if (opts.preload)
@@ -425,6 +346,7 @@ ReplayStats runNodeReplay(const std::vector<std::string> &filePaths, const Repla
         if (!preloadSingles(files, opts, preloadedSingles))
         {
             std::cerr << "[Replay] Node " << opts.nodeId << " preload produced no singles" << std::endl;
+            client.stop();
             return stats;
         }
     }
@@ -435,13 +357,19 @@ ReplayStats runNodeReplay(const std::vector<std::string> &filePaths, const Repla
     if (opts.preload)
     {
         ok = sendPreloaded(
-            *stub, opts, preloadedSingles, stats.singlesSent, stats.chunksSent);
+            client, opts, preloadedSingles, stats.singlesSent, stats.chunksSent);
     }
     else
     {
         ok = sendStreaming(
-            *stub, opts, files, stats.singlesSent, stats.chunksSent);
+            client, opts, files, stats.singlesSent, stats.chunksSent);
     }
+
+    if (ok)
+    {
+        (void)client.notifyProducerComplete();
+    }
+    client.stop();
 
     const auto t1 = std::chrono::steady_clock::now();
     stats.elapsedMs = static_cast<uint64_t>(

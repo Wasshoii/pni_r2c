@@ -8,6 +8,7 @@
 
 namespace openpni::distributed::grpcnode
 {
+    namespace coincidence = openpni::distributed::coincidence;
     namespace
     {
         CoinGrpcNode::InitOptions normalizeInit(CoinGrpcNode::InitOptions init)
@@ -29,6 +30,13 @@ namespace openpni::distributed::grpcnode
             cfg.startLeadTimeMs = init.startLeadTimeMs;
             cfg.waitForStartDefaultTimeoutMs = init.waitForStartDefaultTimeoutMs;
             cfg.rejectStreamBeforeStart = init.rejectStreamBeforeStart;
+            cfg.requireRoce = init.requireRoce;
+            cfg.forceInProcess = init.forceInProcess;
+            cfg.deviceName = init.rdmaDeviceName;
+            cfg.gidIndex = init.gidIndex;
+            cfg.slotCount = init.slotCount;
+            cfg.slotBytes = init.slotBytes;
+            cfg.heartbeatTimeoutMs = init.heartbeatTimeoutMs;
             return cfg;
         }
     } // namespace
@@ -75,6 +83,30 @@ namespace openpni::distributed::grpcnode
         uint32_t connectedNodeCount() const
         {
             return server_.getService().connectedNodeCount();
+        }
+
+        uint32_t dataplaneOpenCount() const
+        {
+            return server_.getService().dataplaneOpenCount();
+        }
+
+        bool allProducersComplete() const
+        {
+            return server_.getService().allProducersComplete();
+        }
+
+        bool copyStatus(coincidence::StatusResponse *out) const
+        {
+            if (!out)
+            {
+                return false;
+            }
+            grpc::ServerContext ctx;
+            coincidence::StatusRequest req;
+            req.set_include_node_stats(true);
+            return const_cast<streaming::CoincidenceServiceImpl &>(server_.getService())
+                       .GetStatus(&ctx, &req, out)
+                       .ok();
         }
 
         uint32_t expectedNodeCount() const
@@ -178,6 +210,11 @@ namespace openpni::distributed::grpcnode
         return m_impl->connectedNodeCount();
     }
 
+    uint32_t CoinGrpcNode::dataplaneOpenCount() const
+    {
+        return m_impl->dataplaneOpenCount();
+    }
+
     uint32_t CoinGrpcNode::expectedNodeCount() const
     {
         return m_impl->expectedNodeCount();
@@ -191,6 +228,16 @@ namespace openpni::distributed::grpcnode
     uint64_t CoinGrpcNode::plannedStartTimeMs() const
     {
         return m_impl->plannedStartTimeMs();
+    }
+
+    bool CoinGrpcNode::allProducersComplete() const
+    {
+        return m_impl->allProducersComplete();
+    }
+
+    bool CoinGrpcNode::copyStatus(openpni::distributed::coincidence::StatusResponse *out) const
+    {
+        return m_impl->copyStatus(out);
     }
 
     const streaming::ProcessingStatistics &CoinGrpcNode::statistics() const

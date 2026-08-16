@@ -16,6 +16,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace openpni::distributed::streaming
 {
@@ -26,10 +27,28 @@ namespace openpni::distributed::streaming
         std::string address;
         uint32_t channelCount = 0;
         std::string detectorType;
-        std::chrono::steady_clock::time_point lastHeartbeat;
+        std::chrono::steady_clock::time_point lastHeartbeat{};
         std::atomic<uint64_t> singlesReceived{0};
         std::atomic<uint64_t> chunksReceived{0};
+        std::atomic<uint64_t> singlesSentHeartbeat{0};
         std::atomic<bool> connected{false};
+        std::atomic<bool> dataplaneOpen{false};
+        std::atomic<bool> producerComplete{false};
+        std::atomic<uint32_t> dataPlaneKind{0};
+
+        coincidence::SourceState sourceState = coincidence::SOURCE_STATE_UNSPECIFIED;
+        uint64_t chunksPending = 0;
+        uint64_t chunksPendingCap = 0;
+        uint64_t rdmaSlotsInFlight = 0;
+        uint32_t rdmaSlotCount = 0;
+        uint64_t rdmaCreditRemaining = 0;
+        uint64_t r2sSinglesOut = 0;
+        uint64_t r2sLeaseUsed = 0;
+        uint64_t r2sLeaseCap = 0;
+        uint64_t acqPacketsTotal = 0;
+        uint64_t acqBytesTotal = 0;
+        bool acqRunning = false;
+        uint64_t lastRttMs = 0;
     };
 
     class CoincidenceServiceImpl final : public coincidence::CoincidenceService::Service
@@ -38,10 +57,19 @@ namespace openpni::distributed::streaming
         struct OrchestrationConfig
         {
             uint32_t expectedNodeCount = 0;
+            /** Start only after N nodes are registered AND all have OpenDataPlane. */
             bool autoStartWhenAllRegistered = true;
-            uint32_t startLeadTimeMs = 1000;
+            uint32_t startLeadTimeMs = 0;
             uint32_t waitForStartDefaultTimeoutMs = 30000;
             bool rejectStreamBeforeStart = true;
+
+            bool requireRoce = false;
+            bool forceInProcess = false;
+            std::string deviceName;
+            int gidIndex = -1;
+            uint32_t slotCount = 0;
+            size_t slotBytes = 0;
+            uint32_t heartbeatTimeoutMs = 3000;
         };
 
         explicit CoincidenceServiceImpl(StreamingTimeAligner &aligner);
@@ -97,13 +125,22 @@ namespace openpni::distributed::streaming
             const coincidence::HeartbeatRequest *request,
             coincidence::HeartbeatResponse *response) override;
 
+        grpc::Status NotifyProducerComplete(
+            grpc::ServerContext *context,
+            const coincidence::NotifyProducerCompleteRequest *request,
+            coincidence::NotifyProducerCompleteResponse *response) override;
+
         bool waitForAllNodes(uint32_t timeoutMs = 0) const;
         bool waitForStartSignal(uint32_t timeoutMs = 0) const;
 
         uint32_t expectedNodeCount() const;
         uint32_t connectedNodeCount() const;
+        uint32_t dataplaneOpenCount() const;
+        uint32_t producersCompleteCount() const;
         bool startSignalIssued() const;
         uint64_t plannedStartTimeMs() const;
+        bool allProducersComplete() const;
+        coincidence::DataPlaneKind dataPlaneKind() const;
 
         void notifyServerStopping();
         void clearServerStoppingState();
@@ -118,9 +155,16 @@ namespace openpni::distributed::streaming
         void fillOrchestrationStatusUnlocked(coincidence::WaitForStartResponse *response) const;
 
         bool issueStartSignalLocked(uint64_t startTimeMs, const std::string &reason);
-        void maybeAutoStartAfterRegister();
+        void maybeAutoStartAfterDataplane();
+        void markProducerComplete(uint32_t nodeId, uint64_t singlesSent);
+        void drainAlignerIfAllComplete();
         void updateNodeStats(uint32_t nodeId, uint64_t singlesCount);
         void startRdmaIngest();
+        coincidence::DataPlaneKind observedDataPlaneKindUnlocked() const;
+        coincidence::ProducerCommand pendingProducerCommand() const;
+        void setPendingProducerCommand(coincidence::ProducerCommand command);
+        bool ingestRdmaSlot(const openpni::distributed::dataplane::rdma::SlotChunkView &view,
+                            std::string *errorMessage);
 
         StreamingTimeAligner &m_aligner;
         OrchestrationConfig m_orchestration;
@@ -131,12 +175,29 @@ namespace openpni::distributed::streaming
         mutable std::mutex m_orchestrationMutex;
         mutable std::condition_variable m_orchestrationCv;
         std::unordered_set<uint32_t> m_registeredNodes;
+        std::unordered_set<uint32_t> m_dataplaneOpenNodes;
+        std::unordered_set<uint32_t> m_completeNodes;
 
         std::atomic<bool> m_startSignalIssued{false};
         std::atomic<uint64_t> m_plannedStartTimeMs{0};
         std::atomic<bool> m_serverStopping{false};
+        std::atomic<bool> m_allProducersComplete{false};
+        std::atomic<uint32_t> m_observedDataPlaneKind{0};
+        std::atomic<uint32_t> m_pendingProducerCommand{
+            static_cast<uint32_t>(coincidence::CMD_NONE)};
 
         std::unique_ptr<openpni::distributed::dataplane::rdma::RdmaRecvServer> m_rdmaServer;
+
+        struct PartialChunk
+        {
+            uint64_t chunkId = 0;
+            uint64_t computerClockMs = 0;
+            uint32_t durationMs = 0;
+            std::vector<uint8_t> packed;
+            bool open = false;
+        };
+        std::mutex m_partialMutex;
+        std::unordered_map<uint32_t, PartialChunk> m_partialByNode;
     };
 
     std::unique_ptr<grpc::Server> createCoincidenceServer(

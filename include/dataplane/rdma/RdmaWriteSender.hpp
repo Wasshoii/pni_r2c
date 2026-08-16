@@ -1,10 +1,12 @@
 #pragma once
 
+#include "dataplane/rdma/HugepageArena.hpp"
 #include "dataplane/rdma/RdmaContext.hpp"
 #include "dataplane/rdma/RdmaTypes.hpp"
 #include "dataplane/rdma/SlotProtocol.hpp"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -18,8 +20,16 @@ namespace openpni::distributed::dataplane::rdma
 
 class RdmaNodeRecvSession;
 
+struct TxSlotLease
+{
+    uint32_t localIndex = UINT32_MAX;
+    SlotHeader *header = nullptr;
+    uint8_t *payload = nullptr;
+    size_t payloadCapacity = 0;
+};
+
 /**
- * Node-side RDMA WRITE (or in-process memcpy) sender into coin receive ring.
+ * Node-side RDMA WRITE_WITH_IMM (or in-process memcpy) sender into coin receive ring.
  */
 class RdmaWriteSender
 {
@@ -30,6 +40,10 @@ public:
         std::string deviceName;
         size_t stagingSlotBytes = kDefaultSlotBytes;
         bool preferHugePages = true;
+        bool forceInProcess = false;
+        bool requireRoce = false;
+        int gidIndex = -1;
+        uint32_t txSlotCount = 4;
     };
 
     explicit RdmaWriteSender(Config cfg);
@@ -44,6 +58,7 @@ public:
     /**
      * Pack singles into one or more slots and push ordered by chunkId.
      * singles must be contiguous openpni::Single / 16-byte packed layout.
+     * Copies into a registered TX slot unless `singlesPacked` already lives in the TX arena.
      */
     bool sendPackedSingles(
         uint64_t chunkId,
@@ -52,16 +67,31 @@ public:
         const void *singlesPacked,
         uint32_t singlesCount);
 
+    /** Acquire a registered TX slot (verbs). InProcess synthesizes a heap slot. */
+    bool acquireTxSlot(TxSlotLease *out);
+    /** Write a filled TX slot to the next remote ring slot (waits credit). */
+    bool commitTxSlot(const TxSlotLease &lease, const SlotHeader &hdr, uint32_t singlesCount);
+
     uint64_t singlesSent() const noexcept { return m_singlesSent.load(); }
     uint64_t slotsSent() const noexcept { return m_slotsSent.load(); }
     bool ok() const noexcept { return m_connected; }
+    DataPlaneKind kind() const noexcept { return m_kind; }
+    uint32_t slotCount() const noexcept { return m_slotCount; }
+    size_t slotStride() const noexcept { return m_slotStride; }
+    uint64_t slotsInFlight() const noexcept;
+    uint32_t creditRemaining() const noexcept;
+    std::atomic<uint64_t> *creditMirror() noexcept { return m_creditMirror; }
 
 private:
     bool connectVerbs(const RdmaEndpointInfo &coin);
     bool connectInProcess(const RdmaEndpointInfo &coin);
     bool waitForCredit(uint64_t needProducerSeq);
-    bool writeSlot(uint32_t slotIndex, const SlotHeader &hdr, const void *payload, size_t payloadBytes);
-    bool writeNotify(uint32_t slotIndex, const NotifyEntry &note);
+    bool setupTxArena();
+    bool acquireTxSlotLocked(TxSlotLease *out);
+    bool recycleTxCompletionsLocked();
+    uint8_t *txSlotBase(uint32_t localIndex) noexcept;
+    bool postRemoteSlotLocked(uint32_t localIndex, uint32_t remoteSlot, uint32_t length, uint64_t seq);
+    bool writeSlotInProcess(uint32_t slotIndex, const SlotHeader &hdr, const void *payload, size_t payloadBytes);
 
     Config m_cfg;
     DataPlaneKind m_kind = DataPlaneKind::InProcess;
@@ -69,16 +99,23 @@ private:
 
     std::unique_ptr<RdmaDevice> m_device;
     std::unique_ptr<RdmaConnection> m_conn;
-    // Local staging buffer for one slot (header+payload) registered for verbs.
-    std::vector<uint8_t> m_staging;
-    ibv_mr *m_stagingMr = nullptr;
 
-    // In-process: direct access to remote session ring.
+    HugepageArena m_creditArena;
+    std::atomic<uint64_t> *m_creditMirror = nullptr;
+    ibv_mr *m_creditMr = nullptr;
+
+    HugepageArena m_txArena;
+    ibv_mr *m_txMr = nullptr;
+    uint32_t m_txSlotCount = 0;
+    std::vector<uint8_t> m_txBusy;
+
+    // InProcess acquireTxSlot fallback (not registered).
+    HugepageArena m_inprocessTxArena;
+    std::vector<uint8_t> m_inprocessTxBusy;
+
     std::shared_ptr<RdmaNodeRecvSession> m_localSession;
-
-    // Remote consumer progress (mirrored). For verbs, periodically READ/WRITE;
-    // for in-process, read atomic from ring.
     std::atomic<uint64_t> *m_remoteConsumer = nullptr;
+
     uint64_t m_producerSeq = 0;
     uint32_t m_slotCount = 0;
     size_t m_slotStride = 0;

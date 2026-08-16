@@ -503,12 +503,43 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
           ${R2C_TBB_LIBRARY}
           dl
       )
+
+      add_executable(test_rdma_orchestration
+        tests/test_rdma_orchestration.cpp
+        ${R2C_S2C_COMPUTE_OBJ}
+        $<TARGET_OBJECTS:r2c_grpc_service_coin_objs>
+        $<TARGET_OBJECTS:r2c_dataplane_rdma_objs>
+        $<TARGET_OBJECTS:r2c_grpc_node_coin_objs>
+        $<TARGET_OBJECTS:r2c_core_streaming_objs>
+        $<TARGET_OBJECTS:r2c_proto_objs>
+      )
+      target_include_directories(test_rdma_orchestration
+        PRIVATE
+          "${CMAKE_CURRENT_SOURCE_DIR}"
+          "${R2C_PROTO_GEN_ROOT}"
+          "${R2C_PROTO_GEN_DIR}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include"
+          "${CMAKE_CURRENT_SOURCE_DIR}/src"
+      )
+      target_compile_options(test_rdma_orchestration PRIVATE -O2 -pthread -fopenmp)
+      target_link_libraries(test_rdma_orchestration
+        PRIVATE
+          PkgConfig::R2C_PNI
+          PkgConfig::R2C_GRPC
+          PkgConfig::R2C_IBVERBS
+          PkgConfig::R2C_GLOG
+          OpenMP::OpenMP_CXX
+          ${R2C_TBB_LIBRARY}
+          dl
+      )
     endif()
 
     if(R2C_BUILD_TEST_LOCAL_GRPC_SINGLES_INGRESS)
       add_executable(test_local_grpc_singles_ingress
         tests/test_local_grpc_singles_ingress.cpp
         tests/grpc_singles_replay.cpp
+        src/grpcService/CoincidenceClient.cpp
         $<TARGET_OBJECTS:r2c_dataplane_rdma_objs>
         $<TARGET_OBJECTS:r2c_proto_objs>
       )
@@ -1380,6 +1411,7 @@ r2c_set_output_dir(test_distributed_clock_sync_grpc test)
 r2c_set_output_dir(test_streaming_coincidence test)
 r2c_set_output_dir(test_coincidence_multi_gpu test)
 r2c_set_output_dir(test_local_grpc_coin test)
+r2c_set_output_dir(test_rdma_orchestration test)
 r2c_set_output_dir(test_acquisition_control_init test)
 r2c_set_output_dir(test_pni_r2c test)
 r2c_set_output_dir(test_pni_coin test)
@@ -1415,6 +1447,7 @@ r2c_register_test(test_distributed_clock_sync_grpc core)
 r2c_register_test(test_streaming_coincidence pni)
 r2c_register_test(test_coincidence_multi_gpu cuda)
 r2c_register_test(test_local_grpc_coin pni integration)
+r2c_register_test(test_rdma_orchestration pni integration)
 r2c_register_test(test_acquisition_control_init pni)
 
 r2c_register_test(test_pni_r2c cuda)

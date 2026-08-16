@@ -1,6 +1,8 @@
 #include "dataplane/rdma/RdmaRecvServer.hpp"
 #include "dataplane/rdma/SlotProtocol.hpp"
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstring>
 
@@ -57,6 +59,11 @@ bool RdmaNodeRecvSession::prepare()
         return false;
     }
 
+    if (m_cfg.forceInProcess)
+    {
+        return prepareInProcess();
+    }
+
     if (RdmaDevice::hasVerbsDevice())
     {
         if (prepareVerbs())
@@ -65,7 +72,17 @@ bool RdmaNodeRecvSession::prepare()
             m_ready = true;
             return true;
         }
+        if (m_cfg.requireRoce)
+        {
+            LOG(ERROR) << "RdmaNodeRecvSession verbs prepare failed (requireRoce)";
+            return false;
+        }
         LOG(WARNING) << "RdmaNodeRecvSession verbs prepare failed; falling back to InProcess";
+    }
+    else if (m_cfg.requireRoce)
+    {
+        LOG(ERROR) << "No IB verbs device (requireRoce)";
+        return false;
     }
     else
     {
@@ -78,13 +95,14 @@ bool RdmaNodeRecvSession::prepare()
 bool RdmaNodeRecvSession::prepareVerbs()
 {
     m_device = std::make_unique<RdmaDevice>();
-    if (!m_device->open(m_cfg.deviceName))
+    if (!m_device->open(m_cfg.deviceName, m_cfg.gidIndex))
     {
         m_device.reset();
         return false;
     }
     m_conn = std::make_unique<RdmaConnection>();
-    if (!m_conn->create(*m_device))
+    const int recvWr = std::max(16, m_cfg.recvWr);
+    if (!m_conn->create(*m_device, /*cqEntries=*/1024, /*maxSendWr=*/256, recvWr))
     {
         m_conn.reset();
         m_device.reset();
@@ -158,6 +176,7 @@ RdmaEndpointInfo RdmaNodeRecvSession::localEndpoint() const
 
 bool RdmaNodeRecvSession::acceptRemote(const RdmaEndpointInfo &remote)
 {
+    m_remoteEp = remote;
     if (m_kind == DataPlaneKind::InProcess)
     {
         return true;
@@ -171,7 +190,6 @@ bool RdmaNodeRecvSession::acceptRemote(const RdmaEndpointInfo &remote)
     {
         return false;
     }
-    // Already in INIT from prepareVerbs; complete RTR/RTS.
     if (!m_conn->transitionToRtr(remote, m_device->portNum(), localGid))
     {
         return false;
@@ -180,7 +198,34 @@ bool RdmaNodeRecvSession::acceptRemote(const RdmaEndpointInfo &remote)
     {
         return false;
     }
+    const int toPost = m_conn->maxRecvWr();
+    if (!m_conn->postRecvBatch(toPost))
+    {
+        LOG(ERROR) << "postRecvBatch failed node=" << m_cfg.nodeId;
+        return false;
+    }
     return true;
+}
+
+bool RdmaNodeRecvSession::postCreditWrite()
+{
+    if (m_kind != DataPlaneKind::RdmaRoceV2 || !m_conn || !m_mr)
+    {
+        return true;
+    }
+    if (m_remoteEp.creditMirrorAddr == 0 || m_remoteEp.creditMirrorRkey == 0)
+    {
+        return true;
+    }
+    auto *seq = m_ring.consumerSeq();
+    if (!seq)
+    {
+        return false;
+    }
+    return m_conn->postWrite(
+        seq, static_cast<uint32_t>(sizeof(uint64_t)), m_mr->lkey,
+        m_remoteEp.creditMirrorAddr, m_remoteEp.creditMirrorRkey,
+        /*wrId=*/0x10000ull, /*signaled=*/true);
 }
 
 bool RdmaNodeRecvSession::releaseSlot(uint32_t slotIndex)
@@ -189,10 +234,10 @@ bool RdmaNodeRecvSession::releaseSlot(uint32_t slotIndex)
     std::atomic_thread_fence(std::memory_order_release);
     n->seq = 0;
     m_ring.consumerSeq()->fetch_add(1, std::memory_order_release);
-    return true;
+    return postCreditWrite();
 }
 
-bool RdmaNodeRecvSession::ingestSlot(uint32_t slotIndex, const NotifyEntry &note)
+bool RdmaNodeRecvSession::ingestSlot(uint32_t slotIndex, const NotifyEntry *note)
 {
     if (slotIndex >= m_ring.slotCount())
     {
@@ -203,7 +248,7 @@ bool RdmaNodeRecvSession::ingestSlot(uint32_t slotIndex, const NotifyEntry &note
     {
         return false;
     }
-    if (hdr->singlesCount != note.singlesCount && note.singlesCount != 0)
+    if (note && hdr->singlesCount != note->singlesCount && note->singlesCount != 0)
     {
         LOG(WARNING) << "Notify/header singlesCount mismatch node=" << m_cfg.nodeId;
     }
@@ -222,7 +267,6 @@ bool RdmaNodeRecvSession::ingestSlot(uint32_t slotIndex, const NotifyEntry &note
         return false;
     }
 
-    // Per-slot zero-copy: payload stays in the receive ring for the duration of m_ingest.
     SlotChunkView view;
     view.nodeId = hdr->nodeId;
     view.chunkId = hdr->chunkId;
@@ -239,17 +283,8 @@ bool RdmaNodeRecvSession::ingestSlot(uint32_t slotIndex, const NotifyEntry &note
     return releaseSlot(slotIndex);
 }
 
-int RdmaNodeRecvSession::pollOnce(int maxSlots)
+int RdmaNodeRecvSession::pollNotifyRing(int maxSlots)
 {
-    if (!m_ready.load(std::memory_order_acquire))
-    {
-        return 0;
-    }
-    if (m_mode == IngestMode::Full && !m_ingest)
-    {
-        return 0;
-    }
-
     int done = 0;
     for (int i = 0; i < maxSlots; ++i)
     {
@@ -262,9 +297,8 @@ int RdmaNodeRecvSession::pollOnce(int maxSlots)
             {
                 continue;
             }
-            // Acquire payload after observing notify seq.
             std::atomic_thread_fence(std::memory_order_acquire);
-            if (!ingestSlot(s, note))
+            if (!ingestSlot(s, &note))
             {
                 LOG(ERROR) << "ingest failed node=" << m_cfg.nodeId << " slot=" << s;
                 return done;
@@ -280,6 +314,82 @@ int RdmaNodeRecvSession::pollOnce(int maxSlots)
         }
     }
     return done;
+}
+
+int RdmaNodeRecvSession::pollVerbsCompletions(int maxSlots)
+{
+    if (!m_conn)
+    {
+        return 0;
+    }
+    int done = 0;
+    RdmaWorkCompletion wcs[16];
+    while (done < maxSlots)
+    {
+        const int n = m_conn->pollCq(wcs, 16);
+        if (n < 0)
+        {
+            return done;
+        }
+        if (n == 0)
+        {
+            break;
+        }
+        for (int i = 0; i < n; ++i)
+        {
+            if (wcs[i].status != 0)
+            {
+                LOG(ERROR) << "verbs WC error node=" << m_cfg.nodeId;
+                continue;
+            }
+            if (!wcs[i].isRecv)
+            {
+                continue;
+            }
+            const uint64_t seq = wcs[i].hasImm
+                                     ? static_cast<uint64_t>(wcs[i].immData)
+                                     : 0;
+            m_conn->postRecv(wcs[i].wrId);
+            if (seq == 0 || seq != m_nextExpectedNotifySeq)
+            {
+                LOG(ERROR) << "IMM seq mismatch got=" << seq
+                           << " expected=" << m_nextExpectedNotifySeq
+                           << " node=" << m_cfg.nodeId;
+                continue;
+            }
+            const uint32_t slot = slotIndexFromSeq(seq, m_ring.slotCount());
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (!ingestSlot(slot, nullptr))
+            {
+                LOG(ERROR) << "ingest failed node=" << m_cfg.nodeId << " slot=" << slot;
+                return done;
+            }
+            ++m_nextExpectedNotifySeq;
+            ++done;
+            if (done >= maxSlots)
+            {
+                break;
+            }
+        }
+    }
+    return done;
+}
+
+int RdmaNodeRecvSession::pollOnce(int maxSlots)
+{
+    if (!m_ready.load(std::memory_order_acquire))
+    {
+        return 0;
+    }
+    if (m_mode == IngestMode::Full && !m_ingest)
+    {
+        return 0;
+    }
+    if (m_kind == DataPlaneKind::RdmaRoceV2)
+    {
+        return pollVerbsCompletions(maxSlots);
+    }
+    return pollNotifyRing(maxSlots);
 }
 
 void RdmaNodeRecvSession::close()
@@ -301,6 +411,7 @@ void RdmaNodeRecvSession::close()
     m_device.reset();
     m_ring.reset();
     m_localEp = {};
+    m_remoteEp = {};
 }
 
 RdmaRecvServer::RdmaRecvServer(Config cfg)
@@ -360,6 +471,10 @@ std::shared_ptr<RdmaNodeRecvSession> RdmaRecvServer::ensureSession(uint32_t node
     sc.slotBytes = m_cfg.slotBytes;
     sc.preferHugePages = m_cfg.preferHugePages;
     sc.deviceName = m_cfg.deviceName;
+    sc.forceInProcess = m_cfg.forceInProcess;
+    sc.requireRoce = m_cfg.requireRoce;
+    sc.gidIndex = m_cfg.gidIndex;
+    sc.recvWr = m_cfg.recvWr;
 
     auto session = std::make_shared<RdmaNodeRecvSession>(std::move(sc));
     session->setIngest(m_ingest);

@@ -1,0 +1,27 @@
+{
+  "cluster": {
+    "listenAddress": "0.0.0.0:50061",
+    "expectedNodeCount": 2
+  },
+  "dataplane": {
+    "requireRoce": true,
+    "deviceName": "",
+    "gidIndex": 0
+  },
+  "coincidence": {
+    "detectorProfile": "BDM2",
+    "outputDir": "Data/result/rdma_cluster/correctness",
+    "savePrompt": true,
+    "saveDelay": true,
+    "protocol": {
+      "timeWindowPs": 2000,
+      "delayTimePs": 2000000,
+      "energyLowerEV": 350000.0,
+      "energyUpperEV": 650000.0
+    }
+  },
+  "runtime": {
+    "runSeconds": 0,
+    "statusIntervalMs": 1000
+  }
+}

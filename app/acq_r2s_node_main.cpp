@@ -8,7 +8,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
-#include <sstream>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -112,54 +112,159 @@ namespace
                   << std::endl;
     }
 
-    bool sendSinglesChunked(
-        streaming::CoincidenceClient &client,
-        const std::vector<streaming::Single> &singles,
-        size_t chunkSize,
-        uint64_t singlesPerSec)
+    uint64_t wallClockMs()
     {
-        if (singles.empty())
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
+    }
+
+    void throttleForRate(
+        uint64_t singlesInBatch,
+        uint64_t singlesPerSec,
+        double jitterFraction,
+        std::mt19937 &rng)
+    {
+        if (singlesPerSec == 0 || singlesInBatch == 0)
+        {
+            return;
+        }
+        double effectiveRate = static_cast<double>(singlesPerSec);
+        if (jitterFraction > 0.0)
+        {
+            std::uniform_real_distribution<double> dist(
+                std::max(0.05, 1.0 - jitterFraction), 1.0 + jitterFraction);
+            effectiveRate *= dist(rng);
+        }
+        const double sleepSec = static_cast<double>(singlesInBatch) / effectiveRate;
+        if (sleepSec > 0.0)
+        {
+            std::this_thread::sleep_for(std::chrono::duration<double>(sleepSec));
+        }
+    }
+
+    bool sendOneChunk(
+        streaming::CoincidenceClient &client,
+        const std::vector<streaming::Single> &slice,
+        uint64_t singlesPerSec,
+        double jitterFraction,
+        std::mt19937 &rng)
+    {
+        if (slice.empty())
         {
             return true;
         }
-        chunkSize = std::max<size_t>(1, chunkSize);
-        for (size_t off = 0; off < singles.size(); off += chunkSize)
+        if (g_stopRequested.load(std::memory_order_relaxed) ||
+            client.stopProduceRequested())
         {
-            if (g_stopRequested.load(std::memory_order_relaxed) ||
-                client.stopProduceRequested())
-            {
-                return false;
-            }
-            const size_t n = std::min(chunkSize, singles.size() - off);
-            std::vector<streaming::Single> slice(singles.begin() + static_cast<std::ptrdiff_t>(off),
-                                                singles.begin() + static_cast<std::ptrdiff_t>(off + n));
-            const uint64_t clockMs = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch())
-                    .count());
-            if (!client.sendSingles(slice, clockMs, 0))
-            {
-                return false;
-            }
-            if (singlesPerSec > 0)
-            {
-                const double sleepSec = static_cast<double>(n) / static_cast<double>(singlesPerSec);
-                std::this_thread::sleep_for(std::chrono::duration<double>(sleepSec));
-            }
+            return false;
         }
+        if (!client.sendSingles(slice, wallClockMs(), 0))
+        {
+            return false;
+        }
+        throttleForRate(slice.size(), singlesPerSec, jitterFraction, rng);
         return true;
     }
 
-    std::vector<streaming::Single> loadLsingles(const std::string &path)
+    void applyLocalPause(
+        const appcfg::SourceSection &src,
+        std::chrono::steady_clock::time_point t0,
+        bool *pauseDone)
     {
-        std::vector<streaming::Single> out;
+        if (!pauseDone || *pauseDone || src.pauseAfterMs == 0 || src.pauseDurationMs == 0)
+        {
+            return;
+        }
+        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - t0)
+                                   .count();
+        if (elapsedMs < static_cast<int64_t>(src.pauseAfterMs))
+        {
+            return;
+        }
+        std::cout << "[AcqR2SNode] local pause " << src.pauseDurationMs << " ms after "
+                  << src.pauseAfterMs << " ms" << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(src.pauseDurationMs));
+        *pauseDone = true;
+    }
+
+    bool streamTimeExpired(uint32_t runSeconds, std::chrono::steady_clock::time_point t0)
+    {
+        if (runSeconds == 0)
+        {
+            return false;
+        }
+        const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                 std::chrono::steady_clock::now() - t0)
+                                 .count();
+        return elapsed >= static_cast<int64_t>(runSeconds);
+    }
+
+    bool sendSynthetic(
+        streaming::CoincidenceClient &client,
+        const streaming::SyntheticSpec &spec,
+        const appcfg::SourceSection &src,
+        std::mt19937 &rng)
+    {
+        const size_t chunkSize = std::max<size_t>(1, src.pushChunkSingles);
+        const bool stream = src.mode == appcfg::WorkerSourceMode::Stream;
+        const uint64_t totalEvents = streaming::syntheticEventCount(spec);
+        if (!stream && totalEvents == 0)
+        {
+            return true;
+        }
+
+        std::vector<streaming::Single> buf;
+        uint64_t eventIndex = 0;
+        bool pauseDone = false;
+        const auto t0 = std::chrono::steady_clock::now();
+
+        while (!g_stopRequested.load(std::memory_order_relaxed) &&
+               !client.stopProduceRequested())
+        {
+            if (stream)
+            {
+                if (streamTimeExpired(src.runSeconds, t0))
+                {
+                    break;
+                }
+            }
+            else if (eventIndex >= totalEvents)
+            {
+                break;
+            }
+
+            applyLocalPause(src, t0, &pauseDone);
+
+            size_t n = chunkSize;
+            if (!stream)
+            {
+                n = static_cast<size_t>(std::min<uint64_t>(n, totalEvents - eventIndex));
+            }
+            streaming::fillSyntheticChunk(spec, eventIndex, n, &buf);
+            if (!sendOneChunk(client, buf, src.singlesPerSec, src.rateJitterFraction, rng))
+            {
+                return false;
+            }
+            eventIndex += n;
+        }
+
+        return !g_stopRequested.load(std::memory_order_relaxed) &&
+               !client.stopProduceRequested();
+    }
+
+    std::vector<std::string> listLsingleFiles(const std::string &path)
+    {
         std::vector<std::string> files;
         const fs::path p(path);
         if (fs::is_regular_file(p))
         {
             files.push_back(path);
+            return files;
         }
-        else if (fs::is_directory(p))
+        if (fs::is_directory(p))
         {
             for (const auto &entry : fs::directory_iterator(p))
             {
@@ -170,30 +275,82 @@ namespace
             }
             std::sort(files.begin(), files.end());
         }
+        return files;
+    }
+
+    void appendSegmentSingles(
+        const openpni::io::listmode::ListmodeFileSegment::ListmodeAnyData &data,
+        std::vector<streaming::Single> *out)
+    {
+        const size_t base = out->size();
+        out->resize(base + data.count);
+        for (std::size_t i = 0; i < data.count; ++i)
+        {
+            (*out)[base + i].channelIndex = data.channel_index1[i];
+            (*out)[base + i].crystalIndex = data.local_crystal_index1[i];
+            (*out)[base + i].timevalue_100fs = data.absolute_timestamp1_100fs[i];
+            (*out)[base + i].energy_ev = data.energy1 ? data.energy1[i] : 0.0f;
+        }
+    }
+
+    bool sendReplayBySegment(
+        streaming::CoincidenceClient &client,
+        const std::string &path,
+        const appcfg::SourceSection &src,
+        std::mt19937 &rng)
+    {
+        const auto files = listLsingleFiles(path);
+        if (files.empty())
+        {
+            std::cerr << "[AcqR2SNode] no .lsingle files in " << path << std::endl;
+            return false;
+        }
+
+        const size_t chunkSize = std::max<size_t>(1, src.pushChunkSingles);
+        bool pauseDone = false;
+        const auto t0 = std::chrono::steady_clock::now();
+        std::vector<streaming::Single> slice;
+        slice.reserve(chunkSize);
+
         for (const auto &filePath : files)
         {
             openpni::io::listmode::ListmodeFileInput input;
             input.Open(filePath);
             for (uint32_t segIdx = 0; segIdx < input.SegmentNum(); ++segIdx)
             {
+                if (g_stopRequested.load(std::memory_order_relaxed) ||
+                    client.stopProduceRequested() ||
+                    streamTimeExpired(src.runSeconds, t0))
+                {
+                    return !g_stopRequested.load(std::memory_order_relaxed) &&
+                           !client.stopProduceRequested();
+                }
+
                 auto segment = input.ReadSegment(segIdx);
                 const auto data = segment.GetHAnyData();
                 if (!data.local_crystal_index1 || !data.channel_index1 || !data.absolute_timestamp1_100fs)
                 {
                     continue;
                 }
-                const size_t base = out.size();
-                out.resize(base + data.count);
-                for (std::size_t i = 0; i < data.count; ++i)
+
+                applyLocalPause(src, t0, &pauseDone);
+
+                std::vector<streaming::Single> segmentSingles;
+                appendSegmentSingles(data, &segmentSingles);
+                for (size_t off = 0; off < segmentSingles.size(); off += chunkSize)
                 {
-                    out[base + i].channelIndex = data.channel_index1[i];
-                    out[base + i].crystalIndex = data.local_crystal_index1[i];
-                    out[base + i].timevalue_100fs = data.absolute_timestamp1_100fs[i];
-                    out[base + i].energy_ev = data.energy1 ? data.energy1[i] : 0.0f;
+                    const size_t n = std::min(chunkSize, segmentSingles.size() - off);
+                    slice.assign(
+                        segmentSingles.begin() + static_cast<std::ptrdiff_t>(off),
+                        segmentSingles.begin() + static_cast<std::ptrdiff_t>(off + n));
+                    if (!sendOneChunk(client, slice, src.singlesPerSec, src.rateJitterFraction, rng))
+                    {
+                        return false;
+                    }
                 }
             }
         }
-        return out;
+        return true;
     }
 
     void printUsage(const char *prog)
@@ -346,6 +503,11 @@ int main(int argc, char **argv)
               << std::endl;
     std::cout << "dataplane.gidIndex    : " << cfg.coinClient.dataplane.gidIndex << std::endl;
     std::cout << "source.type           : " << sourceType << std::endl;
+    std::cout << "source.mode           : "
+              << (cfg.source.mode == appcfg::WorkerSourceMode::Stream ? "stream" : "pairs")
+              << std::endl;
+    std::cout << "source.singlesPerSec  : " << cfg.source.singlesPerSec << std::endl;
+    std::cout << "source.runSeconds     : " << cfg.source.runSeconds << std::endl;
     std::cout << "source.lsinglePath    : " << cfg.source.lsinglePath << std::endl;
     std::cout << "source.promptPairs    : " << cfg.source.promptPairs << std::endl;
     std::cout << "source.delayPairs     : " << cfg.source.delayPairs << std::endl;
@@ -424,33 +586,10 @@ int main(int argc, char **argv)
                           : "InProcess")
                   << std::endl;
 
-        std::vector<streaming::Single> singles;
-        if (cfg.source.type == appcfg::WorkerSourceType::Synthetic)
+        if (cfg.source.startDelayMs > 0)
         {
-            streaming::SyntheticSpec spec;
-            spec.nodeId = cfg.coinClient.nodeId;
-            spec.peerNodeId = cfg.source.peerNodeId;
-            spec.localChannel = cfg.source.localChannel;
-            spec.peerChannel = cfg.source.peerChannel;
-            spec.promptPairs = cfg.source.promptPairs;
-            spec.delayPairs = cfg.source.delayPairs;
-            spec.delayTimePs = cfg.source.delayTimePs;
-            singles = streaming::generateSyntheticSingles(spec);
-            std::cout << "[AcqR2SNode] synthetic singles=" << singles.size()
-                      << " promptPairs=" << spec.promptPairs
-                      << " delayPairs=" << spec.delayPairs << std::endl;
-        }
-        else
-        {
-            if (cfg.source.lsinglePath.empty())
-            {
-                std::cerr << "[AcqR2SNode] source.lsinglePath is required for replay" << std::endl;
-                coinClient.stop();
-                return 2;
-            }
-            singles = loadLsingles(cfg.source.lsinglePath);
-            std::cout << "[AcqR2SNode] replay loaded singles=" << singles.size()
-                      << " from " << cfg.source.lsinglePath << std::endl;
+            std::cout << "[AcqR2SNode] startDelayMs=" << cfg.source.startDelayMs << std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(cfg.source.startDelayMs));
         }
 
         const uint32_t statusIntervalMs = cfg.coinClient.heartbeatIntervalMs == 0
@@ -475,8 +614,44 @@ int main(int argc, char **argv)
                 }
             });
 
-        const bool sent = sendSinglesChunked(
-            coinClient, singles, cfg.source.pushChunkSingles, cfg.source.singlesPerSec);
+        std::mt19937 rng{std::random_device{}()};
+        bool sent = false;
+        if (cfg.source.type == appcfg::WorkerSourceType::Synthetic)
+        {
+            streaming::SyntheticSpec spec;
+            spec.nodeId = cfg.coinClient.nodeId;
+            spec.peerNodeId = cfg.source.peerNodeId;
+            spec.localChannel = cfg.source.localChannel;
+            spec.peerChannel = cfg.source.peerChannel;
+            spec.promptPairs = cfg.source.promptPairs;
+            spec.delayPairs = cfg.source.delayPairs;
+            spec.delayTimePs = cfg.source.delayTimePs;
+            std::cout << "[AcqR2SNode] synthetic mode="
+                      << (cfg.source.mode == appcfg::WorkerSourceMode::Stream ? "stream" : "pairs")
+                      << " promptPairs=" << spec.promptPairs
+                      << " delayPairs=" << spec.delayPairs
+                      << " singlesPerSec=" << cfg.source.singlesPerSec
+                      << " runSeconds=" << cfg.source.runSeconds
+                      << std::endl;
+            sent = sendSynthetic(coinClient, spec, cfg.source, rng);
+        }
+        else
+        {
+            if (cfg.source.lsinglePath.empty())
+            {
+                statusStop.store(true, std::memory_order_relaxed);
+                if (statusThread.joinable())
+                {
+                    statusThread.join();
+                }
+                std::cerr << "[AcqR2SNode] source.lsinglePath is required for replay" << std::endl;
+                coinClient.stop();
+                return 2;
+            }
+            std::cout << "[AcqR2SNode] replay by segment from " << cfg.source.lsinglePath << std::endl;
+            sent = sendReplayBySegment(coinClient, cfg.source.lsinglePath, cfg.source, rng);
+        }
+
         statusStop.store(true, std::memory_order_relaxed);
         if (statusThread.joinable())
         {

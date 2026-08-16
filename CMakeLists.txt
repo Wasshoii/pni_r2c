@@ -302,6 +302,21 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
   )
   endif()
 
+  if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN)
+    add_executable(test_synthetic_singles
+      tests/test_synthetic_singles.cpp
+    )
+    target_include_directories(test_synthetic_singles
+      PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+    target_compile_options(test_synthetic_singles PRIVATE -Wall -Wextra -O2)
+    target_link_libraries(test_synthetic_singles
+      PRIVATE
+        PkgConfig::R2C_PNI
+    )
+  endif()
+
   if(R2C_BUILD_TEST_COIN_MULTI_GPU)
     add_executable(test_coincidence_multi_gpu
       tests/test_coincidence_multi_gpu.cpp
@@ -1409,6 +1424,7 @@ r2c_set_output_dir(tool_dpdk_tx_replayer tools)
 r2c_set_output_dir(test_distributed_clock_sync test)
 r2c_set_output_dir(test_distributed_clock_sync_grpc test)
 r2c_set_output_dir(test_streaming_coincidence test)
+r2c_set_output_dir(test_synthetic_singles test)
 r2c_set_output_dir(test_coincidence_multi_gpu test)
 r2c_set_output_dir(test_local_grpc_coin test)
 r2c_set_output_dir(test_rdma_orchestration test)
@@ -1445,6 +1461,7 @@ r2c_register_test(test_distributed_clock_sync core)
 r2c_register_test(test_distributed_clock_sync_grpc core)
 
 r2c_register_test(test_streaming_coincidence pni)
+r2c_register_test(test_synthetic_singles pni)
 r2c_register_test(test_coincidence_multi_gpu cuda)
 r2c_register_test(test_local_grpc_coin pni integration)
 r2c_register_test(test_rdma_orchestration pni integration)

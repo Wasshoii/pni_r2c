@@ -20,6 +20,7 @@
   },
   "source": {
     "type": "synthetic",
+    "mode": "pairs",
     "promptPairs": 10000,
     "delayPairs": 10000,
     "delayTimePs": 2000000,

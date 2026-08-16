@@ -23,9 +23,14 @@
 
 ### source
 - type: `synthetic` | `lsingle_replay` | `acquisition`（本阶段 acquisition 只留 StubRawIngress）。
-- lsinglePath: replay 时的 `.lsingle` 文件或目录。
-- promptPairs / delayPairs / delayTimePs: synthetic 真值规模。
-- singlesPerSec / pushChunkSingles: 发送节流与分块。
+- mode: `pairs`（默认，有限 prompt/delay 对）| `stream`（按时长边生成边发；必须 `singlesPerSec>0` 且 `runSeconds>0`）。
+- lsinglePath: replay 时的 `.lsingle` 文件或目录（按 segment 发送，不一次读入全部）。
+- promptPairs / delayPairs / delayTimePs: synthetic 配对公式；`stream` 下时间戳按同一公式递增。
+- singlesPerSec / pushChunkSingles: 墙钟节流与分块；0 表示尽快发（仅 `pairs`）。
+- rateJitterFraction: `[0,1]`，节流睡眠乘随机因子。
+- startDelayMs: Start 之后、发数之前的墙钟等待（节点错开）。
+- pauseAfterMs / pauseDurationMs: worker 本地停发脉冲（RDMA 不断）；0 关闭。
+- runSeconds: `stream` 发送时长；replay 时也可作为提前结束。
 - peerNodeId / localChannel / peerChannel: 双节点 synthetic 配对。
 
 ### rawIngress
@@ -132,6 +137,7 @@
 ### coincidence
 - detectorProfile: `BDM2` 或 `BDM50100_9120`。
 - outputDir: LMF 输出目录。
+- savePrompt / saveDelay: 是否写 prompt/delay LMF。极限 soak/rate 剖面可关，去掉写盘。
 - protocol: timeWindowPs / delayTimePs / energyLowerEV / energyUpperEV。
 
 ### runtime

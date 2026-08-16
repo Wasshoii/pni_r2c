@@ -36,6 +36,11 @@ namespace openpni::distributed::streaming
         return delayTimePs * 10ULL;
     }
 
+    inline uint64_t syntheticEventCount(const SyntheticSpec &spec)
+    {
+        return spec.promptPairs + spec.delayPairs;
+    }
+
     inline SyntheticTruth syntheticTruth(const SyntheticSpec &spec)
     {
         SyntheticTruth t;
@@ -46,39 +51,54 @@ namespace openpni::distributed::streaming
         return t;
     }
 
+    inline void fillSyntheticEvent(const SyntheticSpec &spec, uint64_t eventIndex, openpni::Single *out)
+    {
+        const uint64_t period = spec.promptPairs + spec.delayPairs;
+        const bool isPeer = spec.nodeId == spec.peerNodeId || spec.nodeId > spec.peerNodeId;
+        const uint16_t channel = isPeer ? spec.peerChannel : spec.localChannel;
+
+        bool isPrompt = true;
+        if (period > 0)
+        {
+            isPrompt = (eventIndex % period) < spec.promptPairs;
+        }
+
+        uint64_t t = spec.startTime_100fs + eventIndex * spec.spacing_100fs;
+        if (!isPrompt && isPeer)
+        {
+            t += delayOffset_100fs(spec.delayTimePs);
+        }
+
+        out->channelIndex = channel;
+        out->crystalIndex = spec.crystalIndex;
+        out->timevalue_100fs = t;
+        out->energy_ev = spec.energyEv;
+    }
+
+    /** Fill [startEventIndex, startEventIndex+count). Stream mode may pass unbounded indices. */
+    inline size_t fillSyntheticChunk(
+        const SyntheticSpec &spec,
+        uint64_t startEventIndex,
+        size_t count,
+        std::vector<openpni::Single> *out)
+    {
+        if (!out)
+        {
+            return 0;
+        }
+        out->assign(count, openpni::Single{});
+        for (size_t i = 0; i < count; ++i)
+        {
+            fillSyntheticEvent(spec, startEventIndex + i, &(*out)[i]);
+        }
+        return count;
+    }
+
     /** Singles for one node. Pairing assumes the peer generates matching timestamps. */
     inline std::vector<openpni::Single> generateSyntheticSingles(const SyntheticSpec &spec)
     {
         std::vector<openpni::Single> out;
-        out.resize(spec.promptPairs + spec.delayPairs);
-        const uint64_t delayOff = delayOffset_100fs(spec.delayTimePs);
-        const bool isPeer = spec.nodeId == spec.peerNodeId || spec.nodeId > spec.peerNodeId;
-        const uint16_t channel = isPeer ? spec.peerChannel : spec.localChannel;
-
-        size_t i = 0;
-        for (uint64_t p = 0; p < spec.promptPairs; ++p)
-        {
-            openpni::Single s{};
-            s.channelIndex = channel;
-            s.crystalIndex = spec.crystalIndex;
-            s.timevalue_100fs = spec.startTime_100fs + p * spec.spacing_100fs;
-            s.energy_ev = spec.energyEv;
-            out[i++] = s;
-        }
-        for (uint64_t d = 0; d < spec.delayPairs; ++d)
-        {
-            openpni::Single s{};
-            s.channelIndex = channel;
-            s.crystalIndex = spec.crystalIndex;
-            uint64_t t = spec.startTime_100fs + (spec.promptPairs + d) * spec.spacing_100fs;
-            if (isPeer)
-            {
-                t += delayOff;
-            }
-            s.timevalue_100fs = t;
-            s.energy_ev = spec.energyEv;
-            out[i++] = s;
-        }
+        fillSyntheticChunk(spec, 0, static_cast<size_t>(syntheticEventCount(spec)), &out);
         return out;
     }
 

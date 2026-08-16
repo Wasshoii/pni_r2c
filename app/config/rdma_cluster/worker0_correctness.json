@@ -1,0 +1,36 @@
+{
+  "cluster": {
+    "serverAddress": "127.0.0.1:50061",
+    "nodeId": 0,
+    "nodeAddress": "127.0.0.1",
+    "channelCount": 4
+  },
+  "dataplane": {
+    "requireRoce": true,
+    "deviceName": "",
+    "gidIndex": 0
+  },
+  "coinClient": {
+    "enabled": true,
+    "detectorType": "BDM2",
+    "channelCount": 4,
+    "waitForStartSignal": true,
+    "waitForStartTimeoutMs": 0,
+    "heartbeatIntervalMs": 1000
+  },
+  "source": {
+    "type": "synthetic",
+    "mode": "pairs",
+    "promptPairs": 100000,
+    "delayPairs": 100000,
+    "delayTimePs": 2000000,
+    "singlesPerSec": 2000000,
+    "pushChunkSingles": 50000,
+    "peerNodeId": 1,
+    "localChannel": 0,
+    "peerChannel": 1
+  },
+  "rawIngress": {
+    "enabled": false
+  }
+}

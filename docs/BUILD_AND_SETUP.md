@@ -98,7 +98,7 @@ ctest --test-dir build/tests/core -L core --output-on-failure
 ```
 
 2. PNI Tests（libpni + tbb + openmp，无 CUDA）
-- 目标：`test_streaming_coincidence`、`test_local_grpc_coin`、`test_acquisition_control_init`
+- 目标：`test_streaming_coincidence`、`test_synthetic_singles`、`test_local_grpc_coin`、`test_acquisition_control_init`、`test_rdma_orchestration`
 
 ```bash
 cmake --preset linux-release-tests-pni
@@ -106,10 +106,11 @@ cmake --build --preset build-tests-pni -j
 ctest --test-dir build/tests/pni -L pni -LE integration --output-on-failure
 ```
 
-说明：`test_local_grpc_coin` 标记为 `integration`，如需运行请显式执行：
+说明：`test_local_grpc_coin`、`test_rdma_orchestration` 标记为 `integration`。后者需要 GPU，验证 RDMA 编排/心跳/分块发送。synthetic 配对公式由 CPU 目标 `test_synthetic_singles` 保证（无 GPU）。跨机 soak 见 `docs/app以及实验配置/测试说明.md`。
 
 ```bash
 ctest --test-dir build/tests/pni -R test_local_grpc_coin --output-on-failure
+ctest --test-dir build/tests/pni -R test_rdma_orchestration --output-on-failure
 ```
 
 3. CUDA Tests（nvcc + libpni + tbb + openmp）

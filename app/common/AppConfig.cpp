@@ -178,6 +178,23 @@ namespace openpni::distributed::app
             return true;
         }
 
+        bool readDouble(const Struct &obj, const std::string &key, double *out)
+        {
+            const Value *v = findField(obj, key);
+            if (!v)
+            {
+                return true;
+            }
+
+            double num = 0.0;
+            if (!numberFromValue(*v, &num))
+            {
+                return false;
+            }
+            *out = num;
+            return true;
+        }
+
         bool readUInt16Array(const Struct &obj, const std::string &key, std::vector<uint16_t> *out)
         {
             const Value *v = findField(obj, key);
@@ -1044,6 +1061,26 @@ namespace openpni::distributed::app
             {
                 return fail(err, "source.lsinglePath must be string");
             }
+            std::string mode;
+            if (!readString(*sec, "mode", &mode))
+            {
+                return fail(err, "source.mode must be string");
+            }
+            if (!mode.empty())
+            {
+                if (mode == "pairs")
+                {
+                    cfg->source.mode = WorkerSourceMode::Pairs;
+                }
+                else if (mode == "stream")
+                {
+                    cfg->source.mode = WorkerSourceMode::Stream;
+                }
+                else
+                {
+                    return fail(err, "source.mode must be pairs or stream");
+                }
+            }
             if (!readUInt(*sec, "promptPairs", &cfg->source.promptPairs))
             {
                 return fail(err, "source.promptPairs must be non-negative integer");
@@ -1064,6 +1101,30 @@ namespace openpni::distributed::app
             {
                 return fail(err, "source.pushChunkSingles must be non-negative integer");
             }
+            if (!readDouble(*sec, "rateJitterFraction", &cfg->source.rateJitterFraction))
+            {
+                return fail(err, "source.rateJitterFraction must be number");
+            }
+            if (cfg->source.rateJitterFraction < 0.0 || cfg->source.rateJitterFraction > 1.0)
+            {
+                return fail(err, "source.rateJitterFraction must be in [0, 1]");
+            }
+            if (!readUInt(*sec, "startDelayMs", &cfg->source.startDelayMs))
+            {
+                return fail(err, "source.startDelayMs must be non-negative integer");
+            }
+            if (!readUInt(*sec, "pauseAfterMs", &cfg->source.pauseAfterMs))
+            {
+                return fail(err, "source.pauseAfterMs must be non-negative integer");
+            }
+            if (!readUInt(*sec, "pauseDurationMs", &cfg->source.pauseDurationMs))
+            {
+                return fail(err, "source.pauseDurationMs must be non-negative integer");
+            }
+            if (!readUInt(*sec, "runSeconds", &cfg->source.runSeconds))
+            {
+                return fail(err, "source.runSeconds must be non-negative integer");
+            }
             if (!readUInt(*sec, "peerNodeId", &cfg->source.peerNodeId))
             {
                 return fail(err, "source.peerNodeId must be non-negative integer");
@@ -1075,6 +1136,17 @@ namespace openpni::distributed::app
             if (!readUInt(*sec, "peerChannel", &cfg->source.peerChannel))
             {
                 return fail(err, "source.peerChannel must be non-negative integer");
+            }
+            if (cfg->source.mode == WorkerSourceMode::Stream)
+            {
+                if (cfg->source.singlesPerSec == 0)
+                {
+                    return fail(err, "source.singlesPerSec must be > 0 when source.mode=stream");
+                }
+                if (cfg->source.runSeconds == 0)
+                {
+                    return fail(err, "source.runSeconds must be > 0 when source.mode=stream");
+                }
             }
             return true;
         }
@@ -1125,6 +1197,14 @@ namespace openpni::distributed::app
             if (!readString(*sec, "outputDir", &cfg->aligner.outputDir))
             {
                 return fail(err, "coincidence.outputDir must be string");
+            }
+            if (!readBool(*sec, "savePrompt", &cfg->aligner.savePrompt))
+            {
+                return fail(err, "coincidence.savePrompt must be bool");
+            }
+            if (!readBool(*sec, "saveDelay", &cfg->aligner.saveDelay))
+            {
+                return fail(err, "coincidence.saveDelay must be bool");
             }
             if (const Struct *protoSec = findObject(*sec, "protocol"))
             {

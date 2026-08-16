@@ -8,26 +8,30 @@
 
 1. `RDMA多机实验.md`
    - Coin 符合-only + worker（synthetic / lsingle_replay）
-   - Register → OpenDataPlane → Start → Drain
-   - preflight 与 2 机 / 3 机启动
+   - 剖面：通路 / 正确性 / 回放 / soak / rate
+   - preflight 与启动脚本
 
-2. `状态机与调试.md`
+2. `测试说明.md`
+   - 进程测试 vs 多机实验
+   - `test_synthetic_singles`（CPU 配对）与 `test_rdma_orchestration` 覆盖范围
+
+3. `状态机与调试.md`
    - Coin 编排 FSM 与 worker SourceState
    - 日志字段与可调参数对照
    - 用 pend / rdma / buf / lag 判瓶颈
 
-3. `app部署与运行.md`
+4. `app部署与运行.md`
    - app 目录结构
    - 可执行程序说明
    - 配置文件分层
    - 编译与基础运行
 
-4. `四机推荐配置.md`
+5. `四机推荐配置.md`
    - 每台机器推荐硬件配置
    - 网卡/网线/交换机要求
    - DPDK 场景网络建议
 
-5. `DPDK采集配置与使用.md`
+6. `DPDK采集配置与使用.md`
    - DPDK 安装后检查项（工具链/网卡/大页）
    - 本项目 DPDK 采集接入要点
    - 联调步骤与常见排障
@@ -36,6 +40,7 @@
 
 1. 先读 `app部署与运行.md`
 2. 跨机 RDMA 读 `RDMA多机实验.md`
-3. 看状态行、调缓冲/槽位读 `状态机与调试.md`
-4. 实验计划硬件选型读 `四机推荐配置.md`
-5. 准备启用 DPDK 采集时读 `DPDK采集配置与使用.md`
+3. 进程测试与剖面判据读 `测试说明.md`
+4. 看状态行、调缓冲/槽位读 `状态机与调试.md`
+5. 实验计划硬件选型读 `四机推荐配置.md`
+6. 准备启用 DPDK 采集时读 `DPDK采集配置与使用.md`

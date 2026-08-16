@@ -3,6 +3,10 @@
 本阶段跨机热路径是 **16 字节 packed singles + RoCE**，不是 raw UDP。  
 Coin 进程只做符合；worker 仍是 `app_acq_r2s_node`（采集预留 + R2S + RDMA 发送），**不要**再拆独立 singles 进程。
 
+采集收发包/落盘（阶段 1）不在本目录。本目录覆盖通路、正确性、回放、接收稳定性与符合极限（阶段 2/3），共用同一条 `worker → RoCE → coin`。
+
+进程测试（握手/PAUSE、不替代跨机 soak）见 [测试说明.md](测试说明.md)。状态行判读见 [状态机与调试.md](状态机与调试.md)。
+
 ## 角色
 
 | 机器 | 进程 | 职责 |
@@ -19,21 +23,42 @@ Coin 进程只做符合；worker 仍是 `app_acq_r2s_node`（采集预留 + R2S 
 3. 全员 `registered==N && dataplane_open==N` 后 Start；`WaitForStart` 表示可以发数（默认不再睡墙钟）
 4. 发完 `NotifyProducerComplete` → drain 对齐器 → 关 LMF
 
-## 配置
+## 配置分层
 
-- Coin：`app/config/rdma_cluster/coin.json`（2 机一台 worker）或 `coin_2workers.json`（3 机两台 worker）
-- Worker：`worker0.json` / `worker1.json`
-
-把 `cluster.serverAddress` / `cluster.nodeAddress` 改成真实 IP。不要使用旧 `__A_MASTER_IP__` 模板。
-
-分层字段：
+把 `cluster.serverAddress` / `cluster.nodeAddress` 改成真实 IP。
 
 - `cluster`：监听或连接地址、nodeId、expectedNodeCount
 - `dataplane`：`requireRoce`、`deviceName`、`gidIndex`
-- `coincidence`：探测器 profile、输出目录、时间/能量窗
-- `source`：`synthetic` / `lsingle_replay` / `acquisition`（预留）
+- `coincidence`：探测器 profile、输出目录、时间/能量窗、`savePrompt` / `saveDelay`
+- `source`：`synthetic` / `lsingle_replay`；`mode=pairs|stream`；速率与错开字段见 `APP_CONFIG.md`
 
 Coin JSON 里的 `acquisitionControl` 会被 warn 并忽略。
+
+## 三种「延迟」（不要混用）
+
+| 含义 | 怎么配 | 测什么 |
+|------|--------|--------|
+| PET delay 窗 | `source.delayTimePs` 与 coin `protocol.delayTimePs` | 正确性里 delay 对 |
+| 发送墙钟 | `singlesPerSec`、`rateJitterFraction`、`startDelayMs`、`pauseAfterMs` | 接收稳定性、偏斜 |
+| 链路 RTT | 跨机真 RoCE | 日志 `rtt`；**不要**用软件 sleep 冒充 NIC |
+
+## 实验剖面
+
+脚本：`bash app/experiments/rdma_cluster/run_coin.sh <coin.json>`，worker 机 `run_worker.sh <worker.json>`。先起 coin，再起 worker。每台 RoCE 机器先跑 `rdma_preflight.sh`。
+
+| 剖面 | Coin JSON | Worker JSON | 看什么 | 通过标准 |
+|------|-----------|-------------|--------|----------|
+| 通路 | `coin.json`（1 worker） | `worker0.json` | handshake、`complete` | sent ≈ received，能 drain |
+| 正确性 | `coin_correctness.json` | `worker0_correctness.json` + `worker1_correctness.json` | 窗内 prompt/delay | 先 sent≈recv，再对数相对真值留容差（几何/能量窗可能小于 `promptPairs`） |
+| 回放 | `coin_correctness.json`（或 `coin_2workers.json`） | `worker_replay.json`（改 `lsinglePath`；第二台对称一份） | 真实分布 | 同正确性；replay **按 segment 读出发送**，速率只用墙钟 `singlesPerSec` |
+| 稳定性 | `coin_soak.json`（不写 LMF） | `worker0_soak.json` + `worker1_soak.json`（错开/pause） | `lag` `buf` credit `live` | 60s 内心跳不断、credit/buf 能恢复；不对对数 |
+| 符合极限 | `coin_rate.json` | `worker0_rate.json` + `worker1_rate.json` | `recvRate` vs `procRate` `memUsagePct` | 稳态吞吐；`lag` 不持续发散；不对对数 |
+
+`source.mode=stream` 必须同时设 `singlesPerSec>0` 与 `runSeconds>0`，边生成边发，避免全量进内存。`pairs` 与 `stream` 都按 `pushChunkSingles` 调用 `fillSyntheticChunk` 再发送。配对公式的单机断言见 `test_synthetic_singles`（[测试说明.md](测试说明.md)）。
+
+`worker1_soak.json` 带 `startDelayMs` 与 `pauseAfterMs`，用来看一节点卡住时 watermark / `buf` 偏斜。
+
+极限剖面 coin `runtime.runSeconds` 略大于 worker `source.runSeconds`，防止 worker 已 complete 而 coin 还在等。
 
 ## 编译
 
@@ -55,26 +80,22 @@ bash app/experiments/rdma_cluster/rdma_preflight.sh
 
 检查 verbs 设备、GID、hugepages。无 RNIC 时本地可用 `dataplane.forceInProcess=true` 且 `requireRoce=false` 做控制面联调，不能当作跨机验收。
 
-## 2 机
+## 2 机通路
 
-1. Coin 机：`bash app/experiments/rdma_cluster/run_coin.sh app/config/rdma_cluster/coin.json`
-2. Worker 机：改 `worker0.json` 的 `serverAddress` 为 Coin IP，然后  
+1. Coin：`bash app/experiments/rdma_cluster/run_coin.sh app/config/rdma_cluster/coin.json`
+2. Worker：改 `worker0.json` 的 `serverAddress` 为 Coin IP，然后  
    `bash app/experiments/rdma_cluster/run_worker.sh app/config/rdma_cluster/worker0.json`
 
-验收：worker 发完退出；coin 日志 `producersComplete=true`；sent ≈ received；进程能 drain 退出。
+## 3 机正确性 / soak / rate
 
-## 3 机（两台 worker synthetic）
-
-1. Coin 用 `coin_2workers.json`（`expectedNodeCount=2`）
-2. 两台 worker 分别用 `worker0.json` / `worker1.json`（`nodeId` 0/1，`peerNodeId` 互指）
-3. 先起 coin，再同时起两个 worker（Start 等两台都 OpenDataPlane）
-
-验收：prompt/delay 相对真值在阈值内（几何/能量窗可能导致不完全等于 `promptPairs`/`delayPairs`；先核对 received 计数）。
+1. 先起对应 `coin_*.json`（`expectedNodeCount=2`）
+2. 两台 worker 分别用 `worker0_*.json` / `worker1_*.json`（改 IP；`peerNodeId` 互指）
+3. Start 等两台都 OpenDataPlane
 
 ## Replay
 
-`source.type=lsingle_replay` 且 `source.lsinglePath` 指向 `.lsingle` 文件或目录。同样必须先握手再推数。
+`source.type=lsingle_replay` 且 `source.lsinglePath` 指向 `.lsingle` 文件或目录。先握手再推数。适合正确性规模的数据；极限 soak 请用 `mode=stream`，不要靠把整个 listmode 读进内存。
 
 ## 状态与调试
 
-周期日志字段、状态机与瓶颈口诀见 [状态机与调试.md](状态机与调试.md)。
+周期日志字段与瓶颈口诀见 [状态机与调试.md](状态机与调试.md)。

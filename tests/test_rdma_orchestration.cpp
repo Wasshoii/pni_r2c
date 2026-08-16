@@ -168,9 +168,22 @@ namespace
         streaming::SyntheticSpec s1 = s0;
         s1.nodeId = 1;
         const auto truth = streaming::syntheticTruth(s0);
-        auto a = streaming::generateSyntheticSingles(s0);
-        auto b = streaming::generateSyntheticSingles(s1);
-        const bool okSend = client0.sendSingles(a, 0, 0) && client1.sendSingles(b, 0, 0);
+        auto sendByChunk = [](streaming::CoincidenceClient &client, const streaming::SyntheticSpec &spec) {
+            const uint64_t total = streaming::syntheticEventCount(spec);
+            const size_t chunk = 37;
+            std::vector<streaming::Single> buf;
+            for (uint64_t off = 0; off < total; off += chunk)
+            {
+                const size_t n = static_cast<size_t>(std::min<uint64_t>(chunk, total - off));
+                streaming::fillSyntheticChunk(spec, off, n, &buf);
+                if (!client.sendSingles(buf, 0, 0))
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+        const bool okSend = sendByChunk(client0, s0) && sendByChunk(client1, s1);
         const bool okDone = client0.notifyProducerComplete() && client1.notifyProducerComplete();
         for (int i = 0; i < 80 && !coin.allProducersComplete(); ++i)
         {
@@ -190,7 +203,7 @@ namespace
                       << " complete=" << complete << "\n";
             return false;
         }
-        const uint64_t sent = a.size() + b.size();
+        const uint64_t sent = streaming::syntheticEventCount(s0) + streaming::syntheticEventCount(s1);
         std::cout << "[PASS] dual_node_synthetic received=" << received
                   << " sent=" << sent
                   << " prompt=" << prompt << " (truth " << truth.promptPairs << ")"
@@ -547,6 +560,86 @@ namespace
         std::cout << "[PASS] heartbeat_telemetry_and_pause sent=" << sentAtPause << "\n";
         return true;
     }
+
+    bool testStreamingSyntheticChunksInProcess()
+    {
+        streaming::SyntheticSpec spec;
+        spec.nodeId = 0;
+        spec.peerNodeId = 1;
+        spec.promptPairs = 1000;
+        spec.delayPairs = 0;
+        const auto full = streaming::generateSyntheticSingles(spec);
+        std::vector<streaming::Single> chunk0;
+        std::vector<streaming::Single> chunk1;
+        streaming::fillSyntheticChunk(spec, 0, 64, &chunk0);
+        streaming::fillSyntheticChunk(spec, 64, 64, &chunk1);
+        if (full.size() != 1000 || chunk0.size() != 64 || chunk1.size() != 64)
+        {
+            std::cerr << "chunk sizes unexpected full=" << full.size() << "\n";
+            return false;
+        }
+        for (size_t i = 0; i < 64; ++i)
+        {
+            if (chunk0[i].timevalue_100fs != full[i].timevalue_100fs ||
+                chunk1[i].timevalue_100fs != full[64 + i].timevalue_100fs)
+            {
+                std::cerr << "fillSyntheticChunk timestamps differ from generateSyntheticSingles\n";
+                return false;
+            }
+        }
+
+        const std::string addr = "127.0.0.1:51067";
+        grpcnode::CoinGrpcNode::InitOptions init;
+        init.alignerConfig = makeAligner("/tmp/r2c_orch_stream_chunks");
+        init.listenAddress = addr;
+        init.expectedNodeCount = 1;
+        init.autoStartWhenAllRegistered = true;
+        init.startLeadTimeMs = 0;
+        init.forceInProcess = true;
+        init.requireRoce = false;
+        grpcnode::CoinGrpcNode coin(init);
+        if (!coin.start())
+        {
+            std::cerr << "stream-chunk coin start failed\n";
+            return false;
+        }
+
+        streaming::CoincidenceClientConfig cc;
+        cc.serverAddress = addr;
+        cc.nodeId = 0;
+        cc.nodeAddress = "127.0.0.1";
+        cc.channelCount = 4;
+        cc.detectorType = "BDM2";
+        cc.forceInProcess = true;
+        cc.requireRoce = false;
+        cc.waitForStartTimeoutMs = 15000;
+        streaming::CoincidenceClient client(cc);
+        if (!client.start())
+        {
+            std::cerr << "stream-chunk client start failed\n";
+            coin.stop();
+            return false;
+        }
+
+        const bool okSend = client.sendSingles(chunk0, 0, 0) && client.sendSingles(chunk1, 0, 0);
+        const uint64_t sent = client.getTotalSinglesSent();
+        const bool okDone = client.notifyProducerComplete();
+        for (int i = 0; i < 80 && !coin.allProducersComplete(); ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        const bool complete = coin.allProducersComplete();
+        client.stop();
+        coin.stop();
+        if (!okSend || !okDone || !complete || sent != 128)
+        {
+            std::cerr << "stream-chunk send failed send=" << okSend << " done=" << okDone
+                      << " complete=" << complete << " sent=" << sent << "\n";
+            return false;
+        }
+        std::cout << "[PASS] streaming_synthetic_chunks sent=" << sent << "\n";
+        return true;
+    }
 } // namespace
 
 int main(int argc, char **argv)
@@ -567,6 +660,8 @@ int main(int argc, char **argv)
     if (!testStubRawIngressIdle())
         rc = 1;
     if (!testHeartbeatTelemetryAndPause())
+        rc = 1;
+    if (!testStreamingSyntheticChunksInProcess())
         rc = 1;
     return rc;
 }

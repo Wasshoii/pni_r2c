@@ -24,15 +24,27 @@ namespace openpni::distributed::app
         Acquisition
     };
 
+    enum class WorkerSourceMode
+    {
+        Pairs,
+        Stream
+    };
+
     struct SourceSection
     {
         WorkerSourceType type = WorkerSourceType::Synthetic;
+        WorkerSourceMode mode = WorkerSourceMode::Pairs;
         std::string lsinglePath;
         uint64_t promptPairs = 10000;
         uint64_t delayPairs = 10000;
         uint64_t delayTimePs = 2'000'000;
         uint64_t singlesPerSec = 0;
         size_t pushChunkSingles = 200000;
+        double rateJitterFraction = 0.0;
+        uint32_t startDelayMs = 0;
+        uint32_t pauseAfterMs = 0;
+        uint32_t pauseDurationMs = 0;
+        uint32_t runSeconds = 0;
         uint32_t peerNodeId = 1;
         uint16_t localChannel = 0;
         uint16_t peerChannel = 1;

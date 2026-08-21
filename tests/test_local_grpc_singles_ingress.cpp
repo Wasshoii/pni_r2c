@@ -694,15 +694,20 @@ int main(int argc, char **argv)
                   << " (maxSingles/slot=" << maxPerSlot << ")" << std::endl;
         std::cout << "slotsPerChunk : ~" << slotsPerChunk;
         if (slotsPerChunk > 1)
-            std::cout << " (multi-slot; Full=per-slot zero-copy, no host reassembly)";
+            std::cout << " (multi-slot)";
         else
             std::cout << " (fits in one slot)";
         std::cout << std::endl;
         std::cout << "recvPath      : " << (opts.sendOnly
             ? "CreditOnly (diagnostic; no payload read)"
-            : "Full per-slot zero-copy into ring") << std::endl;
-        std::cout << "note          : InProcess localhost is diagnostic only; "
-                     "30 GiB/s needs dual-host RoCE" << std::endl;
+            : "Full ingest (count + EOF/chunkId; no payload copy)") << std::endl;
+        if (opts.preload)
+        {
+            std::cout << "preload send  : view into RAM (no slice / PendingChunk copy)" << std::endl;
+            std::cout << "InProcess     : one memcpy into recv ring (skip TX staging)" << std::endl;
+        }
+        std::cout << "note          : InProcess localhost is a memcpy ceiling; "
+                     "RoCE needs a dual-host RNIC" << std::endl;
     }
     std::cout << "singlesPerSec : " << opts.singlesPerSec << std::endl;
     std::cout << "preload       : " << (opts.preload ? "true" : "false") << std::endl;

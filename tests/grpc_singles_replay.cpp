@@ -14,6 +14,7 @@
 #include <iostream>
 #include <optional>
 #include <random>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -86,18 +87,21 @@ namespace
     bool sendViaClient(
         CoincidenceClient &client,
         const ReplayOptions &opts,
-        const std::vector<Single> &singles,
+        std::span<const Single> singles,
         const ChunkSpec &spec,
         std::mt19937 &rng,
         uint64_t &chunksSent,
-        uint64_t &singlesSent)
+        uint64_t &singlesSent,
+        bool borrow)
     {
         const uint64_t clockMs = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
-        std::vector<Single> slice(singles.begin() + static_cast<std::ptrdiff_t>(spec.offset),
-                                  singles.begin() + static_cast<std::ptrdiff_t>(spec.offset + spec.count));
-        if (!client.sendSingles(slice, clockMs, 0))
+        const std::span<const Single> view = singles.subspan(spec.offset, spec.count);
+        const bool ok = borrow
+                            ? client.sendSinglesView(view, clockMs, 0)
+                            : client.sendSingles(view, clockMs, 0);
+        if (!ok)
         {
             return false;
         }
@@ -162,7 +166,8 @@ namespace
 
         for (const auto &spec : plan)
         {
-            if (!sendViaClient(client, opts, preloadedSingles, spec, rng, chunksSent, singlesSent))
+            if (!sendViaClient(client, opts, preloadedSingles, spec, rng, chunksSent, singlesSent,
+                               /*borrow=*/true))
             {
                 std::cerr << "[Replay] Node " << opts.nodeId
                           << " RDMA write failed at chunk " << spec.chunkId << std::endl;
@@ -207,7 +212,8 @@ namespace
                     {
                         const size_t end = std::min(off + chunkSize, allSingles.size());
                         const ChunkSpec spec{off, end - off, chunkId++};
-                        if (!sendViaClient(client, opts, allSingles, spec, rng, chunksSent, singlesSent))
+                        if (!sendViaClient(client, opts, allSingles, spec, rng, chunksSent, singlesSent,
+                                           /*borrow=*/false))
                             return false;
                     }
                 }
@@ -367,13 +373,18 @@ ReplayStats runNodeReplay(const std::vector<std::string> &filePaths, const Repla
 
     if (ok)
     {
-        (void)client.notifyProducerComplete();
+        ok = client.waitUntilIdle();
     }
-    client.stop();
 
     const auto t1 = std::chrono::steady_clock::now();
     stats.elapsedMs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+
+    if (ok)
+    {
+        (void)client.notifyProducerComplete();
+    }
+    client.stop();
     stats.success = ok;
     return stats;
 }

@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <iostream>
 #include <random>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -722,7 +723,8 @@ int main(int argc, char **argv)
 
     if (cfg.coinClient.enabled)
     {
-        r2sConfig.onSinglesReady = [&coinClient](std::vector<r2s::Single> &&singles, uint64_t clockMs, uint32_t durationMs) -> bool
+        r2sConfig.onSinglesSpanReady = [&coinClient](std::span<const r2s::Single> singles,
+                                                     uint64_t clockMs, uint32_t durationMs) -> bool
         {
             return coinClient.sendSingles(singles, clockMs, durationMs);
         };

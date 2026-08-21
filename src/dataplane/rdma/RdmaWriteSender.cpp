@@ -2,9 +2,9 @@
 #include "dataplane/rdma/RdmaRecvServer.hpp"
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cstring>
+#include <mutex>
 #include <new>
 #include <thread>
 
@@ -363,7 +363,7 @@ bool RdmaWriteSender::recycleTxCompletionsLocked()
     return true;
 }
 
-bool RdmaWriteSender::acquireTxSlotLocked(TxSlotLease *out)
+bool RdmaWriteSender::tryAcquireTxSlotLocked(TxSlotLease *out)
 {
     if (!out)
     {
@@ -374,29 +374,38 @@ bool RdmaWriteSender::acquireTxSlotLocked(TxSlotLease *out)
     {
         return false;
     }
+    if (m_kind == DataPlaneKind::RdmaRoceV2 && !recycleTxCompletionsLocked())
+    {
+        return false;
+    }
+    for (uint32_t i = 0; i < m_txSlotCount; ++i)
+    {
+        if (busy[i] == 0)
+        {
+            busy[i] = 1;
+            uint8_t *base = txSlotBase(i);
+            if (!base)
+            {
+                busy[i] = 0;
+                return false;
+            }
+            out->localIndex = i;
+            out->header = reinterpret_cast<SlotHeader *>(base);
+            out->payload = base + kSlotHeaderBytes;
+            out->payloadCapacity = m_slotStride - kSlotHeaderBytes;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool RdmaWriteSender::acquireTxSlotLocked(TxSlotLease *out)
+{
     for (;;)
     {
-        if (m_kind == DataPlaneKind::RdmaRoceV2 && !recycleTxCompletionsLocked())
+        if (tryAcquireTxSlotLocked(out))
         {
-            return false;
-        }
-        for (uint32_t i = 0; i < m_txSlotCount; ++i)
-        {
-            if (busy[i] == 0)
-            {
-                busy[i] = 1;
-                uint8_t *base = txSlotBase(i);
-                if (!base)
-                {
-                    busy[i] = 0;
-                    return false;
-                }
-                out->localIndex = i;
-                out->header = reinterpret_cast<SlotHeader *>(base);
-                out->payload = base + kSlotHeaderBytes;
-                out->payloadCapacity = m_slotStride - kSlotHeaderBytes;
-                return true;
-            }
+            return true;
         }
         std::this_thread::sleep_for(std::chrono::microseconds(10));
         if (!m_connected)
@@ -408,12 +417,38 @@ bool RdmaWriteSender::acquireTxSlotLocked(TxSlotLease *out)
 
 bool RdmaWriteSender::acquireTxSlot(TxSlotLease *out)
 {
-    std::lock_guard<std::mutex> lock(m_sendMutex);
-    if (!m_connected)
+    for (;;)
     {
-        return false;
+        std::unique_lock<std::mutex> lock(m_sendMutex);
+        if (!m_connected)
+        {
+            return false;
+        }
+        if (tryAcquireTxSlotLocked(out))
+        {
+            return true;
+        }
+        lock.unlock();
+        std::this_thread::sleep_for(std::chrono::microseconds(10));
     }
-    return acquireTxSlotLocked(out);
+}
+
+void RdmaWriteSender::clearTxBusyLocked(uint32_t localIndex)
+{
+    if (m_kind == DataPlaneKind::RdmaRoceV2 && localIndex < m_txBusy.size())
+    {
+        m_txBusy[localIndex] = 0;
+    }
+    else if (localIndex < m_inprocessTxBusy.size())
+    {
+        m_inprocessTxBusy[localIndex] = 0;
+    }
+}
+
+void RdmaWriteSender::abortTxSlot(const TxSlotLease &lease)
+{
+    std::lock_guard<std::mutex> lock(m_sendMutex);
+    clearTxBusyLocked(lease.localIndex);
 }
 
 bool RdmaWriteSender::postRemoteSlotLocked(uint32_t localIndex, uint32_t remoteSlot,
@@ -454,62 +489,76 @@ bool RdmaWriteSender::writeSlotInProcess(uint32_t slotIndex, const SlotHeader &h
 
 bool RdmaWriteSender::commitTxSlot(const TxSlotLease &lease, const SlotHeader &hdr, uint32_t singlesCount)
 {
-    std::lock_guard<std::mutex> lock(m_sendMutex);
-    if (!m_connected || lease.header == nullptr)
+    for (;;)
     {
-        return false;
-    }
-    if (!waitForCredit(m_producerSeq + 1))
-    {
-        if (m_kind == DataPlaneKind::RdmaRoceV2 && lease.localIndex < m_txBusy.size())
+        std::unique_lock<std::mutex> lock(m_sendMutex);
+        if (!m_connected || lease.header == nullptr)
         {
-            m_txBusy[lease.localIndex] = 0;
+            clearTxBusyLocked(lease.localIndex);
+            return false;
         }
-        else if (lease.localIndex < m_inprocessTxBusy.size())
-        {
-            m_inprocessTxBusy[lease.localIndex] = 0;
-        }
-        return false;
-    }
-    const uint32_t slotIndex = static_cast<uint32_t>(m_producerSeq % m_slotCount);
-    SlotHeader local = hdr;
-    local.magic = kSlotMagic;
-    local.version = kSlotVersion;
-    local.nodeId = m_cfg.nodeId;
-    local.singlesCount = singlesCount;
-    local.seq = static_cast<uint32_t>(m_producerSeq + 1);
-    *lease.header = local;
 
-    const size_t payloadBytes = static_cast<size_t>(singlesCount) * kPackedSingleBytes;
-    if (m_kind == DataPlaneKind::InProcess)
-    {
-        if (!writeSlotInProcess(slotIndex, local, lease.payload, payloadBytes))
+        uint64_t consumer = 0;
+        if (m_kind == DataPlaneKind::InProcess && m_remoteConsumer)
         {
-            if (lease.localIndex < m_inprocessTxBusy.size())
+            consumer = m_remoteConsumer->load(std::memory_order_acquire);
+        }
+        else if (m_kind == DataPlaneKind::RdmaRoceV2 && m_creditMirror)
+        {
+            consumer = m_creditMirror->load(std::memory_order_acquire);
+        }
+        else
+        {
+            clearTxBusyLocked(lease.localIndex);
+            return false;
+        }
+
+        const uint64_t need = m_producerSeq + 1;
+        if (need - consumer >= static_cast<uint64_t>(m_slotCount))
+        {
+            if (m_kind == DataPlaneKind::RdmaRoceV2 && !recycleTxCompletionsLocked())
             {
-                m_inprocessTxBusy[lease.localIndex] = 0;
+                clearTxBusyLocked(lease.localIndex);
+                return false;
             }
-            return false;
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+            continue;
         }
-        auto &busy = m_inprocessTxBusy;
-        if (lease.localIndex < busy.size())
-        {
-            busy[lease.localIndex] = 0;
-        }
-    }
-    else
-    {
-        const uint32_t length = static_cast<uint32_t>(kSlotHeaderBytes + payloadBytes);
-        if (!postRemoteSlotLocked(lease.localIndex, slotIndex, length, m_producerSeq + 1))
-        {
-            return false;
-        }
-    }
 
-    ++m_producerSeq;
-    m_slotsSent.fetch_add(1, std::memory_order_relaxed);
-    m_singlesSent.fetch_add(singlesCount, std::memory_order_relaxed);
-    return true;
+        const uint32_t slotIndex = static_cast<uint32_t>(m_producerSeq % m_slotCount);
+        SlotHeader local = hdr;
+        local.magic = kSlotMagic;
+        local.version = kSlotVersion;
+        local.nodeId = m_cfg.nodeId;
+        local.singlesCount = singlesCount;
+        local.seq = static_cast<uint32_t>(m_producerSeq + 1);
+        *lease.header = local;
+
+        const size_t payloadBytes = static_cast<size_t>(singlesCount) * kPackedSingleBytes;
+        if (m_kind == DataPlaneKind::InProcess)
+        {
+            if (!writeSlotInProcess(slotIndex, local, lease.payload, payloadBytes))
+            {
+                clearTxBusyLocked(lease.localIndex);
+                return false;
+            }
+            clearTxBusyLocked(lease.localIndex);
+        }
+        else
+        {
+            const uint32_t length = static_cast<uint32_t>(kSlotHeaderBytes + payloadBytes);
+            if (!postRemoteSlotLocked(lease.localIndex, slotIndex, length, m_producerSeq + 1))
+            {
+                return false;
+            }
+        }
+
+        ++m_producerSeq;
+        m_slotsSent.fetch_add(1, std::memory_order_relaxed);
+        m_singlesSent.fetch_add(singlesCount, std::memory_order_relaxed);
+        return true;
+    }
 }
 
 bool RdmaWriteSender::sendPackedSingles(
@@ -544,13 +593,6 @@ bool RdmaWriteSender::sendPackedSingles(
             return false;
         }
 
-        TxSlotLease lease{};
-        if (!acquireTxSlotLocked(&lease))
-        {
-            LOG(ERROR) << "acquireTxSlot failed node=" << m_cfg.nodeId;
-            return false;
-        }
-
         const uint32_t slotIndex = static_cast<uint32_t>(m_producerSeq % m_slotCount);
         SlotHeader hdr{};
         clearSlotHeader(&hdr);
@@ -578,20 +620,24 @@ bool RdmaWriteSender::sendPackedSingles(
         const auto *src = static_cast<const uint8_t *>(singlesPacked) +
                           static_cast<size_t>(offset) * kPackedSingleBytes;
         const size_t payloadBytes = static_cast<size_t>(count) * kPackedSingleBytes;
-        *lease.header = hdr;
-        std::memcpy(lease.payload, src, payloadBytes);
 
         if (m_kind == DataPlaneKind::InProcess)
         {
-            if (!writeSlotInProcess(slotIndex, hdr, lease.payload, payloadBytes))
+            if (!writeSlotInProcess(slotIndex, hdr, src, payloadBytes))
             {
-                m_inprocessTxBusy[lease.localIndex] = 0;
                 return false;
             }
-            m_inprocessTxBusy[lease.localIndex] = 0;
         }
         else
         {
+            TxSlotLease lease{};
+            if (!acquireTxSlotLocked(&lease))
+            {
+                LOG(ERROR) << "acquireTxSlot failed node=" << m_cfg.nodeId;
+                return false;
+            }
+            *lease.header = hdr;
+            std::memcpy(lease.payload, src, payloadBytes);
             const uint32_t length = static_cast<uint32_t>(kSlotHeaderBytes + payloadBytes);
             if (!postRemoteSlotLocked(lease.localIndex, slotIndex, length, m_producerSeq + 1))
             {

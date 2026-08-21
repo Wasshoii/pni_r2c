@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -61,7 +62,16 @@ namespace openpni::distributed::streaming
         uint64_t computerClockMs = 0;
         uint32_t durationMs = 0;
         std::vector<Single> singles;
+        const Single *borrowed = nullptr;
         uint32_t singlesCount = 0;
+        bool hasTxLease = false;
+        openpni::distributed::dataplane::rdma::TxSlotLease lease{};
+        openpni::distributed::dataplane::rdma::SlotHeader hdr{};
+
+        const Single *payload() const noexcept
+        {
+            return borrowed != nullptr ? borrowed : singles.data();
+        }
     };
 
     struct WorkerTelemetry
@@ -87,6 +97,20 @@ namespace openpni::distributed::streaming
             const std::vector<Single> &singles,
             uint64_t computerClock_ms,
             uint32_t duration_ms);
+        bool sendSingles(
+            std::span<const Single> singles,
+            uint64_t computerClock_ms,
+            uint32_t duration_ms);
+        bool sendSingles(
+            std::vector<Single> &&singles,
+            uint64_t computerClock_ms,
+            uint32_t duration_ms);
+        /** InProcess: queue a view without copying (span must stay valid until sent).
+         *  RoCE: copies into TX like sendSingles(span). Remap copies. */
+        bool sendSinglesView(
+            std::span<const Single> singles,
+            uint64_t computerClock_ms,
+            uint32_t duration_ms);
 
         bool getServerStatus(coincidence::StatusResponse *response);
 
@@ -104,6 +128,7 @@ namespace openpni::distributed::streaming
         uint32_t rdmaCreditRemaining() const;
 
         bool waitForServerStartSignal(uint32_t timeoutMs = 0);
+        bool waitUntilIdle();
         bool notifyProducerComplete();
         openpni::distributed::dataplane::rdma::DataPlaneKind dataPlaneKind() const;
 
@@ -116,6 +141,13 @@ namespace openpni::distributed::streaming
         bool openRdmaDataPlane();
         void senderLoop();
         bool sendChunk(const PendingChunk &chunk);
+        bool enqueuePendingChunk(std::unique_ptr<PendingChunk> chunk);
+        bool fillRoceTxAndEnqueue(
+            std::span<const Single> singles,
+            uint64_t computerClock_ms,
+            uint32_t duration_ms);
+        bool remapChannels(std::vector<Single> *singles);
+        bool useRoceTxFill() const;
         void flushPendingMessages();
         void heartbeatLoop();
         void applyProducerCommand(coincidence::ProducerCommand command);

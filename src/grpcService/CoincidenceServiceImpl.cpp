@@ -74,13 +74,12 @@ namespace openpni::distributed::streaming
         m_rdmaServer->start();
     }
 
-    bool CoincidenceServiceImpl::ingestPackedSinglesChunk(
+    bool CoincidenceServiceImpl::pushTimestampedChunk(
         uint32_t nodeId,
         uint64_t chunkId,
         uint64_t computerClockMs,
         uint32_t durationMs,
-        const void *singlesPacked,
-        uint32_t singlesCount,
+        std::vector<Single> &&singles,
         std::string *errorMessage)
     {
         if (m_orchestration.rejectStreamBeforeStart &&
@@ -103,18 +102,18 @@ namespace openpni::distributed::streaming
             return false;
         }
 
-        if (!singlesPacked || singlesCount == 0)
+        if (singles.empty())
         {
             return true;
         }
 
+        const uint32_t singlesCount = static_cast<uint32_t>(singles.size());
         TimestampedSingleChunk chunk;
         chunk.nodeId = static_cast<uint16_t>(nodeId);
         chunk.chunkId = chunkId;
         chunk.computerClock_ms = computerClockMs;
         chunk.duration_ms = durationMs;
-        chunk.singles.resize(singlesCount);
-        unpackBinaryToSingles(singlesPacked, singlesCount, chunk.singles.data());
+        chunk.singles = std::move(singles);
 
         if (!buffer->push(std::move(chunk)))
         {
@@ -127,6 +126,27 @@ namespace openpni::distributed::streaming
 
         updateNodeStats(nodeId, singlesCount);
         return true;
+    }
+
+    bool CoincidenceServiceImpl::ingestPackedSinglesChunk(
+        uint32_t nodeId,
+        uint64_t chunkId,
+        uint64_t computerClockMs,
+        uint32_t durationMs,
+        const void *singlesPacked,
+        uint32_t singlesCount,
+        std::string *errorMessage)
+    {
+        if (!singlesPacked || singlesCount == 0)
+        {
+            return pushTimestampedChunk(
+                nodeId, chunkId, computerClockMs, durationMs, std::vector<Single>{}, errorMessage);
+        }
+
+        std::vector<Single> host(singlesCount);
+        unpackBinaryToSingles(singlesPacked, singlesCount, host.data());
+        return pushTimestampedChunk(
+            nodeId, chunkId, computerClockMs, durationMs, std::move(host), errorMessage);
     }
 
     bool CoincidenceServiceImpl::ingestRdmaSlot(const rdma::SlotChunkView &view,
@@ -145,11 +165,10 @@ namespace openpni::distributed::streaming
                 view.singlesPacked, view.singlesCount, errorMessage);
         }
 
-        std::vector<uint8_t> assembled;
+        std::vector<Single> assembled;
         uint64_t chunkId = view.chunkId;
         uint64_t clockMs = view.computerClockMs;
         uint32_t durationMs = view.durationMs;
-        uint32_t totalSingles = 0;
         bool complete = false;
 
         {
@@ -172,17 +191,29 @@ namespace openpni::distributed::streaming
                 return false;
             }
 
-            const size_t nbytes = static_cast<size_t>(view.singlesCount) * kPackedSingleSize;
-            const auto *src = static_cast<const uint8_t *>(view.singlesPacked);
-            part.packed.insert(part.packed.end(), src, src + nbytes);
+            const size_t n = static_cast<size_t>(view.singlesCount);
+            if (n > 0)
+            {
+                if (!view.singlesPacked)
+                {
+                    if (errorMessage)
+                    {
+                        *errorMessage = "partial slot missing payload";
+                    }
+                    return false;
+                }
+                const size_t old = part.singles.size();
+                part.singles.resize(old + n);
+                std::memcpy(part.singles.data() + old, view.singlesPacked,
+                            n * kPackedSingleSize);
+            }
 
             if (eof)
             {
-                assembled.swap(part.packed);
+                assembled.swap(part.singles);
                 chunkId = part.chunkId;
                 clockMs = part.computerClockMs;
                 durationMs = part.durationMs;
-                totalSingles = static_cast<uint32_t>(assembled.size() / kPackedSingleSize);
                 part.open = false;
                 complete = true;
             }
@@ -192,9 +223,8 @@ namespace openpni::distributed::streaming
         {
             return true;
         }
-        return ingestPackedSinglesChunk(
-            view.nodeId, chunkId, clockMs, durationMs,
-            assembled.data(), totalSingles, errorMessage);
+        return pushTimestampedChunk(
+            view.nodeId, chunkId, clockMs, durationMs, std::move(assembled), errorMessage);
     }
 
     grpc::Status CoincidenceServiceImpl::StreamSingles(

@@ -8,6 +8,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <span>
 #include <thread>
 #include <utility>
 #include <glog/logging.h>
@@ -171,51 +172,49 @@ namespace openpni::distributed::streaming
         return true;
     }
 
-    bool CoincidenceClient::sendSingles(
-        const std::vector<Single> &singles,
-        uint64_t computerClock_ms,
-        uint32_t duration_ms)
+    bool CoincidenceClient::remapChannels(std::vector<Single> *singles)
     {
-        if (!m_running.load())
+        if (!singles || !m_config.remapLocalToGlobalChannels)
+        {
+            return true;
+        }
+
+        for (size_t i = 0; i < singles->size(); ++i)
+        {
+            auto &s = (*singles)[i];
+            const uint64_t globalChannel = static_cast<uint64_t>(s.channelIndex) +
+                                           static_cast<uint64_t>(m_config.globalChannelOffset);
+            if (globalChannel > static_cast<uint64_t>(std::numeric_limits<uint16_t>::max()))
+            {
+                LOG(ERROR) << "remapped channel index overflow: " << globalChannel;
+                return false;
+            }
+
+            const uint16_t localChannel = s.channelIndex;
+            s.channelIndex = static_cast<uint16_t>(globalChannel);
+
+            if (i == 0 && !m_remapSampleLogged.exchange(true))
+            {
+                LOG(INFO) << "remap sample node=" << m_config.nodeId
+                          << " local_channel=" << localChannel
+                          << " global_channel=" << s.channelIndex;
+            }
+        }
+        return true;
+    }
+
+    bool CoincidenceClient::enqueuePendingChunk(std::unique_ptr<PendingChunk> chunk)
+    {
+        if (!chunk)
         {
             return false;
         }
-
-        auto chunk = std::make_unique<PendingChunk>();
-        chunk->chunkId = m_chunkIdCounter++;
-        chunk->computerClockMs = computerClock_ms;
-        chunk->durationMs = duration_ms;
-        chunk->singlesCount = static_cast<uint32_t>(singles.size());
-        chunk->singles.resize(singles.size());
-
-        if (m_config.remapLocalToGlobalChannels)
+        const size_t n = (chunk->hasTxLease || chunk->borrowed != nullptr)
+                             ? static_cast<size_t>(chunk->singlesCount)
+                             : chunk->singles.size();
+        if (!chunk->hasTxLease && chunk->borrowed == nullptr)
         {
-            for (size_t i = 0; i < singles.size(); ++i)
-            {
-                const auto &s = singles[i];
-                const uint64_t globalChannel = static_cast<uint64_t>(s.channelIndex) +
-                                               static_cast<uint64_t>(m_config.globalChannelOffset);
-                if (globalChannel > static_cast<uint64_t>(std::numeric_limits<uint16_t>::max()))
-                {
-                    LOG(ERROR) << "remapped channel index overflow: " << globalChannel;
-                    return false;
-                }
-
-                chunk->singles[i] = s;
-                chunk->singles[i].channelIndex = static_cast<uint16_t>(globalChannel);
-
-                if (i == 0 && !m_remapSampleLogged.exchange(true))
-                {
-                    LOG(INFO) << "remap sample node=" << m_config.nodeId
-                              << " local_channel=" << s.channelIndex
-                              << " global_channel=" << chunk->singles[i].channelIndex;
-                }
-            }
-        }
-        else
-        {
-            std::memcpy(chunk->singles.data(), singles.data(),
-                        singles.size() * kPackedSingleSize);
+            chunk->singlesCount = static_cast<uint32_t>(n);
         }
 
         {
@@ -253,9 +252,217 @@ namespace openpni::distributed::streaming
         }
 
         m_cv.notify_one();
-        m_totalSinglesSent += singles.size();
-
+        m_totalSinglesSent += n;
         return true;
+    }
+
+    bool CoincidenceClient::useRoceTxFill() const
+    {
+        return m_rdmaSender &&
+               m_rdmaSender->kind() == rdma::DataPlaneKind::RdmaRoceV2;
+    }
+
+    bool CoincidenceClient::fillRoceTxAndEnqueue(
+        std::span<const Single> singles,
+        uint64_t computerClock_ms,
+        uint32_t duration_ms)
+    {
+        if (singles.empty())
+        {
+            return true;
+        }
+        if (!m_rdmaSender)
+        {
+            return false;
+        }
+
+        const size_t maxPerSlot = rdma::maxSinglesPerSlot(m_rdmaSender->slotStride());
+        if (maxPerSlot == 0)
+        {
+            return false;
+        }
+
+        const uint64_t chunkId = m_chunkIdCounter++;
+        uint32_t offset = 0;
+        bool first = true;
+        const uint32_t total = static_cast<uint32_t>(singles.size());
+
+        while (offset < total)
+        {
+            rdma::TxSlotLease lease{};
+            if (!m_rdmaSender->acquireTxSlot(&lease) || !lease.payload)
+            {
+                LOG(ERROR) << "acquireTxSlot failed node=" << m_config.nodeId;
+                return false;
+            }
+
+            uint32_t n = static_cast<uint32_t>(
+                std::min(maxPerSlot, static_cast<size_t>(total - offset)));
+            const size_t capSingles = lease.payloadCapacity / kPackedSingleSize;
+            if (capSingles == 0)
+            {
+                m_rdmaSender->abortTxSlot(lease);
+                return false;
+            }
+            n = static_cast<uint32_t>(std::min<size_t>(n, capSingles));
+
+            auto *dst = reinterpret_cast<Single *>(lease.payload);
+            if (m_config.remapLocalToGlobalChannels)
+            {
+                for (uint32_t i = 0; i < n; ++i)
+                {
+                    dst[i] = singles[offset + i];
+                    const uint64_t globalChannel =
+                        static_cast<uint64_t>(dst[i].channelIndex) +
+                        static_cast<uint64_t>(m_config.globalChannelOffset);
+                    if (globalChannel > static_cast<uint64_t>(std::numeric_limits<uint16_t>::max()))
+                    {
+                        LOG(ERROR) << "remapped channel index overflow: " << globalChannel;
+                        m_rdmaSender->abortTxSlot(lease);
+                        return false;
+                    }
+                    dst[i].channelIndex = static_cast<uint16_t>(globalChannel);
+                    if (offset + i == 0 && !m_remapSampleLogged.exchange(true))
+                    {
+                        LOG(INFO) << "remap sample node=" << m_config.nodeId
+                                  << " local_channel=" << singles[offset + i].channelIndex
+                                  << " global_channel=" << dst[i].channelIndex;
+                    }
+                }
+            }
+            else
+            {
+                std::memcpy(dst, singles.data() + offset, static_cast<size_t>(n) * kPackedSingleSize);
+            }
+
+            rdma::SlotHeader hdr{};
+            rdma::clearSlotHeader(&hdr);
+            hdr.chunkId = chunkId;
+            hdr.computerClockMs = computerClock_ms;
+            hdr.durationMs = duration_ms;
+            hdr.flags = 0;
+            if (first)
+            {
+                hdr.flags = static_cast<uint16_t>(hdr.flags | rdma::kSlotFlagSof);
+                first = false;
+            }
+            if (offset + n >= total)
+            {
+                hdr.flags = static_cast<uint16_t>(hdr.flags | rdma::kSlotFlagEof);
+            }
+            if (n < total)
+            {
+                hdr.flags = static_cast<uint16_t>(hdr.flags | rdma::kSlotFlagPartial);
+            }
+
+            auto chunk = std::make_unique<PendingChunk>();
+            chunk->chunkId = chunkId;
+            chunk->computerClockMs = computerClock_ms;
+            chunk->durationMs = duration_ms;
+            chunk->singlesCount = n;
+            chunk->hasTxLease = true;
+            chunk->lease = lease;
+            chunk->hdr = hdr;
+            if (!enqueuePendingChunk(std::move(chunk)))
+            {
+                m_rdmaSender->abortTxSlot(lease);
+                return false;
+            }
+            offset += n;
+        }
+        return true;
+    }
+
+    bool CoincidenceClient::sendSingles(
+        const std::vector<Single> &singles,
+        uint64_t computerClock_ms,
+        uint32_t duration_ms)
+    {
+        return sendSingles(std::span<const Single>(singles), computerClock_ms, duration_ms);
+    }
+
+    bool CoincidenceClient::sendSingles(
+        std::span<const Single> singles,
+        uint64_t computerClock_ms,
+        uint32_t duration_ms)
+    {
+        if (!m_running.load())
+        {
+            return false;
+        }
+        if (useRoceTxFill())
+        {
+            return fillRoceTxAndEnqueue(singles, computerClock_ms, duration_ms);
+        }
+
+        auto chunk = std::make_unique<PendingChunk>();
+        chunk->chunkId = m_chunkIdCounter++;
+        chunk->computerClockMs = computerClock_ms;
+        chunk->durationMs = duration_ms;
+        chunk->singles.resize(singles.size());
+        if (!singles.empty())
+        {
+            std::memcpy(chunk->singles.data(), singles.data(),
+                        singles.size() * kPackedSingleSize);
+        }
+        if (!remapChannels(&chunk->singles))
+        {
+            return false;
+        }
+        return enqueuePendingChunk(std::move(chunk));
+    }
+
+    bool CoincidenceClient::sendSingles(
+        std::vector<Single> &&singles,
+        uint64_t computerClock_ms,
+        uint32_t duration_ms)
+    {
+        if (!m_running.load())
+        {
+            return false;
+        }
+        if (useRoceTxFill())
+        {
+            return fillRoceTxAndEnqueue(singles, computerClock_ms, duration_ms);
+        }
+        if (!remapChannels(&singles))
+        {
+            return false;
+        }
+
+        auto chunk = std::make_unique<PendingChunk>();
+        chunk->chunkId = m_chunkIdCounter++;
+        chunk->computerClockMs = computerClock_ms;
+        chunk->durationMs = duration_ms;
+        chunk->singles = std::move(singles);
+        return enqueuePendingChunk(std::move(chunk));
+    }
+
+    bool CoincidenceClient::sendSinglesView(
+        std::span<const Single> singles,
+        uint64_t computerClock_ms,
+        uint32_t duration_ms)
+    {
+        if (m_config.remapLocalToGlobalChannels)
+        {
+            return sendSingles(singles, computerClock_ms, duration_ms);
+        }
+        if (!m_running.load())
+        {
+            return false;
+        }
+        if (useRoceTxFill())
+        {
+            return fillRoceTxAndEnqueue(singles, computerClock_ms, duration_ms);
+        }
+
+        auto chunk = std::make_unique<PendingChunk>();
+        chunk->chunkId = m_chunkIdCounter++;
+        chunk->computerClockMs = computerClock_ms;
+        chunk->durationMs = duration_ms;
+        chunk->borrowed = singles.empty() ? nullptr : singles.data();
+        chunk->singlesCount = static_cast<uint32_t>(singles.size());
+        return enqueuePendingChunk(std::move(chunk));
     }
 
     bool CoincidenceClient::getServerStatus(coincidence::StatusResponse *response)
@@ -268,14 +475,18 @@ namespace openpni::distributed::streaming
         return status.ok();
     }
 
+    bool CoincidenceClient::waitUntilIdle()
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        m_cv.wait(lock, [this]()
+                  { return (m_pendingMessages.empty() && !m_sendInFlight.load()) ||
+                           !m_running.load(); });
+        return m_running.load();
+    }
+
     bool CoincidenceClient::notifyProducerComplete()
     {
-        {
-            std::unique_lock<std::mutex> lock(m_mutex);
-            m_cv.wait(lock, [this]()
-                      { return (m_pendingMessages.empty() && !m_sendInFlight.load()) ||
-                               !m_running.load(); });
-        }
+        waitUntilIdle();
         m_producerComplete.store(true, std::memory_order_release);
 
         grpc::ClientContext context;
@@ -480,65 +691,30 @@ namespace openpni::distributed::streaming
         {
             return false;
         }
-
-        const size_t maxPerSlot = rdma::maxSinglesPerSlot(m_rdmaSender->slotStride());
-        if (maxPerSlot == 0 || chunk.singles.empty())
+        if (chunk.hasTxLease)
         {
-            return chunk.singles.empty();
+            const bool ok = m_rdmaSender->commitTxSlot(
+                chunk.lease, chunk.hdr, chunk.singlesCount);
+            m_connected = ok;
+            return ok;
         }
-
-        uint32_t offset = 0;
-        bool first = true;
-        while (offset < chunk.singlesCount)
+        const Single *src = chunk.payload();
+        if (chunk.singlesCount == 0)
         {
-            const uint32_t count = static_cast<uint32_t>(std::min<size_t>(
-                maxPerSlot, static_cast<size_t>(chunk.singlesCount - offset)));
-
-            rdma::TxSlotLease lease{};
-            if (!m_rdmaSender->acquireTxSlot(&lease) || !lease.payload)
-            {
-                const bool ok = m_rdmaSender->sendPackedSingles(
-                    chunk.chunkId,
-                    chunk.computerClockMs,
-                    chunk.durationMs,
-                    chunk.singles.data() + offset,
-                    chunk.singlesCount - offset);
-                m_connected = ok;
-                return ok;
-            }
-
-            std::memcpy(lease.payload, chunk.singles.data() + offset,
-                        static_cast<size_t>(count) * kPackedSingleSize);
-
-            rdma::SlotHeader hdr{};
-            rdma::clearSlotHeader(&hdr);
-            hdr.chunkId = chunk.chunkId;
-            hdr.computerClockMs = chunk.computerClockMs;
-            hdr.durationMs = chunk.durationMs;
-            hdr.flags = 0;
-            if (first)
-            {
-                hdr.flags = static_cast<uint16_t>(hdr.flags | rdma::kSlotFlagSof);
-                first = false;
-            }
-            if (offset + count >= chunk.singlesCount)
-            {
-                hdr.flags = static_cast<uint16_t>(hdr.flags | rdma::kSlotFlagEof);
-            }
-            if (count < chunk.singlesCount)
-            {
-                hdr.flags = static_cast<uint16_t>(hdr.flags | rdma::kSlotFlagPartial);
-            }
-
-            if (!m_rdmaSender->commitTxSlot(lease, hdr, count))
-            {
-                m_connected = false;
-                return false;
-            }
-            offset += count;
+            return true;
         }
-        m_connected = true;
-        return true;
+        if (!src)
+        {
+            return false;
+        }
+        const bool ok = m_rdmaSender->sendPackedSingles(
+            chunk.chunkId,
+            chunk.computerClockMs,
+            chunk.durationMs,
+            src,
+            chunk.singlesCount);
+        m_connected = ok;
+        return ok;
     }
 
     void CoincidenceClient::flushPendingMessages()

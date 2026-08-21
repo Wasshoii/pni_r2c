@@ -165,6 +165,13 @@ namespace openpni::distributed::streaming
         void setPendingProducerCommand(coincidence::ProducerCommand command);
         bool ingestRdmaSlot(const openpni::distributed::dataplane::rdma::SlotChunkView &view,
                             std::string *errorMessage);
+        bool pushTimestampedChunk(
+            uint32_t nodeId,
+            uint64_t chunkId,
+            uint64_t computerClockMs,
+            uint32_t durationMs,
+            std::vector<Single> &&singles,
+            std::string *errorMessage);
 
         StreamingTimeAligner &m_aligner;
         OrchestrationConfig m_orchestration;
@@ -193,7 +200,7 @@ namespace openpni::distributed::streaming
             uint64_t chunkId = 0;
             uint64_t computerClockMs = 0;
             uint32_t durationMs = 0;
-            std::vector<uint8_t> packed;
+            std::vector<Single> singles;
             bool open = false;
         };
         std::mutex m_partialMutex;

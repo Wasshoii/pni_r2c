@@ -43,7 +43,7 @@ public:
         bool forceInProcess = false;
         bool requireRoce = false;
         int gidIndex = -1;
-        uint32_t txSlotCount = 4;
+        uint32_t txSlotCount = 8;
     };
 
     explicit RdmaWriteSender(Config cfg);
@@ -58,7 +58,8 @@ public:
     /**
      * Pack singles into one or more slots and push ordered by chunkId.
      * singles must be contiguous openpni::Single / 16-byte packed layout.
-     * Copies into a registered TX slot unless `singlesPacked` already lives in the TX arena.
+     * RoCE copies into a registered TX slot. InProcess writes the source
+     * buffer directly into the receive ring (one memcpy).
      */
     bool sendPackedSingles(
         uint64_t chunkId,
@@ -71,6 +72,8 @@ public:
     bool acquireTxSlot(TxSlotLease *out);
     /** Write a filled TX slot to the next remote ring slot (waits credit). */
     bool commitTxSlot(const TxSlotLease &lease, const SlotHeader &hdr, uint32_t singlesCount);
+    /** Drop a lease without posting (enqueue/send aborted). */
+    void abortTxSlot(const TxSlotLease &lease);
 
     uint64_t singlesSent() const noexcept { return m_singlesSent.load(); }
     uint64_t slotsSent() const noexcept { return m_slotsSent.load(); }
@@ -87,7 +90,9 @@ private:
     bool connectInProcess(const RdmaEndpointInfo &coin);
     bool waitForCredit(uint64_t needProducerSeq);
     bool setupTxArena();
+    bool tryAcquireTxSlotLocked(TxSlotLease *out);
     bool acquireTxSlotLocked(TxSlotLease *out);
+    void clearTxBusyLocked(uint32_t localIndex);
     bool recycleTxCompletionsLocked();
     uint8_t *txSlotBase(uint32_t localIndex) noexcept;
     bool postRemoteSlotLocked(uint32_t localIndex, uint32_t remoteSlot, uint32_t length, uint64_t seq);

@@ -1,0 +1,26 @@
+{
+  "cluster": {
+    "listenAddress": "127.0.0.1:51081",
+    "expectedNodeCount": 2
+  },
+  "dataplane": {
+    "requireRoce": false,
+    "forceInProcess": true,
+    "deviceName": "",
+    "gidIndex": 0
+  },
+  "coincidence": {
+    "detectorProfile": "BDM2",
+    "outputDir": "/tmp/r2c_inprocess_smoke/coin",
+    "protocol": {
+      "timeWindowPs": 2000,
+      "delayTimePs": 2000000,
+      "energyLowerEV": 350000.0,
+      "energyUpperEV": 650000.0
+    }
+  },
+  "runtime": {
+    "runSeconds": 0,
+    "statusIntervalMs": 200
+  }
+}

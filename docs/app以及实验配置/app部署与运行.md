@@ -73,6 +73,6 @@ pkill -KILL -f 'build/apps/(basic/app_coin_master|cuda/app_acq_r2s_node)'
 ## 关联文档
 
 1. 跨机 RDMA：`RDMA多机实验.md`
-2. 进程测试：`测试说明.md`
+2. 进程测试：[测试/README.md](../测试/README.md)
 3. 状态行与调参：`状态机与调试.md`
 4. DPDK 采集：`DPDK采集配置与使用.md`

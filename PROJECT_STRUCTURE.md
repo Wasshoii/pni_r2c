@@ -46,7 +46,6 @@ r2c/
 ├── tests/
 ├── docs/
 ├── Data/
-├── Makefile
 └── README.md
 ```
 
@@ -68,7 +67,7 @@ r2c/
 - CUDA 单事件处理和测试辅助工具。
 
 ### 2.5 tests
-- 按场景覆盖：控制初始化、UDP 通路、R2S、本地 gRPC、时钟同步、流式符合。
+- 按单元模块 / 通信 / 集成覆盖，见 `docs/测试/README.md`。
 
 ## 3. 依赖关系（维护要求）
 推荐依赖方向：
@@ -81,10 +80,10 @@ r2c/
 - 第三方重依赖（grpc/protobuf/cuda）优先放到 `.cpp`。
 
 ## 4. 构建与产物
-- 构建入口：`Makefile`
+- 构建入口：`./build.sh` 与 CMake preset
 - 中间产物：`build/`
 - 可执行文件：`bin/`
-- 主要测试目标见 `make help`
+- 测试说明：`docs/测试/README.md`
 
 ## 5. 文档维护规则
 - 目录或模块职责变更时，同步更新本文件与 `README.md`。

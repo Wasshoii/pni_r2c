@@ -4,6 +4,7 @@
  */
 
 #include "core/acquisition/RawIngress.hpp"
+#include "core/streaming/StreamingCoincidence.hpp"
 #include "core/streaming/SyntheticSingles.hpp"
 #include "dataplane/rdma/RdmaContext.hpp"
 #include "grpcNode/coinNode.hpp"
@@ -19,6 +20,7 @@
 #include <grpcpp/grpcpp.h>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -191,9 +193,21 @@ namespace
         }
         const bool complete = coin.allProducersComplete();
         const auto &st = coin.statistics();
-        const uint64_t received = st.totalSinglesReceived.load();
-        const uint64_t prompt = st.totalPromptPairs.load();
-        const uint64_t delay = st.totalDelayPairs.load();
+        uint64_t received = 0;
+        uint64_t prompt = 0;
+        uint64_t delay = 0;
+        const uint64_t sent = streaming::syntheticEventCount(s0) + streaming::syntheticEventCount(s1);
+        for (int i = 0; i < 80; ++i)
+        {
+            received = st.totalSinglesReceived.load();
+            prompt = st.totalPromptPairs.load();
+            delay = st.totalDelayPairs.load();
+            if (received >= sent && prompt > 0 && delay > 0)
+            {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
         client0.stop();
         client1.stop();
         coin.stop();
@@ -203,7 +217,6 @@ namespace
                       << " complete=" << complete << "\n";
             return false;
         }
-        const uint64_t sent = streaming::syntheticEventCount(s0) + streaming::syntheticEventCount(s1);
         std::cout << "[PASS] dual_node_synthetic received=" << received
                   << " sent=" << sent
                   << " prompt=" << prompt << " (truth " << truth.promptPairs << ")"
@@ -213,6 +226,104 @@ namespace
             std::cerr << "received " << received << " < sent " << sent << "\n";
             return false;
         }
+        if (prompt == 0 || delay == 0)
+        {
+            std::cerr << "expected prompt>0 and delay>0, got prompt=" << prompt
+                      << " delay=" << delay << "\n";
+            return false;
+        }
+        return true;
+    }
+
+    bool testChannelRemapInProcess()
+    {
+        const std::string addr = "127.0.0.1:51068";
+        grpcnode::CoinGrpcNode::InitOptions init;
+        init.alignerConfig = makeAligner("/tmp/r2c_orch_remap");
+        init.alignerConfig.processingIntervalMs = 30000;
+        init.listenAddress = addr;
+        init.expectedNodeCount = 1;
+        init.autoStartWhenAllRegistered = true;
+        init.startLeadTimeMs = 0;
+        init.forceInProcess = true;
+        init.requireRoce = false;
+        grpcnode::CoinGrpcNode coin(init);
+        if (!coin.start())
+        {
+            std::cerr << "remap coin start failed\n";
+            return false;
+        }
+
+        constexpr uint16_t kLocalChannel = 5;
+        constexpr uint32_t kOffset = 20;
+        constexpr uint16_t kExpected = 25;
+
+        streaming::CoincidenceClientConfig cc;
+        cc.serverAddress = addr;
+        cc.nodeId = 0;
+        cc.nodeAddress = "127.0.0.1";
+        cc.channelCount = 4;
+        cc.detectorType = "BDM2";
+        cc.forceInProcess = true;
+        cc.requireRoce = false;
+        cc.waitForStartTimeoutMs = 15000;
+        cc.remapLocalToGlobalChannels = true;
+        cc.globalChannelOffset = kOffset;
+        streaming::CoincidenceClient client(cc);
+        if (!client.start())
+        {
+            std::cerr << "remap client start failed\n";
+            coin.stop();
+            return false;
+        }
+
+        std::vector<streaming::Single> buf(8);
+        for (size_t i = 0; i < buf.size(); ++i)
+        {
+            buf[i].channelIndex = kLocalChannel;
+            buf[i].crystalIndex = static_cast<uint16_t>(i);
+            buf[i].timevalue_100fs = 1'000'000'000ULL + static_cast<uint64_t>(i) * 10'000ULL;
+            buf[i].energy_ev = 511000.0F;
+        }
+        if (!client.sendSingles(buf, 0, 0))
+        {
+            std::cerr << "remap send failed\n";
+            client.stop();
+            coin.stop();
+            return false;
+        }
+        (void)client.waitUntilIdle();
+
+        streaming::NodeRingBuffer *nodeBuf = nullptr;
+        std::optional<streaming::TimestampedSingleChunk> chunk;
+        for (int i = 0; i < 80 && !chunk; ++i)
+        {
+            nodeBuf = coin.aligner().getNodeBuffer(0);
+            if (nodeBuf && !nodeBuf->empty())
+            {
+                chunk = nodeBuf->tryPop();
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        client.stop();
+        coin.stop();
+        if (!chunk || chunk->singles.size() != buf.size())
+        {
+            std::cerr << "remap chunk missing or size mismatch\n";
+            return false;
+        }
+        for (size_t i = 0; i < chunk->singles.size(); ++i)
+        {
+            if (chunk->singles[i].channelIndex != kExpected)
+            {
+                std::cerr << "remap channelIndex[" << i << "]=" << chunk->singles[i].channelIndex
+                          << " expected " << kExpected << "\n";
+                return false;
+            }
+        }
+        std::cout << "[PASS] channel_remap_inprocess offset=" << kOffset
+                  << " local=" << kLocalChannel << " global=" << kExpected << "\n";
         return true;
     }
 
@@ -650,6 +761,8 @@ int main(int argc, char **argv)
     if (!testHandshakeOrderInProcess())
         rc = 1;
     if (!testDualNodeSyntheticAndDrain())
+        rc = 1;
+    if (!testChannelRemapInProcess())
         rc = 1;
     if (!testDualNodeBackpressureDrain())
         rc = 1;

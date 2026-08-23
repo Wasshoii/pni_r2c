@@ -13,30 +13,20 @@ RawData 采集 -> R2S 单事件转换 -> 流式符合计算 -> 结果输出
 
 ## 2. 快速开始
 ### 2.1 构建与测试
-构建统一使用 CMake + build.sh，Makefile 仅保留测试运行入口。
+构建统一使用 CMake + `build.sh`。测试分类见 `docs/测试/README.md`。
 
 ```bash
 # 一键构建 app/test/tools
 ./build.sh --all
 
-# 仅构建测试
+# 仅构建测试（编 tests/ 下该档全部可编目标）
 ./build.sh --tests
 ```
 
 ```bash
-# 查看测试入口
-make help
-
-# 基础测试
-make test
-make test-grpc
-
-# 完整链路（需 OpenPnI/CUDA/TBB）
-make test-local-grpc-r2s
-make test-local-grpc-coin
-make test-acq-control-init
-make test-acq-datapath-udp
-make test-acq-r2s-pipeline
+ctest --test-dir build/tests/core -L core --output-on-failure
+ctest --test-dir build/tests/pni  -L pni  -LE "integration|manual" --output-on-failure
+./bin/test/test_synthetic_singles
 ```
 
 更详细的构建说明见 docs/BUILD_AND_SETUP.md。
@@ -109,7 +99,7 @@ make test-acq-r2s-pipeline
   - 状态机切换
   - 超时/异常分支
   - 端到端最小可运行路径
-- 提交前至少执行受影响目标的构建与测试（`./build.sh --tests` + 对应 `make test-*`）。
+- 提交前至少执行受影响目标的构建与测试（`./build.sh --tests` + 对应 `ctest -R` 或 `bin/test/*`）。
 
 ## 5. 文档说明
 - 本 README 只保留项目总览与开发约定。

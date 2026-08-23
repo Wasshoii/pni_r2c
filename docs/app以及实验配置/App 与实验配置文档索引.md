@@ -13,9 +13,9 @@
    - 剖面：通路 / 正确性 / 回放 / soak / rate
    - preflight 与启动脚本
 
-2. `测试说明.md`
+2. [测试说明.md](测试说明.md) → 详细目录 [测试/README.md](../测试/README.md)
    - 进程测试 vs 多机实验
-   - `test_synthetic_singles`（CPU 配对）与 `test_rdma_orchestration` 覆盖范围
+   - 单元模块 / 通信 / 集成；每条与 app 的关系
 
 3. `状态机与调试.md`
    - Coin 编排 FSM 与 worker SourceState
@@ -46,7 +46,7 @@
 
 1. 先读 `app部署与运行.md`
 2. 跨机 RDMA 读 `RDMA多机实验.md`
-3. 进程测试与剖面判据读 `测试说明.md`
+3. 进程测试读 [测试/README.md](../测试/README.md)；剖面判据读 `RDMA多机实验.md`
 4. 看状态行、调缓冲/槽位读 `状态机与调试.md`
 5. 实验计划硬件选型读 `四机推荐配置.md`
 6. 准备启用 DPDK 采集时读 `DPDK采集配置与使用.md`

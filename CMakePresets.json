@@ -32,7 +32,17 @@
         "R2C_BUILD_TEST_GRPC": "OFF",
         "R2C_BUILD_TEST_STREAMING": "ON",
         "R2C_BUILD_TEST_LOCAL_GRPC_COIN": "ON",
-        "R2C_BUILD_TEST_ACQ_CONTROL_INIT": "ON"
+        "R2C_BUILD_TEST_ACQ_CONTROL_INIT": "ON",
+        "R2C_BUILD_TEST_LOCAL_GRPC_SINGLES_INGRESS": "OFF",
+        "R2C_BUILD_TEST_LOCAL_GRPC_COIN_STREAM": "OFF",
+        "R2C_BUILD_TEST_LOCAL_GRPC_R2S": "OFF",
+        "R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN": "OFF",
+        "R2C_BUILD_TEST_PNI_R2C": "OFF",
+        "R2C_BUILD_TEST_PNI_COIN": "OFF",
+        "R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE": "OFF",
+        "R2C_BUILD_TEST_R2S_MULTI_GPU": "OFF",
+        "R2C_BUILD_TEST_COIN_MULTI_GPU": "OFF",
+        "R2C_BUILD_TEST_COIN_CARRY_BOUNDARY": "OFF"
       }
     },
     {
@@ -46,15 +56,19 @@
         "R2C_PKG_CONFIG_PATH": "/usr/lib/x86_64-linux-gnu/pkgconfig",
         "R2C_BUILD_TEST_BASIC": "OFF",
         "R2C_BUILD_TEST_GRPC": "OFF",
+        "R2C_BUILD_TEST_STREAMING": "OFF",
+        "R2C_BUILD_TEST_LOCAL_GRPC_COIN": "OFF",
+        "R2C_BUILD_TEST_ACQ_CONTROL_INIT": "OFF",
         "R2C_BUILD_TEST_PNI_R2C": "ON",
         "R2C_BUILD_TEST_LOCAL_GRPC_R2S": "ON",
-        "R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN": "OFF",
+        "R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN": "ON",
         "R2C_BUILD_TEST_LOCAL_GRPC_SINGLES_INGRESS": "ON",
         "R2C_BUILD_TEST_LOCAL_GRPC_COIN_STREAM": "ON",
         "R2C_BUILD_TEST_PNI_COIN": "ON",
         "R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE": "ON",
         "R2C_BUILD_TEST_R2S_MULTI_GPU": "ON",
-        "R2C_BUILD_TEST_COIN_MULTI_GPU": "ON"
+        "R2C_BUILD_TEST_COIN_MULTI_GPU": "ON",
+        "R2C_BUILD_TEST_COIN_CARRY_BOUNDARY": "ON"
       }
     },
     {
@@ -131,38 +145,15 @@
   "buildPresets": [
     {
       "name": "build-tests-core",
-      "configurePreset": "linux-release-tests-core",
-      "targets": [
-        "r2c_proto",
-        "test_distributed_clock_sync",
-        "test_distributed_clock_sync_grpc"
-      ]
+      "configurePreset": "linux-release-tests-core"
     },
     {
       "name": "build-tests-pni",
-      "configurePreset": "linux-release-tests-pni",
-      "targets": [
-        "r2c_proto",
-        "test_streaming_coincidence",
-        "test_synthetic_singles",
-        "test_local_grpc_coin",
-        "test_rdma_orchestration",
-        "test_acquisition_control_init"
-      ]
+      "configurePreset": "linux-release-tests-pni"
     },
     {
       "name": "build-tests-cuda",
-      "configurePreset": "linux-release-tests-cuda",
-      "targets": [
-        "r2c_proto",
-        "test_pni_r2c",
-        "test_local_grpc_r2s",
-        "test_local_grpc_singles_ingress",
-        "test_local_grpc_coin_stream",
-        "test_pni_coin",
-        "test_bdm50100_online_pipeline",
-        "test_r2s50100_multi_gpu"
-      ]
+      "configurePreset": "linux-release-tests-cuda"
     },
     {
       "name": "build-apps-basic",

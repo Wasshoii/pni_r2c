@@ -82,13 +82,15 @@ cmake -S . -B build/cmake \
 ```
 
 说明：
-- 默认优先使用 `/usr/bin/protoc` 与 `/usr/bin/grpc_cpp_plugin`（与 Makefile 行为一致）。
+- 默认优先使用 `/usr/bin/protoc` 与 `/usr/bin/grpc_cpp_plugin`。
 - 默认 `R2C_PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig`（避免 protobuf/grpc 版本漂移）。
-- 预设默认使用 `/usr/bin/g++-13`（与 Makefile 对齐）。
+- 预设默认使用 `/usr/bin/g++-13`。
 
-### Tests 预设（建议 CI 使用）
+### Tests 预设
 
-1. Core Tests（仅基础 gRPC/Protobuf）
+`./build.sh --tests` 会跑下面三档 configure+build，编该档已启用的全部测试。分类与默认 ctest 见 [测试/README.md](测试/README.md)。
+
+1. Core（gRPC/Protobuf）
 - 目标：`test_distributed_clock_sync`、`test_distributed_clock_sync_grpc`
 
 ```bash
@@ -97,35 +99,30 @@ cmake --build --preset build-tests-core -j
 ctest --test-dir build/tests/core -L core --output-on-failure
 ```
 
-2. PNI Tests（libpni + tbb + openmp，无 CUDA）
-- 目标：`test_streaming_coincidence`、`test_synthetic_singles`、`test_local_grpc_coin`、`test_acquisition_control_init`、`test_rdma_orchestration`
+2. PNI（libpni + tbb + openmp）
+- 编译：`test_synthetic_singles`、`test_rdma_dataplane_loopback`、`test_rdma_orchestration`、`test_app_config`、`test_app_inprocess_smoke`、`test_acquisition_control_init`、`test_streaming_coincidence`、`test_local_grpc_coin`
+- 默认 ctest（`-LE "integration|manual"`）：synthetic、loopback、app_config、acq_control_init
 
 ```bash
 cmake --preset linux-release-tests-pni
 cmake --build --preset build-tests-pni -j
-ctest --test-dir build/tests/pni -L pni -LE integration --output-on-failure
+ctest --test-dir build/tests/pni -L pni -LE "integration|manual" --output-on-failure
 ```
 
-说明：`test_local_grpc_coin`、`test_rdma_orchestration` 标记为 `integration`。后者需要 GPU，验证 RDMA 编排/心跳/分块发送。synthetic 配对公式由 CPU 目标 `test_synthetic_singles` 保证（无 GPU）。跨机 soak 见 `docs/app以及实验配置/测试说明.md`。
+`test_rdma_orchestration` 标 `integration`（符合引擎会碰 GPU）。synthetic 配对由 `test_synthetic_singles` 保证。跨机 soak 见 [RDMA多机实验.md](app以及实验配置/RDMA多机实验.md)。
 
 ```bash
-ctest --test-dir build/tests/pni -R test_local_grpc_coin --output-on-failure
 ctest --test-dir build/tests/pni -R test_rdma_orchestration --output-on-failure
 ```
 
-3. CUDA Tests（nvcc + libpni + tbb + openmp）
-- 目标：`test_pni_r2c`、`test_local_grpc_r2s`、`test_pni_coin`、`test_bdm50100_online_pipeline`
+3. CUDA（nvcc + libpni + tbb + openmp）
+- 编译：`test_pni_r2c`、`test_pni_coin`、`test_r2s50100_multi_gpu`、`test_coincidence_multi_gpu`、`test_coin_carry_boundary`、`test_local_grpc_r2s`、`test_local_grpc_r2s_coin`、`test_local_grpc_singles_ingress`、`test_local_grpc_coin_stream`、`test_bdm50100_online_pipeline`
+- 多数要 9120 数据，标 `integration` 或 `manual`。无数据时 `ctest -LE "integration|manual"` 可能没有可跑项。
 
 ```bash
 cmake --preset linux-release-tests-cuda
 cmake --build --preset build-tests-cuda -j
-ctest --test-dir build/tests/cuda -L cuda -LE integration --output-on-failure
-```
-
-说明：`test_local_grpc_r2s` 标记为 `integration`，如需运行请显式执行：
-
-```bash
-ctest --test-dir build/tests/cuda -R test_local_grpc_r2s --output-on-failure
+ctest --test-dir build/tests/cuda -R test_r2s50100_multi_gpu --output-on-failure
 ```
 
 ### Apps 预设（部署构建建议）
@@ -155,28 +152,16 @@ cmake -S . -B build/tools -DCMAKE_BUILD_TYPE=Release \
 cmake --build build/tools -j --target tool_sharded_raw_merge
 ```
 
-## 测试运行（Makefile 仅用于运行测试）
+## 测试运行
 
-Makefile 不再负责编译，仅保留测试运行入口。
+先 `./build.sh --tests`（或对应 preset），再用 ctest / 直接跑 `bin/test/*`。不要用 Makefile。完整分类见 [测试/README.md](测试/README.md)。
 
 ```bash
-# 查看测试入口
-make help
-
-# 运行 core 测试
-make test
-make test-grpc
-
-# 运行 PNI/CUDA 测试（非 integration）
-make all-full
-
-# 单项测试（示例）
-make test-streaming
-make test-pni-r2c
-make test-acq-control-init
+./build.sh --tests
+ctest --test-dir build/tests/core -L core --output-on-failure
+ctest --test-dir build/tests/pni  -L pni  -LE "integration|manual" --output-on-failure
+./bin/test/test_synthetic_singles
 ```
-
-说明：以上 make 命令会转发到 tests/Makefile，运行前请确保已执行 `./build.sh --tests` 完成构建。
 
 ## IO 配置
 
@@ -209,18 +194,14 @@ RawData / Singles（R2S）/ Listmode（Coincidence）三类输出统一支持"�
 - 若仍异常，显式指定：
 
 ```bash
-make all-full SYSTEM_LIB_DIR=/usr/lib/x86_64-linux-gnu
+cmake --preset linux-release-tests-pni -DR2C_PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu
+cmake --build --preset build-tests-pni -j
 ```
 
 ### 2) Protobuf 版本/头文件不一致
-若出现 `.pb.cc` 相关命名空间或类型错误，建议先清理并重生 proto：
-
-```bash
-make clean-proto
-make all-full
-```
+若出现 `.pb.cc` 相关命名空间或类型错误，删掉对应 `build/tests/*` 后重新 `cmake --preset` 再编。
 
 ### 3) NVCC 标准支持问题
-OpenPnI 相关代码是 C++23 + CUDA 混合链路，`nvcc` 侧应保持 C++20（Makefile 已按此配置）。
+OpenPnI 相关代码是 C++23 + CUDA 混合链路，`nvcc` 侧应保持 C++20（CMake 已按此配置）。
 
 

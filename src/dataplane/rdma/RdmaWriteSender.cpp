@@ -47,6 +47,24 @@ uint8_t *RdmaWriteSender::txSlotBase(uint32_t localIndex) noexcept
     return base + static_cast<size_t>(localIndex) * m_slotStride;
 }
 
+void *RdmaWriteSender::txStagingBase() const noexcept
+{
+    if (m_txArena.data() != nullptr)
+    {
+        return const_cast<void *>(m_txArena.data());
+    }
+    return const_cast<void *>(m_inprocessTxArena.data());
+}
+
+size_t RdmaWriteSender::txStagingBytes() const noexcept
+{
+    if (m_txArena.size() != 0)
+    {
+        return m_txArena.size();
+    }
+    return m_inprocessTxArena.size();
+}
+
 bool RdmaWriteSender::prepareLocalEndpoint(RdmaEndpointInfo *outLocal)
 {
     if (!outLocal)
@@ -269,6 +287,7 @@ void RdmaWriteSender::close()
     m_inprocessTxArena.release();
     m_txBusy.clear();
     m_inprocessTxBusy.clear();
+    m_txCudaRegistered = false;
 }
 
 bool RdmaWriteSender::waitForCredit(uint64_t needProducerSeq)

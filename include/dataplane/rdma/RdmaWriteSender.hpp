@@ -75,6 +75,10 @@ public:
     /** Drop a lease without posting (enqueue/send aborted). */
     void abortTxSlot(const TxSlotLease &lease);
 
+    bool txCudaRegistered() const noexcept { return m_txCudaRegistered; }
+    void setTxCudaRegistered(bool registered) noexcept { m_txCudaRegistered = registered; }
+    void *txStagingBase() const noexcept;
+    size_t txStagingBytes() const noexcept;
     uint64_t singlesSent() const noexcept { return m_singlesSent.load(); }
     uint64_t slotsSent() const noexcept { return m_slotsSent.load(); }
     bool ok() const noexcept { return m_connected; }
@@ -129,6 +133,7 @@ private:
     bool m_connected = false;
     std::atomic<uint64_t> m_singlesSent{0};
     std::atomic<uint64_t> m_slotsSent{0};
+    bool m_txCudaRegistered = false;
 };
 
 } // namespace openpni::distributed::dataplane::rdma

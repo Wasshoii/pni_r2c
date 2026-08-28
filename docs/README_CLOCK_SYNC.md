@@ -11,7 +11,7 @@ r2c/
 ├── TimeSyncServer.hpp                          # 时钟同步服务器实现
 ├── TimeSyncClient.hpp                          # 时钟同步客户端实现
 ├── DistributedClockSyncManager.hpp             # 集成管理接口
-├── test_distributed_clock_sync.cpp             # 完整的单机测试代码
+├── tests/correctness/test_timesync_algorithm.cpp  # 完整的单机测试代码
 ├── DISTRIBUTED_CLOCK_SYNC_INTEGRATION.md       # 详细集成指南
 ├── QUICK_INTEGRATION_GUIDE.cpp                 # 快速集成代码示例
 └── README_CLOCK_SYNC.md                        # 本文件
@@ -91,7 +91,7 @@ r2c/
 
 **使用场景**: 合并阶段的时钟校正
 
-### 6. test_distributed_clock_sync.cpp
+### 6. test_timesync_algorithm.cpp
 **用途**: 单机测试程序  
 **包含的测试**:
 1. **TestBasicClockSync** - 基础同步功能
@@ -102,10 +102,10 @@ r2c/
 **编译和运行**:
 ```bash
 # 编译（仅需 C++17）
-g++ -std=c++17 -pthread -o test_distributed_clock_sync test_distributed_clock_sync.cpp
+g++ -std=c++17 -pthread -o test_timesync_algorithm test_timesync_algorithm.cpp
 
 # 运行
-./test_distributed_clock_sync
+./test_timesync_algorithm
 ```
 
 **输出**: 详细的测试报告和验证结果
@@ -221,7 +221,7 @@ timeToleranceNs = 1'000'000'000LL;  // 1 秒容限
 
 在部署到生产环境前，请确保完成以下测试：
 
-- [ ] 编译和运行 `test_distributed_clock_sync.cpp`
+- [ ] 编译和运行 `test_timesync_algorithm.cpp`
 - [ ] 验证测试输出的所有 4 个测试用例通过
 - [ ] 在实际采集环境中测试客户端集成
 - [ ] 验证合并和段校正的正确性
@@ -233,7 +233,7 @@ timeToleranceNs = 1'000'000'000LL;  // 1 秒容限
 A: 不需要。只要数据已经过全局时间校正和排序，现有的符合计算代码无需修改。
 
 **Q: 如何验证时钟同步是否有效？**  
-A: 运行 `test_distributed_clock_sync.cpp`，查看"Multi-Client Alignment"测试结果。
+A: 运行 `test_timesync_algorithm.cpp`，查看"Multi-Client Alignment"测试结果。
 
 **Q: 支持实时网络同步吗？**  
 A: 当前实现是模拟的。要使用真实 gRPC 通信，需要实现 `TimeSyncServiceImpl`。

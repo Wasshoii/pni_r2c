@@ -16,18 +16,21 @@
 
 ```cpp
 struct SinglesResult {
-  openpni::tools::HostUniquePtr<Single> singles;  // pinned host
+  openpni::tools::HostUniquePtr<Single> singles;  // 仅 cut/sort/写盘/onSinglesReady 时再物化
+  openpni::detail::CudaUniquePointer<Single> d_singles;
+  int gpu_id = -1;
   uint64_t actualSinglesCount{0};
 };
 ```
 
-- 输出在 CUDA host-pinned 内存，便于后续 memcpy 到 RDMA TX 槽或 `sendSingles`。
-- `actualSinglesCount` 为本次有效条数，可能小于 `singles` 容量。
+- kernel 输出先 **D2D** 到 `d_singles`（generator `temp` 会被下一轮覆盖）。默认不再 D2H 到 pinned。
+- `gpu_id` 供消费线程 `cudaSetDevice` 后再 D2H。
+- `actualSinglesCount` 为本次有效条数。
 
 ### R2S50100SinglesResultPolicy
 
-- `max_input_gibits > 0` 时按 50100 包长与每包最大 singles 数预留容量，避免热路径反复分配。
-- `max_input_gibits == 0` 不预留（`Reserve` 为 0）。
+- `make_result()` 不再在错误的 GPU 上下文里预留巨大 host pinned。
+- `max_input_gibits` 仍用于估算上限；device 缓冲在 `compute()` 里按实际条数 `Reserve`。
 
 ### R2S50100ComputeConfig / R2S50100Compute
 
@@ -42,7 +45,7 @@ void compute(const RawDataView *data, SinglesResult *out) override;
 ```
 
 - 绑定 `gpuId`，内部持有 `BDM50100R2SArray` 与每通道 `BDM50100R2S`（libpni）。
-- `compute`：host `RawDataView` → [DPacketsAsync](DPacketsAsync.md) 上 GPU → libpni device R2S → pinned `SinglesResult`。
+- `compute`：host `RawDataView` → [DPacketsAsync](DPacketsAsync.md) 上 GPU → libpni device R2S → **device** `d_singles`。禁止在 `compute()` 里 `acquireTxSlot`（完成序 ≠ 段序）。
 - 算法细节（晶体、串扰、能量）在 libpni，此处不展开。
 
 `R2S50100SPSCProcessor` 是 `SPSCProcessor<RawDataView, SinglesResult, R2S50100SinglesResultPolicy>` 的别名。

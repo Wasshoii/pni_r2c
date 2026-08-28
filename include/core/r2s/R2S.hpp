@@ -36,6 +36,7 @@
 namespace openpni::distributed::r2s::multi_gpu
 {
     class R2S50100MultiGpuEngine;
+    struct PinnedRawSlot;
 }
 
 namespace openpni::distributed::r2s
@@ -131,7 +132,7 @@ namespace openpni::distributed::r2s
         std::string outputFileName;                // 输出文件名前缀（实际文件名可由批处理追加 inputClock 等后缀）
         u_int16_t channelNums;                     // 整机通道总数上界（9120=576）；不表示本节点必处理 0..N-1
         std::vector<uint16_t> channelIndices;      // 本节点分配处理的通道集合（空则处理 [0, channelNums)）
-        bool sortDataByTime = true;                // 是否按时间排序输出数据
+        bool sortDataByTime = false;               // 50100 段内排序由 libpni 完成；外部再排是可选后处理
         bool saveData2SingleFile = true;           // 是否保存为 Single 文件格式
         bool asyncFileWrite = false;               // 是否异步写入文件（提高处理吞吐量）
         size_t asyncWriteQueueSize = 200;          // 异步写入队列大小
@@ -161,12 +162,13 @@ namespace openpni::distributed::r2s
         uint32_t instancePerGpu = 1;             // 每张 GPU 上的 compute 实例数
         long double maxInputGibits = 0.0L;       // 0 = 不预分配 singles 缓冲
         float inputBurstToleranceCoef = 1.2f;    // ring slot 预分配系数
+        uint32_t computePipelineDepth = 1;       // 多 GPU 在飞段数；1 = submit 后立刻 next。Bridge 默认用 leaseQueueCapacity
 
         openpni::device::bdm50100_v2::caliCoef::EnergyThresholds_t energyThresholds = {60, 80, 100, 120, 140, 160, 180, 200, 0,  0.0454, 0.1111, 1.964, -0.0014}; // 能量阈值数组 for 50100
 
         // 分布式处理回调，使用时需设置（可与 saveData2SingleFile 同时使用，支持同时保存文件和流式传输）
         SinglesReadyCallback onSinglesReady = nullptr;         // 传输 host 侧 Single
-        SinglesSpanReadyCallback onSinglesSpanReady = nullptr; // 直接传输原始 Single 数据，避免转换开销
+        SinglesSpanReadyCallback onSinglesSpanReady = nullptr; // 50100 多 GPU 热路径可为 device span，回调内须 D2H 或 materialize
 
         R2SProcessConfig()
             : detectorType(DetectorType::Unknown), crystalsPerChannel(0), r2sResultIndex(0), outputFileName("singles")
@@ -472,7 +474,10 @@ namespace openpni::distributed::r2s
 
         bool initialize(uint16_t inputChannelNum = 0);
 
-        bool processSegment(const openpni::RawDataView &view);
+        // inputKeepAlive 在未 bounce 时持有到本段 H2D 完成（采集桥传入 RawDataLease）。
+        bool processSegment(
+            const openpni::RawDataView &view,
+            std::shared_ptr<void> inputKeepAlive = {});
 
         /**
          * @brief 关闭当前 singles 输出并按新前缀重新打开（用于目录批处理多文件切换输出名）
@@ -494,6 +499,8 @@ namespace openpni::distributed::r2s
 
         bool dispatchSinglesToFile(std::span<Single const> singles, uint64_t clockMs, uint32_t durationMs);
 
+        bool completeOldestMultiGpuSegment();
+
         void cleanupGenerators();
 
         R2SProcessConfig m_config;
@@ -513,6 +520,21 @@ namespace openpni::distributed::r2s
         std::unique_ptr<multi_gpu::R2S50100MultiGpuEngine> m_multiGpuEngine;
         bool m_useMultiGpu50100 = false;
         std::vector<Single> m_multiGpuHostSingles;
+
+        struct PendingMultiGpuSubmit
+        {
+            uint64_t clockMs = 0;
+            uint32_t durationMs = 0;
+            std::unique_ptr<openpni::RawDataView> submittedView;
+            std::unique_ptr<multi_gpu::PinnedRawSlot> bounce;
+            std::vector<uint64_t> filteredOffset;
+            std::vector<uint16_t> filteredLength;
+            std::vector<uint16_t> filteredChannel;
+            std::vector<uint16_t> remappedChannel;
+            std::shared_ptr<void> inputKeepAlive;
+        };
+        std::queue<PendingMultiGpuSubmit> m_pendingMultiGpu;
+        std::queue<std::unique_ptr<multi_gpu::PinnedRawSlot>> m_freeBounceSlots;
 
         openpni::distributed::coreio::RollingFileWriter<
             openpni::distributed::coreio::SinglesFileWriter,

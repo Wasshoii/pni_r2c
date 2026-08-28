@@ -50,7 +50,8 @@ void abortTxSlot(const TxSlotLease &lease);
 - `prepareLocalEndpoint`：建本地 QP（INIT）及 credit 镜像 MR，填 worker 端点给 OpenDataPlane。
 - `connect`：用 coin 端点完成 RC，或按 `inprocessHandle` 找到 [RdmaNodeRecvSession](RdmaRecvServer.md)。
 - `sendPackedSingles`：按远端 `slotStride` 切槽，填 [SlotHeader](SlotProtocol.md) 与 payload，等待 credit 后写出。RoCE 拷进已注册 TX 槽；InProcess 从源缓冲直接 memcpy 进接收环。
-- `acquireTxSlot` / `commitTxSlot`：CoincidenceClient 在 RoCE 上于生产线程填槽，sender 再提交。`abortTxSlot` 在入队失败时释放 lease。等待 TX/credit 时不长时间持有发送锁，以便填槽与 WRITE 重叠。
+- `acquireTxSlot` / `commitTxSlot`：CoincidenceClient 在 RoCE 上于 **有序消费线程** 填槽（device 源则 D2H 进 payload），sender 再提交。`abortTxSlot` 在入队失败时释放 lease。
+- `txStagingBase` / `txStagingBytes` / `txCudaRegistered`：供上层对 TX hugepage `cudaHostRegister`。dataplane **不链接 CUDA**；`close()` 只清标志、不 `cudaHostUnregister`。CoincidenceClient 必须在 `close()` 前 unregister。
 
 ### 反压
 

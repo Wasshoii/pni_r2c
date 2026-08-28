@@ -1,12 +1,17 @@
 #include "core/r2s/R2S.hpp"
 
+#include "core/r2s/multi_gpu/HostCudaRegister.hpp"
+#include "core/r2s/multi_gpu/PinnedRawBounce.hpp"
 #include "core/r2s/multi_gpu/R2S50100MultiGpuEngine.hpp"
 
 #include <cctype>
 #include <chrono>
 #include <glog/logging.h>
+#include <limits>
+#include <memory>
 #include <set>
 #include <sstream>
+#include <unordered_set>
 
 namespace openpni::distributed::r2s
 {
@@ -123,6 +128,16 @@ namespace openpni::distributed::r2s
         const Single *dataPtr = singles.data();
         if (isDevicePointer(dataPtr))
         {
+            cudaPointerAttributes attr{};
+            if (cudaPointerGetAttributes(&attr, dataPtr) == cudaSuccess && attr.device >= 0)
+            {
+                const cudaError_t setErr = cudaSetDevice(attr.device);
+                if (setErr != cudaSuccess)
+                {
+                    throw std::runtime_error(
+                        std::string("cudaSetDevice failed before D2H: ") + cudaGetErrorString(setErr));
+                }
+            }
             cudaError_t err = cudaMemcpy(hostSingles.data(), dataPtr,
                                          singles.size() * sizeof(Single),
                                          cudaMemcpyDeviceToHost);
@@ -517,6 +532,68 @@ namespace openpni::distributed::r2s
             cudaFree(d_singles);
             return true;
         }
+
+        enum class EffectiveViewStatus
+        {
+            Ok,
+            SkipEmpty
+        };
+
+        EffectiveViewStatus fillEffectiveView(
+            const openpni::RawDataView &view,
+            bool filterUnassigned,
+            const std::unordered_set<uint16_t> &assignedChannelSet,
+            const std::vector<uint16_t> &globalToLocalChannel,
+            std::vector<uint64_t> &filteredOffset,
+            std::vector<uint16_t> &filteredLength,
+            std::vector<uint16_t> &filteredChannel,
+            std::vector<uint16_t> &remappedChannel,
+            openpni::RawDataView &effectiveView)
+        {
+            effectiveView = view;
+            if (filterUnassigned && view.channel != nullptr)
+            {
+                filteredOffset.clear();
+                filteredLength.clear();
+                filteredChannel.clear();
+                filteredOffset.reserve(static_cast<size_t>(view.count));
+                filteredLength.reserve(static_cast<size_t>(view.count));
+                filteredChannel.reserve(static_cast<size_t>(view.count));
+                for (uint64_t i = 0; i < view.count; ++i)
+                {
+                    const uint16_t ch = view.channel[i];
+                    if (assignedChannelSet.find(ch) == assignedChannelSet.end())
+                    {
+                        continue;
+                    }
+                    filteredOffset.push_back(view.offset ? view.offset[i] : 0);
+                    filteredLength.push_back(view.length ? view.length[i] : 0);
+                    filteredChannel.push_back(ch);
+                }
+
+                if (filteredChannel.empty())
+                {
+                    return EffectiveViewStatus::SkipEmpty;
+                }
+
+                effectiveView.offset = filteredOffset.data();
+                effectiveView.length = filteredLength.data();
+                effectiveView.channel = filteredChannel.data();
+                effectiveView.count = filteredChannel.size();
+            }
+
+            if (filterUnassigned && !globalToLocalChannel.empty())
+            {
+                remappedChannel.resize(static_cast<size_t>(effectiveView.count));
+                for (uint64_t i = 0; i < effectiveView.count; ++i)
+                {
+                    remappedChannel[i] = globalToLocalChannel[effectiveView.channel[i]];
+                }
+                effectiveView.channel = remappedChannel.data();
+            }
+
+            return EffectiveViewStatus::Ok;
+        }
     }
 
     R2SStreamProcessor::R2SStreamProcessor(const R2SProcessConfig &config)
@@ -650,7 +727,9 @@ namespace openpni::distributed::r2s
         }
     }
 
-    bool R2SStreamProcessor::processSegment(const openpni::RawDataView &view)
+    bool R2SStreamProcessor::processSegment(
+        const openpni::RawDataView &view,
+        std::shared_ptr<void> inputKeepAlive)
     {
         if (!m_initialized)
         {
@@ -674,57 +753,46 @@ namespace openpni::distributed::r2s
             return true;
         }
 
-        openpni::RawDataView effectiveView = view;
+        PendingMultiGpuSubmit pending;
         std::vector<uint64_t> filteredOffset;
         std::vector<uint16_t> filteredLength;
         std::vector<uint16_t> filteredChannel;
+        std::vector<uint16_t> remappedChannel;
+        openpni::RawDataView effectiveView{};
 
-        if (m_filterUnassignedChannels && view.channel != nullptr)
+        auto *storeOffset = &filteredOffset;
+        auto *storeLength = &filteredLength;
+        auto *storeChannel = &filteredChannel;
+        auto *storeRemap = &remappedChannel;
+        if (m_useMultiGpu50100)
         {
-            filteredOffset.reserve(static_cast<size_t>(view.count));
-            filteredLength.reserve(static_cast<size_t>(view.count));
-            filteredChannel.reserve(static_cast<size_t>(view.count));
-            for (uint64_t i = 0; i < view.count; ++i)
-            {
-                const uint16_t ch = view.channel[i];
-                if (m_assignedChannelSet.find(ch) == m_assignedChannelSet.end())
-                {
-                    continue;
-                }
-                filteredOffset.push_back(view.offset ? view.offset[i] : 0);
-                filteredLength.push_back(view.length ? view.length[i] : 0);
-                filteredChannel.push_back(ch);
-            }
+            storeOffset = &pending.filteredOffset;
+            storeLength = &pending.filteredLength;
+            storeChannel = &pending.filteredChannel;
+            storeRemap = &pending.remappedChannel;
+        }
 
-            if (filteredChannel.empty())
+        const EffectiveViewStatus prepStatus = fillEffectiveView(
+            view,
+            m_filterUnassignedChannels,
+            m_assignedChannelSet,
+            m_globalToLocalChannel,
+            *storeOffset,
+            *storeLength,
+            *storeChannel,
+            *storeRemap,
+            effectiveView);
+        if (prepStatus == EffectiveViewStatus::SkipEmpty)
+        {
+            if (needPerfLog)
             {
-                if (needPerfLog)
-                {
-                    LOG(INFO) << "Segment " << segmentId
-                              << ": No packets for assigned channels, skipping";
-                }
-                return true;
+                LOG(INFO) << "Segment " << segmentId
+                          << ": No packets for assigned channels, skipping";
             }
-
-            effectiveView.offset = filteredOffset.data();
-            effectiveView.length = filteredLength.data();
-            effectiveView.channel = filteredChannel.data();
-            effectiveView.count = filteredChannel.size();
+            return true;
         }
 
         m_totalRawPackets += effectiveView.count;
-
-        // Remap global channel IDs to local (0-based) indices for GPU kernel
-        std::vector<uint16_t> remappedChannel;
-        if (m_filterUnassignedChannels && !m_globalToLocalChannel.empty())
-        {
-            remappedChannel.resize(static_cast<size_t>(effectiveView.count));
-            for (uint64_t i = 0; i < effectiveView.count; ++i)
-            {
-                remappedChannel[i] = m_globalToLocalChannel[effectiveView.channel[i]];
-            }
-            effectiveView.channel = remappedChannel.data();
-        }
 
         const uint64_t clockMs = effectiveView.clock_ms;
         const uint32_t durationMs =
@@ -741,48 +809,73 @@ namespace openpni::distributed::r2s
 
             if (m_useMultiGpu50100)
             {
-                multi_gpu::SegmentSinglesResult segmentResult;
+                pending.clockMs = clockMs;
+                pending.durationMs = durationMs;
+                pending.inputKeepAlive = std::move(inputKeepAlive);
+
+                const uint32_t depth = std::max<uint32_t>(1u, m_config.computePipelineDepth);
+                const bool registered = multi_gpu::tryRegisterRawViewForH2D(effectiveView);
+                const bool needBounce = !registered;
+                if (needBounce)
+                {
+                    std::unique_ptr<multi_gpu::PinnedRawSlot> bounceSlot;
+                    if (!m_freeBounceSlots.empty())
+                    {
+                        bounceSlot = std::move(m_freeBounceSlots.front());
+                        m_freeBounceSlots.pop();
+                    }
+                    else
+                    {
+                        bounceSlot = std::make_unique<multi_gpu::PinnedRawSlot>();
+                    }
+                    if (!bounceSlot->capture(effectiveView))
+                    {
+                        LOG(ERROR) << "Failed to pin-bounce raw segment " << segmentId;
+                        m_freeBounceSlots.push(std::move(bounceSlot));
+                        m_hadError = true;
+                        return false;
+                    }
+                    pending.bounce = std::move(bounceSlot);
+                    pending.submittedView = std::make_unique<openpni::RawDataView>(pending.bounce->view);
+                    pending.inputKeepAlive.reset();
+                }
+                else
+                {
+                    pending.submittedView = std::make_unique<openpni::RawDataView>(effectiveView);
+                }
+
                 try
                 {
-                    segmentResult = m_multiGpuEngine->processSegmentSync(effectiveView);
+                    m_multiGpuEngine->submitView(pending.submittedView.get());
                 }
                 catch (const std::exception &e)
                 {
-                    LOG(ERROR) << "Multi-GPU R2S compute failed at segment " << segmentId << ": " << e.what();
-                    m_hadError = true;
-                    return false;
-                }
-
-                singlesCount = segmentResult.count;
-
-                if (singlesCount == 0)
-                {
-                    const bool callbackSuccess = dispatchSinglesToCallback({}, clockMs, durationMs);
-                    const bool fileSuccess = dispatchSinglesToFile({}, clockMs, durationMs);
-                    return callbackSuccess && fileSuccess;
-                }
-
-                if (!postProcessHostSingles(segmentResult.span, m_config, m_multiGpuHostSingles))
-                {
-                    LOG(ERROR) << "Multi-GPU post-process failed at segment " << segmentId;
-                    m_hadError = true;
-                    return false;
-                }
-
-                if (m_filterUnassignedChannels && !m_localToGlobalChannel.empty())
-                {
-                    for (auto &s : m_multiGpuHostSingles)
+                    LOG(ERROR) << "Multi-GPU R2S submit failed at segment " << segmentId << ": " << e.what();
+                    if (pending.bounce)
                     {
-                        if (s.channelIndex < m_localToGlobalChannel.size())
-                        {
-                            s.channelIndex = m_localToGlobalChannel[s.channelIndex];
-                        }
+                        m_freeBounceSlots.push(std::move(pending.bounce));
+                    }
+                    m_hadError = true;
+                    return false;
+                }
+                m_pendingMultiGpu.push(std::move(pending));
+
+                while (m_pendingMultiGpu.size() >= depth)
+                {
+                    if (!completeOldestMultiGpuSegment())
+                    {
+                        return false;
                     }
                 }
 
-                singlesSpan = std::span<Single const>(
-                    m_multiGpuHostSingles.data(),
-                    m_multiGpuHostSingles.size());
+                if (needPerfLog)
+                {
+                    LOG(INFO) << "Segment " << segmentId
+                              << ": submitted " << effectiveView.count << " packets"
+                              << (needBounce ? " (pinned bounce)" : " (cudaHostRegister/direct)")
+                              << ", pipeline pending=" << m_pendingMultiGpu.size();
+                }
+                return true;
             }
             else
             {
@@ -910,6 +1003,127 @@ namespace openpni::distributed::r2s
         }
     }
 
+    bool R2SStreamProcessor::completeOldestMultiGpuSegment()
+    {
+        if (m_pendingMultiGpu.empty() || !m_multiGpuEngine)
+        {
+            return true;
+        }
+
+        PendingMultiGpuSubmit pending = std::move(m_pendingMultiGpu.front());
+        m_pendingMultiGpu.pop();
+
+        multi_gpu::R2S50100SPSCProcessor::OutputLease lease;
+        try
+        {
+            lease = m_multiGpuEngine->nextLease();
+        }
+        catch (const std::exception &e)
+        {
+            LOG(ERROR) << "Multi-GPU R2S next failed: " << e.what();
+            if (pending.bounce)
+            {
+                m_freeBounceSlots.push(std::move(pending.bounce));
+            }
+            m_hadError = true;
+            return false;
+        }
+
+        if (lease.failed())
+        {
+            LOG(ERROR) << "Multi-GPU R2S compute failed";
+            if (pending.bounce)
+            {
+                m_freeBounceSlots.push(std::move(pending.bounce));
+            }
+            m_hadError = true;
+            return false;
+        }
+
+        if (pending.bounce)
+        {
+            m_freeBounceSlots.push(std::move(pending.bounce));
+        }
+        pending.inputKeepAlive.reset();
+
+        std::span<Single const> singlesSpan;
+        if (lease)
+        {
+            auto &result = *lease;
+            const uint64_t count = result.actualSinglesCount;
+            if (count > 0 && result.d_singles.Data() != nullptr)
+            {
+                singlesSpan = std::span<Single const>(
+                    result.d_singles.Data(), static_cast<size_t>(count));
+                if (result.gpu_id >= 0)
+                {
+                    const cudaError_t setErr = cudaSetDevice(result.gpu_id);
+                    if (setErr != cudaSuccess)
+                    {
+                        LOG(ERROR) << "cudaSetDevice failed for segment result GPU "
+                                   << result.gpu_id << ": " << cudaGetErrorString(setErr);
+                        m_hadError = true;
+                        return false;
+                    }
+                }
+
+                const bool needHostPost = m_config.useEnergyCut || m_config.sortDataByTime;
+                const bool needHostRemap =
+                    m_filterUnassignedChannels && !m_localToGlobalChannel.empty();
+                if (needHostPost)
+                {
+                    auto hostCopy = materializeSinglesOnHost(singlesSpan);
+                    if (!postProcessHostSingles(
+                            std::span<Single const>(hostCopy.data(), hostCopy.size()),
+                            m_config,
+                            m_multiGpuHostSingles))
+                    {
+                        LOG(ERROR) << "Multi-GPU post-process failed";
+                        m_hadError = true;
+                        return false;
+                    }
+                    if (needHostRemap)
+                    {
+                        for (auto &s : m_multiGpuHostSingles)
+                        {
+                            if (s.channelIndex < m_localToGlobalChannel.size())
+                            {
+                                s.channelIndex = m_localToGlobalChannel[s.channelIndex];
+                            }
+                        }
+                    }
+                    singlesSpan = std::span<Single const>(
+                        m_multiGpuHostSingles.data(), m_multiGpuHostSingles.size());
+                }
+                else if (needHostRemap)
+                {
+                    m_multiGpuHostSingles = materializeSinglesOnHost(singlesSpan);
+                    for (auto &s : m_multiGpuHostSingles)
+                    {
+                        if (s.channelIndex < m_localToGlobalChannel.size())
+                        {
+                            s.channelIndex = m_localToGlobalChannel[s.channelIndex];
+                        }
+                    }
+                    singlesSpan = std::span<Single const>(
+                        m_multiGpuHostSingles.data(), m_multiGpuHostSingles.size());
+                }
+            }
+        }
+
+        const bool callbackSuccess =
+            dispatchSinglesToCallback(singlesSpan, pending.clockMs, pending.durationMs);
+        const bool fileSuccess =
+            dispatchSinglesToFile(singlesSpan, pending.clockMs, pending.durationMs);
+        m_totalSingles += singlesSpan.size();
+        if (!callbackSuccess || !fileSuccess)
+        {
+            m_hadError = true;
+            return false;
+        }
+        return true;
+    }
+
     bool R2SStreamProcessor::finalize()
     {
         if (m_finalized)
@@ -918,6 +1132,14 @@ namespace openpni::distributed::r2s
         }
 
         m_finalized = true;
+
+        while (!m_pendingMultiGpu.empty())
+        {
+            if (!completeOldestMultiGpuSegment())
+            {
+                break;
+            }
+        }
 
         if (m_asyncWriter)
         {
@@ -1240,6 +1462,23 @@ namespace openpni::distributed::r2s
         m_generatorsVector.clear();
     }
 
+    namespace
+    {
+        R2SProcessConfig r2sConfigForBridge(
+            const R2SProcessConfig &r2sConfig,
+            const AsyncRawDataToR2SBridge::Config &bridgeConfig)
+        {
+            R2SProcessConfig cfg = r2sConfig;
+            const uint32_t depth = static_cast<uint32_t>(
+                std::max<size_t>(1, bridgeConfig.leaseQueueCapacity));
+            if (cfg.computePipelineDepth <= 1)
+            {
+                cfg.computePipelineDepth = depth;
+            }
+            return cfg;
+        }
+    } // namespace
+
     AsyncRawDataToR2SBridge::AsyncRawDataToR2SBridge(const R2SProcessConfig &r2sConfig)
         : AsyncRawDataToR2SBridge(r2sConfig, Config())
     {
@@ -1248,7 +1487,7 @@ namespace openpni::distributed::r2s
     AsyncRawDataToR2SBridge::AsyncRawDataToR2SBridge(
         const R2SProcessConfig &r2sConfig,
         const Config &config)
-        : m_r2sProcessor(r2sConfig),
+        : m_r2sProcessor(r2sConfigForBridge(r2sConfig, config)),
           m_config(config),
           m_leaseQueue(std::make_unique<RawDataLeaseSpscRingQueue>(
               m_config.leaseQueueCapacity > 0 ? m_config.leaseQueueCapacity : 2))
@@ -1419,16 +1658,16 @@ namespace openpni::distributed::r2s
             const bool consumed = m_leaseQueue && m_leaseQueue->tryConsumeOne(
                                                       [this](RawDataLease &lease)
                                                       {
-                                                          if (!m_r2sProcessor.processSegment(lease.view))
+                                                          auto keep = std::make_shared<RawDataLease>(std::move(lease));
+                                                          const openpni::RawDataView view = keep->view;
+                                                          if (!m_r2sProcessor.processSegment(view, std::move(keep)))
                                                           {
                                                               m_failed.store(true, std::memory_order_release);
                                                               m_running.store(false, std::memory_order_release);
-                                                              lease.release();
                                                               return;
                                                           }
 
                                                           m_processedSegments.fetch_add(1, std::memory_order_relaxed);
-                                                          lease.release();
                                                       });
 
             if (!consumed)

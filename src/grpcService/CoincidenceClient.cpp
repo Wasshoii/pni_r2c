@@ -1,4 +1,5 @@
 #include "grpcService/CoincidenceClient.hpp"
+#include "core/r2s/multi_gpu/HostCudaRegister.hpp"
 #include "core/streaming/PackedSingle.hpp"
 #include "dataplane/rdma/ProtoConvert.hpp"
 #include "dataplane/rdma/SlotProtocol.hpp"
@@ -11,11 +12,52 @@
 #include <span>
 #include <thread>
 #include <utility>
+#include <cuda_runtime.h>
 #include <glog/logging.h>
 
 namespace openpni::distributed::streaming
 {
     namespace rdma = openpni::distributed::dataplane::rdma;
+
+    namespace
+    {
+    bool singlesOnDevice(const void *ptr)
+    {
+        if (ptr == nullptr)
+        {
+            return false;
+        }
+        cudaPointerAttributes attr{};
+        const cudaError_t st = cudaPointerGetAttributes(&attr, ptr);
+        if (st != cudaSuccess)
+        {
+            static_cast<void>(cudaGetLastError());
+            return false;
+        }
+#if CUDART_VERSION >= 10000
+        return attr.type == cudaMemoryTypeDevice;
+#else
+        return attr.memoryType == cudaMemoryTypeDevice;
+#endif
+    }
+
+    bool copySinglesIntoTxPayload(Single *dst, const Single *src, uint32_t n, bool srcDevice)
+    {
+        const size_t bytes = static_cast<size_t>(n) * kPackedSingleSize;
+        if (srcDevice)
+        {
+            const cudaError_t err = cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost);
+            if (err != cudaSuccess)
+            {
+                LOG(ERROR) << "D2H into TX slot failed: " << cudaGetErrorString(err);
+                return false;
+            }
+            return true;
+        }
+        std::memcpy(dst, src, bytes);
+        return true;
+    }
+    } // namespace
 
     CoincidenceClient::CoincidenceClient(const CoincidenceClientConfig &config)
         : m_config(config)
@@ -94,6 +136,11 @@ namespace openpni::distributed::streaming
 
         if (m_rdmaSender)
         {
+            if (m_rdmaSender->txCudaRegistered() && m_rdmaSender->txStagingBase() != nullptr)
+            {
+                static_cast<void>(cudaHostUnregister(m_rdmaSender->txStagingBase()));
+                m_rdmaSender->setTxCudaRegistered(false);
+            }
             m_rdmaSender->close();
             m_rdmaSender.reset();
         }
@@ -159,6 +206,18 @@ namespace openpni::distributed::streaming
         {
             LOG(ERROR) << "RDMA connect failed";
             return false;
+        }
+        if (m_rdmaSender->kind() == rdma::DataPlaneKind::RdmaRoceV2)
+        {
+            const bool registered = openpni::distributed::r2s::multi_gpu::tryCudaHostRegister(
+                m_rdmaSender->txStagingBase(), m_rdmaSender->txStagingBytes());
+            m_rdmaSender->setTxCudaRegistered(registered);
+            if (!registered)
+            {
+                LOG(WARNING) << "cudaHostRegister TX arena failed; device D2H into slots "
+                                "may use pageable staging node="
+                             << m_config.nodeId;
+            }
         }
         LOG(INFO) << "RDMA dataplane connected node=" << m_config.nodeId
                   << " kind=" << static_cast<uint32_t>(m_rdmaSender->kind())
@@ -286,6 +345,20 @@ namespace openpni::distributed::streaming
         uint32_t offset = 0;
         bool first = true;
         const uint32_t total = static_cast<uint32_t>(singles.size());
+        const bool srcDevice = singlesOnDevice(singles.data());
+        if (srcDevice)
+        {
+            cudaPointerAttributes attr{};
+            if (cudaPointerGetAttributes(&attr, singles.data()) == cudaSuccess && attr.device >= 0)
+            {
+                const cudaError_t setErr = cudaSetDevice(attr.device);
+                if (setErr != cudaSuccess)
+                {
+                    LOG(ERROR) << "cudaSetDevice failed before TX D2H: " << cudaGetErrorString(setErr);
+                    return false;
+                }
+            }
+        }
 
         while (offset < total)
         {
@@ -307,11 +380,15 @@ namespace openpni::distributed::streaming
             n = static_cast<uint32_t>(std::min<size_t>(n, capSingles));
 
             auto *dst = reinterpret_cast<Single *>(lease.payload);
+            if (!copySinglesIntoTxPayload(dst, singles.data() + offset, n, srcDevice))
+            {
+                m_rdmaSender->abortTxSlot(lease);
+                return false;
+            }
             if (m_config.remapLocalToGlobalChannels)
             {
                 for (uint32_t i = 0; i < n; ++i)
                 {
-                    dst[i] = singles[offset + i];
                     const uint64_t globalChannel =
                         static_cast<uint64_t>(dst[i].channelIndex) +
                         static_cast<uint64_t>(m_config.globalChannelOffset);
@@ -325,14 +402,9 @@ namespace openpni::distributed::streaming
                     if (offset + i == 0 && !m_remapSampleLogged.exchange(true))
                     {
                         LOG(INFO) << "remap sample node=" << m_config.nodeId
-                                  << " local_channel=" << singles[offset + i].channelIndex
                                   << " global_channel=" << dst[i].channelIndex;
                     }
                 }
-            }
-            else
-            {
-                std::memcpy(dst, singles.data() + offset, static_cast<size_t>(n) * kPackedSingleSize);
             }
 
             rdma::SlotHeader hdr{};
@@ -402,8 +474,28 @@ namespace openpni::distributed::streaming
         chunk->singles.resize(singles.size());
         if (!singles.empty())
         {
-            std::memcpy(chunk->singles.data(), singles.data(),
-                        singles.size() * kPackedSingleSize);
+            const bool srcDevice = singlesOnDevice(singles.data());
+            if (srcDevice)
+            {
+                cudaPointerAttributes attr{};
+                if (cudaPointerGetAttributes(&attr, singles.data()) == cudaSuccess &&
+                    attr.device >= 0)
+                {
+                    const cudaError_t setErr = cudaSetDevice(attr.device);
+                    if (setErr != cudaSuccess)
+                    {
+                        LOG(ERROR) << "cudaSetDevice failed before InProcess D2H: "
+                                   << cudaGetErrorString(setErr);
+                        return false;
+                    }
+                }
+            }
+            if (!copySinglesIntoTxPayload(
+                    chunk->singles.data(), singles.data(),
+                    static_cast<uint32_t>(singles.size()), srcDevice))
+            {
+                return false;
+            }
         }
         if (!remapChannels(&chunk->singles))
         {
@@ -443,7 +535,8 @@ namespace openpni::distributed::streaming
         uint64_t computerClock_ms,
         uint32_t duration_ms)
     {
-        if (m_config.remapLocalToGlobalChannels)
+        if (m_config.remapLocalToGlobalChannels ||
+            (!singles.empty() && singlesOnDevice(singles.data())))
         {
             return sendSingles(singles, computerClock_ms, duration_ms);
         }

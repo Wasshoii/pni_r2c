@@ -48,6 +48,9 @@ public:
 
     bool initialize(const R2S50100MultiGpuEngineConfig &config);
 
+    void submitView(const openpni::RawDataView *view);
+    R2S50100SPSCProcessor::OutputLease nextLease();
+
     SegmentSinglesResult processSegmentSync(const openpni::RawDataView &view);
 
     void finalize();
@@ -56,6 +59,7 @@ public:
 
 private:
     std::unique_ptr<R2S50100SPSCProcessor> processor_;
+    R2S50100SPSCProcessor::OutputLease held_lease_;
     std::vector<uint32_t> gpu_ids_;
     bool initialized_ = false;
 };

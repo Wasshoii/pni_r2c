@@ -1,5 +1,4 @@
 #include <pni/PnI-Config.hpp>
-#include "core/r2s/multi_gpu/PinnedHostCopy.cuh"
 #include "core/r2s/multi_gpu/R2S50100Compute.cuh"
 
 #include <stdexcept>
@@ -67,7 +66,7 @@ void R2S50100Compute::compute(const Data *data, Result *out)
     if (!data || !out || data->count == 0)
     {
         out->actualSinglesCount = 0;
-        out->singles.ResetPointer(0);
+        out->gpu_id = gpu_id_;
         return;
     }
 
@@ -90,11 +89,24 @@ void R2S50100Compute::compute(const Data *data, Result *out)
 
     const auto temp = array_.DRaw2Singles(d_info);
 
+    out->gpu_id = gpu_id_;
     out->actualSinglesCount = temp.size();
-    copy_from_device_to_pinned_host_async(
-        out->singles,
-        std::span<const Single>(temp.data(), temp.size()),
-        openpni::default_stream());
+    if (temp.empty() || temp.data() == nullptr)
+    {
+        return;
+    }
+
+    out->d_singles.Reserve(temp.size());
+    openpni::detail::cuda_throw(
+        cudaMemcpy(
+            out->d_singles.Data(),
+            temp.data(),
+            temp.size() * sizeof(Single),
+            cudaMemcpyDeviceToDevice),
+        "Failed to D2D copy singles off generator temp buffer");
+    openpni::detail::cuda_throw(
+        cudaStreamSynchronize(openpni::default_stream()),
+        "Failed to sync after singles D2D copy");
 }
 
 } // namespace openpni::distributed::r2s::multi_gpu

@@ -59,7 +59,7 @@
 - calibrationDir: 标定文件目录。
 - resultDir: R2S 输出目录。
 - channelIndices: 本节点采集通道索引列表。
-- sortDataByTime: 是否按时间排序后再处理。
+- sortDataByTime: 是否在 libpni 段内排序之外再按时间排序（默认 false；50100 段内已排序）。
 - saveData2SingleFile: 是否写到单文件。
 - asyncFileWrite: R2S 写盘是否异步。
 

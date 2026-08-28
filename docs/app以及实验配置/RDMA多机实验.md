@@ -54,7 +54,7 @@ Coin JSON 里的 `acquisitionControl` 会被 warn 并忽略。
 | 稳定性 | `coin_soak.json`（不写 LMF） | `worker0_soak.json` + `worker1_soak.json`（错开/pause） | `lag` `buf` credit `live` | 60s 内心跳不断、credit/buf 能恢复；不对对数 |
 | 符合极限 | `coin_rate.json` | `worker0_rate.json` + `worker1_rate.json` | `recvRate` vs `procRate` `memUsagePct` | 稳态吞吐；`lag` 不持续发散；不对对数 |
 
-`source.mode=stream` 必须同时设 `singlesPerSec>0` 与 `runSeconds>0`，边生成边发，避免全量进内存。`pairs` 与 `stream` 都按 `pushChunkSingles` 调用 `fillSyntheticChunk` 再发送。配对公式的单机断言见 `test_synthetic_singles`（[测试说明.md](测试说明.md)）。
+`source.mode=stream` 必须同时设 `singlesPerSec>0` 与 `runSeconds>0`，边生成边发，避免全量进内存。`pairs` 与 `stream` 都按 `pushChunkSingles` 调用 `fillSyntheticChunk` 再发送。配对公式的单机断言见 `test_coin_synthetic_singles`（[测试说明.md](测试说明.md)）。
 
 `worker1_soak.json` 带 `startDelayMs` 与 `pauseAfterMs`，用来看一节点卡住时 watermark / `buf` 偏斜。
 

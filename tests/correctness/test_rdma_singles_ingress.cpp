@@ -1,15 +1,15 @@
 /**
- * @file test_local_grpc_singles_ingress.cpp
+ * @file test_rdma_singles_ingress.cpp
  * @brief L2 RDMA ingress test: replay .lsingle files to a receive-only host.
  *
  * Validates Register / WaitForStart / OpenDataPlane(RDMA) / chunk continuity without
  * any CUDA workload.
  *
  * Build:
- *   cmake --build --preset build-tests-pni --target test_local_grpc_singles_ingress
+ *   cmake --build --preset build-tests-pni --target test_rdma_singles_ingress
  *
  * Run:
- *   ./bin/test/test_local_grpc_singles_ingress \
+ *   ./bin/test/test_rdma_singles_ingress \
  *     --data-root /media/lenovo/1TB/50100data/test_9120
  */
 
@@ -37,7 +37,7 @@
 #include "dataplane/rdma/RdmaRecvServer.hpp"
 #include "dataplane/rdma/SlotProtocol.hpp"
 #include "protos/coincidence.grpc.pb.h"
-#include "tests/grpc_singles_replay.hpp"
+#include "tests/correctness/lsingle_replay.hpp"
 
 namespace fs = std::filesystem;
 namespace coincidence = openpni::distributed::coincidence;
@@ -648,7 +648,7 @@ int main(int argc, char **argv)
     if (!parseArgs(argc, argv, opts)) return 1;
     if (opts.helpOnly)
     {
-        std::cout << "Usage: test_local_grpc_singles_ingress [options]\n"
+        std::cout << "Usage: test_rdma_singles_ingress [options]\n"
                   << "  --data-root <dir>       Base data directory\n"
                   << "  --node0-dir <dir>       Node0 singles directory\n"
                   << "  --node1-dir <dir>       Node1 singles directory\n"
@@ -720,7 +720,7 @@ int main(int argc, char **argv)
     std::vector<std::string> files0, files1;
     if (opts.enableNode0())
     {
-        files0 = grpc_singles_replay::collectSinglesFiles(opts.node0Dir);
+        files0 = lsingle_replay::collectSinglesFiles(opts.node0Dir);
         if (files0.empty())
         {
             std::cerr << "[Ingress] ERROR: missing .lsingle files in node0Dir="
@@ -731,7 +731,7 @@ int main(int argc, char **argv)
     }
     if (opts.enableNode1())
     {
-        files1 = grpc_singles_replay::collectSinglesFiles(opts.node1Dir);
+        files1 = lsingle_replay::collectSinglesFiles(opts.node1Dir);
         if (files1.empty())
         {
             std::cerr << "[Ingress] ERROR: missing .lsingle files in node1Dir="
@@ -745,9 +745,9 @@ int main(int argc, char **argv)
     {
         uint64_t expectedTotal = 0;
         if (opts.enableNode0())
-            expectedTotal += grpc_singles_replay::countSinglesInFiles(files0);
+            expectedTotal += lsingle_replay::countSinglesInFiles(files0);
         if (opts.enableNode1())
-            expectedTotal += grpc_singles_replay::countSinglesInFiles(files1);
+            expectedTotal += lsingle_replay::countSinglesInFiles(files1);
         std::cout << "expectedTotal : " << expectedTotal << std::endl;
     }
     else
@@ -789,12 +789,12 @@ int main(int argc, char **argv)
     }
     std::cout << "[Ingress] Server listening on " << opts.address << std::endl;
 
-    grpc_singles_replay::ReplayStats stats0, stats1;
+    lsingle_replay::ReplayStats stats0, stats1;
     stats0.success = true; // unused node treated as success
     stats1.success = true;
 
     auto makeOpts = [&](uint32_t nodeId) {
-        grpc_singles_replay::ReplayOptions ro;
+        lsingle_replay::ReplayOptions ro;
         ro.serverAddress = opts.address;
         ro.nodeId = nodeId;
         ro.channelCount = 288;
@@ -811,9 +811,9 @@ int main(int argc, char **argv)
 
     std::thread t0, t1;
     if (opts.enableNode0())
-        t0 = std::thread([&] { stats0 = grpc_singles_replay::runNodeReplay(files0, makeOpts(0)); });
+        t0 = std::thread([&] { stats0 = lsingle_replay::runNodeReplay(files0, makeOpts(0)); });
     if (opts.enableNode1())
-        t1 = std::thread([&] { stats1 = grpc_singles_replay::runNodeReplay(files1, makeOpts(1)); });
+        t1 = std::thread([&] { stats1 = lsingle_replay::runNodeReplay(files1, makeOpts(1)); });
 
     if (t0.joinable()) t0.join();
     if (t1.joinable()) t1.join();
@@ -824,7 +824,7 @@ int main(int argc, char **argv)
 
     // Results
     std::cout << "\n--- Replay Stats ---" << std::endl;
-    auto printNodeStats = [](const char *label, const grpc_singles_replay::ReplayStats &s, bool enabled) {
+    auto printNodeStats = [](const char *label, const lsingle_replay::ReplayStats &s, bool enabled) {
         if (!enabled)
         {
             std::cout << label << ": (disabled)" << std::endl;

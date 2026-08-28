@@ -1,9 +1,9 @@
 /**
- * @file test_local_grpc_r2s_coin.cpp
+ * @file test_r2s_rdma_coin.cpp
  * @brief 9120 dual-node end-to-end: R2S → RDMA singles → StreamingTimeAligner
  *
  * Single-process harness: CoinGrpcNode + two parallel R2SGrpcNode instances.
- * R2S node logic lives in test_local_grpc_r2s_coin_r2s_runner.cpp to avoid
+ * R2S node logic lives in test_r2s_rdma_coin_runner.cpp to avoid
  * conflicting pni Coincidence.hpp includes in one TU.
  */
 
@@ -28,8 +28,8 @@
 #include "core/io/IOAdapter.hpp"
 #include "core/streaming/StreamingCoincidence.hpp"
 #include "grpcNode/coinNode.hpp"
-#include "tests/local_grpc_9120_common.hpp"
-#include "tests/test_local_grpc_r2s_coin_r2s_runner.hpp"
+#include "tests/correctness/data_9120_common.hpp"
+#include "tests/correctness/test_r2s_rdma_coin_runner.hpp"
 
 namespace fs = std::filesystem;
 namespace coincidence = openpni::distributed::coincidence;
@@ -171,8 +171,6 @@ namespace
             {
                 opts.maxPendingSegments =
                     static_cast<size_t>(std::stoul(needValue("--max-pending-segments")));
-                continue;
-            }
                 continue;
             }
             if (arg == "--network-latency-margin-ps")
@@ -587,17 +585,17 @@ int main(int argc, char **argv)
 /*
 Build:
   cmake --preset linux-release-tests-cuda
-  cmake --build --preset build-tests-cuda --target test_local_grpc_r2s_coin
+  cmake --build --preset build-tests-cuda --target test_r2s_rdma_coin
 
 Run:
-./bin/test/test_local_grpc_r2s_coin \
+./bin/test/test_r2s_rdma_coin \
     --address 127.0.0.1:50061 \
     --data-root /media/lenovo/1TB/50100data/test_9120
 
 Lower VRAM pressure:
-./bin/test/test_local_grpc_r2s_coin --max-pending-segments 16 --disable-multi-gpu
+./bin/test/test_r2s_rdma_coin --max-pending-segments 16 --disable-multi-gpu
 
 Protocol-only (no real coin) two-terminal debug still uses:
-  ./bin/test/test_local_grpc_coin --expected-node-count 2 --address 127.0.0.1:50061
-  ./bin/test/test_local_grpc_r2s --no-local-receiver --parallel --address 127.0.0.1:50061
+  ./bin/test/test_rdma_recv_stub --expected-node-count 2 --address 127.0.0.1:50061
+  ./bin/test/test_r2s_rdma_send --no-local-receiver --parallel --address 127.0.0.1:50061
 */

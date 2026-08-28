@@ -15,6 +15,7 @@
 #include <pni/node/raw2singles/BDM50100/BDM50100Define.hpp>
 #include <pni/node/raw2singles/BDM50100/BDM50100R2S.hpp>
 #include <pni/node/raw2singles/BDM50100/BDM50100R2SArray.hpp>
+#include <pni/tools/CudaPtr.hpp>
 #include <pni/tools/HostUniquePtr.hpp>
 
 #include "core/r2s/multi_gpu/DPacketsAsync.cuh"
@@ -25,12 +26,16 @@ namespace openpni::distributed::r2s::multi_gpu
 
 struct SinglesResult
 {
-    SinglesResult() : singles(std::make_unique<openpni::detail::VAllocatorCUDAHost>()),
-                    actualSinglesCount(0)
+    SinglesResult()
+        : singles(std::make_unique<openpni::detail::VAllocatorCUDAHost>()),
+          d_singles{"R2S_d_singles"},
+          actualSinglesCount(0)
     {
     }
 
     openpni::tools::HostUniquePtr<Single> singles;
+    openpni::detail::CudaUniquePointer<Single> d_singles;
+    int gpu_id = -1;
     uint64_t actualSinglesCount{0};
 };
 
@@ -44,11 +49,6 @@ struct R2S50100SinglesResultPolicy
     SinglesResult make_result() const
     {
         SinglesResult result;
-        const size_t reserve_count = reserve_singles_count();
-        if (reserve_count != 0)
-        {
-            result.singles.Reserve(reserve_count);
-        }
         return result;
     }
 

@@ -174,8 +174,8 @@ include/grpcService/
 protos/
 └── coincidence.proto           # gRPC 协议定义
 
-tests/
-└── test_streaming_coincidence.cpp  # 单元测试
+tests/correctness/
+└── test_coin_streaming_aligner.cpp  # 流式对齐（不经 RDMA）
 ```
 
 ## 设计亮点

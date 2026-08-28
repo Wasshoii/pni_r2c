@@ -1,9 +1,9 @@
 /**
- * @file grpc_singles_replay.cpp
+ * @file lsingle_replay.cpp
  * @brief .lsingle → RDMA packed replay for L2/L3 tests (gRPC control plane only).
  */
 
-#include "tests/grpc_singles_replay.hpp"
+#include "tests/correctness/lsingle_replay.hpp"
 #include "core/streaming/PackedSingle.hpp"
 #include "grpcService/CoincidenceClient.hpp"
 
@@ -28,7 +28,7 @@ using Single = openpni::Single;
 using openpni::distributed::streaming::CoincidenceClient;
 using openpni::distributed::streaming::CoincidenceClientConfig;
 
-namespace grpc_singles_replay
+namespace lsingle_replay
 {
 
 namespace
@@ -389,4 +389,4 @@ ReplayStats runNodeReplay(const std::vector<std::string> &filePaths, const Repla
     return stats;
 }
 
-} // namespace grpc_singles_replay
+} // namespace lsingle_replay

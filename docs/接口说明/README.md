@@ -30,7 +30,8 @@
 
 ### dataplane/rdma
 
-- [dataplane/rdma/README.md](dataplane/rdma/README.md) — 总览：RoCE 原理、槽环、热路径拷贝
+- [dataplane/rdma/README.md](dataplane/rdma/README.md) — 总览：RoCE 原理、槽环、热路径拷贝（档 1：D2H 直写 TX）
+- [dataplane/rdma/GPUDirectRDMA.md](dataplane/rdma/GPUDirectRDMA.md) — 档 2 设计（未实现）
 - [dataplane/rdma/RdmaTypes.md](dataplane/rdma/RdmaTypes.md)
 - [dataplane/rdma/SlotProtocol.md](dataplane/rdma/SlotProtocol.md)
 - [dataplane/rdma/HugepageArena.md](dataplane/rdma/HugepageArena.md)

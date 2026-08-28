@@ -62,11 +62,10 @@ flowchart LR
   dpdkCopy["CPU: mbuf to RawDataView"]
   h2d["H2D raw packets"]
   kern["GPU R2S kernel"]
-  d2h["D2H to pinned"]
-  tx["CPU: memcpy into TX MR"]
+  d2h["D2H into TX MR"]
   roce["NIC WRITE to coin ring"]
   unpack["CPU: unpack to aligner"]
-  nicDma --> dpdkCopy --> h2d --> kern --> d2h --> tx --> roce --> unpack
+  nicDma --> dpdkCopy --> h2d --> kern --> d2h --> roce --> unpack
 ```
 
 | 步 | 位置 | 数据 | 是否 CPU memcpy |
@@ -74,33 +73,24 @@ flowchart LR
 | 0 | DPDK RX | raw | NIC DMA，不算 host 拷贝 |
 | 1 | DPDK copy 线程 | raw | 是（mbuf → 连续 `RawDataView`） |
 | 2 | `DPacketsAsync::ReserveFromHost` | raw | H2D |
-| 3 | `DRaw2Singles` | 变换 | kernel，不是同内容拷贝 |
-| 4 | `PinnedHostCopy` | singles | D2H 到 pinned |
-| 5 | `materializeSinglesOnHost` | singles | **已消**（worker 用 `onSinglesSpanReady`） |
-| 6–7 | `sendSingles` 填 TX | singles | **RoCE：一次**拷进已注册 TX 槽（回调/生产线程 `acquireTxSlot`）；sender 只 `waitForCredit` + WRITE。反压深度约为 `txSlotCount`（默认 8），不再经 `PendingChunk` heap |
-| 8 | RoCE `WRITE_WITH_IMM` | singles | NIC DMA，CPU 不碰 payload |
-| 9 | ingest | singles | 单槽 SOF+EOF：**是**（`unpack` 进 aligner 自有 vector，随后立刻 `releaseSlot`）；跨槽：各槽 memcpy 进 `vector<Single>`，EOF 时 **move** |
+| 3 | `DRaw2Singles` 后 D2D 到 `d_singles` | 变换 | kernel + device 拷，不是 host 拷贝 |
+| 4–5 | `PinnedHostCopy` / 引擎 pinned / `materializeSinglesOnHost` | singles | **热路径已消**。energy cut / 外部 sort / 写盘 / `onSinglesReady` 仍 D2H 到 host |
+| 6 | `fillRoceTxAndEnqueue` | singles | **D2H 直写**已 `ibv_reg_mr` 且 `cudaHostRegister` 的 TX 槽（`acquireTxSlot` 必须在有序 `next()` 之后的单消费线程；禁止 GPU worker 填槽） |
+| 7 | RoCE `WRITE_WITH_IMM` | singles | NIC DMA，CPU 不碰 payload |
+| 8 | ingest | singles | 单槽 SOF+EOF：**是**（`unpack` 进 aligner 自有 vector，随后立刻 `releaseSlot`）；跨槽：各槽 memcpy 进 `vector<Single>`，EOF 时 **move** |
 
-InProcess 的 `sendPackedSingles` 从源缓冲直接写入接收环（一次 memcpy），不填 TX。
+InProcess：device span 先 D2H 进 pending host 缓冲，再 memcpy 进接收环；不能把 device 指针当 borrowed span。
 
-合计（worker RoCE 在线路径）：raw **2 次**（host + H2D）；singles **D2H + 1 次 host memcpy 进 TX** + 单槽 ingest 再 1 次（步 9），再加网络 DMA。符合 GPU 的 H2D 在 aligner 之后，不算本段。
+合计（worker RoCE 在线路径）：raw **2 次**（host + H2D）；singles **一次 D2H 进 TX** + 单槽 ingest 再 1 次（步 8），再加网络 DMA。符合 GPU 的 H2D 在 aligner 之后，不算本段。
 
-未落地：
+拷贝阶梯：
 
-1. R2S D2H 写入 TX MR，或 GPUDirect RDMA（见下）。
-2. 采集侧 DPDK 零拷贝或 GPUDirect 入 GPU，去掉步 1（下一阶段）。
+| 档 | 做法 | 相对现状 | 硬件 | 状态 |
+| --- | --- | --- | --- | --- |
+| 0 | D2H → 额外 pinned → memcpy TX MR | 两次 host 落地 | 任意 RoCE | 已被档 1 替换 |
+| 1 | 有序 `next` 后 `cudaMemcpy` D2H 进已注册 TX 槽 | 去掉 memcpy 与引擎 pinned | E810 或 CX | **热路径** |
+| 2 | GPUDirect：显存 VA 注册 MR，NIC 从 GPU DMA | 去掉 D2H 与 memcpy | 仅 ConnectX + `nvidia_peermem` | [未实现，见 GPUDirectRDMA.md](GPUDirectRDMA.md) |
 
-当前 `app_acq_r2s_node` 的 `source.type=acquisition` 仍是 stub；上表描述的是接上 DPDK 后会走的路径。
+未落地：采集侧 DPDK 零拷贝或 GPUDirect 入 GPU，去掉步 1（下一阶段）。当前 `app_acq_r2s_node` 的 `source.type=acquisition` 仍是 stub；上表描述的是接上 DPDK 后会走的路径。
 
-### GPUDirect（未实现）
-
-两条路不要混：
-
-| | A. D2H 写入 host TX MR | B. 真 GPUDirect RDMA |
-|--|--|--|
-| 做法 | CUDA D2H 进已 `ibv_reg_mr` 的 hugepage TX 槽，再 WRITE | 把 **GPU VA** 注册成 MR，NIC 从显存 DMA |
-| 现码 | `acquireTxSlot` 已给出 host 指针；未接线 | 无 `nvidia_peermem` / GPU MR |
-| 硬件 | 任意 CUDA GPU + RoCE RNIC | Mellanox/NVIDIA ConnectX（推荐 CX-6）+ `nvidia_peermem` + GPU/RNIC 同 PCIe 根；**Intel E810 不行** |
-| 对 R2S 速率 | TX 槽少时 `acquireTxSlot` 会堵住 D2H/回调；GPU buf 在 D2H 完成后可复用 | 显存槽要等到 CQ（及 credit）才能复用，更容易卡住 kernel |
-
-[四机推荐配置](../../../app以及实验配置/四机推荐配置.md) worker 网卡是 E810 **或** CX-6。GPUDirect 只在 **RoCE 那张是 ConnectX** 时才有意义。实现后预留 `dataplane.enableGpuDirectRdma`（默认 `false`）：开启时探测 `nvidia_peermem` + verbs GPU MR，失败则报错退出、不静默回退。本批不改 JSON。
+档 2 细节、数据模型与风险见 [GPUDirectRDMA.md](GPUDirectRDMA.md)。[四机推荐配置](../../../app以及实验配置/四机推荐配置.md) worker 网卡是 E810 **或** CX-6，因此 GPUDirect 不能当默认。将来若加 `dataplane.enableGpuDirectRdma`（默认 `false`）：开启时探测 `nvidia_peermem` + P2P + verbs GPU MR，失败则报错退出、不静默回退。本批不改 JSON。

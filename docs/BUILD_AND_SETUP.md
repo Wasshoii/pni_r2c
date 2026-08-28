@@ -91,7 +91,7 @@ cmake -S . -B build/cmake \
 `./build.sh --tests` 会跑下面三档 configure+build，编该档已启用的全部测试。分类与默认 ctest 见 [测试/README.md](测试/README.md)。
 
 1. Core（gRPC/Protobuf）
-- 目标：`test_distributed_clock_sync`、`test_distributed_clock_sync_grpc`
+- 目标：`test_timesync_algorithm`、`test_timesync_grpc`
 
 ```bash
 cmake --preset linux-release-tests-core
@@ -100,8 +100,8 @@ ctest --test-dir build/tests/core -L core --output-on-failure
 ```
 
 2. PNI（libpni + tbb + openmp）
-- 编译：`test_synthetic_singles`、`test_rdma_dataplane_loopback`、`test_rdma_orchestration`、`test_app_config`、`test_app_inprocess_smoke`、`test_acquisition_control_init`、`test_streaming_coincidence`、`test_local_grpc_coin`
-- 默认 ctest（`-LE "integration|manual"`）：synthetic、loopback、app_config、acq_control_init
+- 编译：`test_coin_synthetic_singles`、`test_rdma_dataplane_loopback`、`test_rdma_orchestration`、`test_app_config_parse`、`test_app_inprocess_smoke`、`test_acq_control_init`、`test_coin_streaming_aligner`、`test_rdma_recv_stub`
+- 默认 ctest（`-LE "integration|manual"`）：`test_coin_synthetic_singles`、`test_rdma_dataplane_loopback`、`test_app_config_parse`、`test_acq_control_init`
 
 ```bash
 cmake --preset linux-release-tests-pni
@@ -109,20 +109,20 @@ cmake --build --preset build-tests-pni -j
 ctest --test-dir build/tests/pni -L pni -LE "integration|manual" --output-on-failure
 ```
 
-`test_rdma_orchestration` 标 `integration`（符合引擎会碰 GPU）。synthetic 配对由 `test_synthetic_singles` 保证。跨机 soak 见 [RDMA多机实验.md](app以及实验配置/RDMA多机实验.md)。
+`test_rdma_orchestration` 标 `integration`（符合引擎会碰 GPU）。synthetic 配对由 `test_coin_synthetic_singles` 保证。跨机 soak 见 [RDMA多机实验.md](app以及实验配置/RDMA多机实验.md)。
 
 ```bash
 ctest --test-dir build/tests/pni -R test_rdma_orchestration --output-on-failure
 ```
 
 3. CUDA（nvcc + libpni + tbb + openmp）
-- 编译：`test_pni_r2c`、`test_pni_coin`、`test_r2s50100_multi_gpu`、`test_coincidence_multi_gpu`、`test_coin_carry_boundary`、`test_local_grpc_r2s`、`test_local_grpc_r2s_coin`、`test_local_grpc_singles_ingress`、`test_local_grpc_coin_stream`、`test_bdm50100_online_pipeline`
-- 多数要 9120 数据，标 `integration` 或 `manual`。无数据时 `ctest -LE "integration|manual"` 可能没有可跑项。
+- 编译：`test_pni_r2s_offline`、`test_pni_coin_offline`、`test_r2s_50100_multi_gpu`、`test_r2s_50100_single_ring`、`test_coin_multi_gpu`、`test_coin_carry_boundary`、`test_r2s_rdma_send`、`test_r2s_rdma_coin`、`test_rdma_singles_ingress`、`test_coin_lsingle_stream`、`test_r2s_online_pipeline`
+- 多数要 9120/NECR 数据，标 `integration`、`manual` 或 `performance`。无数据时 `ctest -LE "integration|manual"` 可能没有可跑项。
 
 ```bash
 cmake --preset linux-release-tests-cuda
 cmake --build --preset build-tests-cuda -j
-ctest --test-dir build/tests/cuda -R test_r2s50100_multi_gpu --output-on-failure
+ctest --test-dir build/tests/cuda -R test_r2s_50100_multi_gpu --output-on-failure
 ```
 
 ### Apps 预设（部署构建建议）
@@ -160,7 +160,7 @@ cmake --build build/tools -j --target tool_sharded_raw_merge
 ./build.sh --tests
 ctest --test-dir build/tests/core -L core --output-on-failure
 ctest --test-dir build/tests/pni  -L pni  -LE "integration|manual" --output-on-failure
-./bin/test/test_synthetic_singles
+./bin/test/test_coin_synthetic_singles
 ```
 
 ## IO 配置

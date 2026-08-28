@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file local_grpc_9120_common.hpp
+ * @file data_9120_common.hpp
  * @brief Shared 9120 dual-node constants, channel helpers, and LMF validators
  *        for streaming coincidence and gRPC R2S→coin tests.
  */

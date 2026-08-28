@@ -82,7 +82,7 @@ namespace openpni::distributed::app
         std::string calibrationDir = "Data/bdm2/calibration";
         std::string resultDir = "Data/result/Bdm2/split";
         std::vector<uint16_t> channelIndices = {0, 1, 2, 3};
-        bool sortDataByTime = true;
+        bool sortDataByTime = false;
         bool saveData2SingleFile = false;
         bool asyncFileWrite = false;
         uint64_t maxFileSizeMb = 0;      // 0 表示不分卷（单文件，默认行为）

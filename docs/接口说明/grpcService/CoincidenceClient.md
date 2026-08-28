@@ -55,8 +55,8 @@ bool sendSingles(std::vector<Single> &&singles,
                  uint32_t duration_ms);
 ```
 
-- **RoCE**：调用线程按槽 `acquireTxSlot` + memcpy 进 TX MR，入队已填 lease；`senderLoop` 只 `waitForCredit` + `commitTxSlot`（WRITE）。一块过大拆多槽，同一 `chunkId`。PAUSE 仍挡在入队侧。
-- **InProcess**：不填 TX；`span` 拷进 pending（或 `sendSinglesView` 借指针），sender 直写接收环。
+- **RoCE**：调用线程（必须是有序 `next()` 的消费线程）按槽 `acquireTxSlot`，源为 device 时 `cudaMemcpy` D2H 进已 `cudaHostRegister` 的 TX payload，源为 host 时 memcpy；入队已填 lease；`senderLoop` 只 `waitForCredit` + `commitTxSlot`（WRITE）。一块过大拆多槽，同一 `chunkId`。PAUSE 仍挡在入队侧。`OpenDataPlane` 成功后对 TX hugepage `cudaHostRegister`；`stop()` 先 `cudaHostUnregister` 再 `close()`。
+- **InProcess**：不填 TX；device span 先 D2H 进 pending，host span 拷进 pending（或 `sendSinglesView` 借指针），sender 直写接收环。
 - 队列达到 `maxPendingChunks` 时阻塞，直到发送推进或 `stop` / `STOP_PRODUCE`。
 
 ### sendSinglesView
@@ -67,8 +67,8 @@ bool sendSinglesView(std::span<const Single> singles,
                      uint32_t duration_ms);
 ```
 
-- InProcess：只入队指针，不拷 payload。调用方保证 span 在该 chunk 真正发出前一直有效（preload 缓冲：直到 `waitUntilIdle` / `notifyProducerComplete`）。
-- RoCE：与 `sendSingles(span)` 相同，拷进 TX 槽后即可释放调用方缓冲。
+- InProcess：只入队指针，不拷 payload。**device span 不能借**，退回 `sendSingles` 做 D2H。调用方保证 host span 在该 chunk 真正发出前一直有效。
+- RoCE：与 `sendSingles(span)` 相同，D2H/memcpy 进 TX 槽后即可释放调用方缓冲。
 - 开启 channel remap 时退回拷贝路径（不能改调用方缓冲）。
 
 `computerClock_ms` / `duration_ms` 写入槽头，符合对齐仍以 PET `timevalue_100fs` 为准。
@@ -106,6 +106,7 @@ bool notifyProducerComplete();
 
 ## 使用提示
 
-- `span` 仅在回调返回前有效：RoCE 下 `sendSingles(span)` 在返回前已拷进 TX 槽；InProcess 拷进 pending。不要假设 span 在回调返回后仍指向 GPU/租约缓冲。
+- `span` 仅在回调返回前有效：RoCE 下 `sendSingles(span)` 在返回前已 D2H/拷进 TX 槽；InProcess 对 host 拷进 pending，对 device 先 D2H。不要假设 span 在回调返回后仍指向 GPU/租约缓冲。
 - 不要绕过本类直接对未 connect 的 `RdmaWriteSender` 发包；槽尺寸与 rkey 来自 OpenDataPlane。
+- 不要在 GPU worker 里 `acquireTxSlot`：多卡完成序 ≠ 段序，会打乱 QP `seq` 与符合水位线。
 - Heartbeat 上的 PAUSE/STOP 会挡住或结束生产，细节见状态机文档。

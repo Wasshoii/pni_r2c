@@ -1,18 +1,18 @@
 /**
- * @file test_local_grpc_coin_stream.cpp
+ * @file test_coin_lsingle_stream.cpp
  * @brief L3 gRPC coincidence stream test: replay .lsingle → CoinGrpcNode → LMF.
  *
- * Uses grpc_singles_replay to stream pre-computed singles from both 9120 nodes
+ * Uses lsingle_replay to stream pre-computed singles from both 9120 nodes
  * to a real CoinGrpcNode (StreamingTimeAligner + coincidence engine). Validates
  * that prompt/delay LMF files are produced and contain meaningful data.
  *
  * No R2S CUDA workload — safe for single-GPU environments.
  *
  * Build:
- *   cmake --build --preset build-tests-pni --target test_local_grpc_coin_stream
+ *   cmake --build --preset build-tests-pni --target test_coin_lsingle_stream
  *
  * Run:
- *   ./bin/test/test_local_grpc_coin_stream \
+ *   ./bin/test/test_coin_lsingle_stream \
  *     --data-root /media/lenovo/1TB/50100data/test_9120 --disable-multi-gpu
  */
 
@@ -29,8 +29,8 @@
 
 #include "core/streaming/StreamingCoincidence.hpp"
 #include "grpcNode/coinNode.hpp"
-#include "tests/grpc_singles_replay.hpp"
-#include "tests/local_grpc_9120_common.hpp"
+#include "tests/correctness/lsingle_replay.hpp"
+#include "tests/correctness/data_9120_common.hpp"
 
 namespace fs = std::filesystem;
 namespace streaming = openpni::distributed::streaming;
@@ -113,7 +113,7 @@ int main(int argc, char **argv)
     if (!parseArgs(argc, argv, opts)) return 1;
     if (opts.helpOnly)
     {
-        std::cout << "Usage: test_local_grpc_coin_stream [options]\n"
+        std::cout << "Usage: test_coin_lsingle_stream [options]\n"
                   << "  --data-root <dir>                 Base data directory\n"
                   << "  --node0-dir / --node1-dir <dir>   Singles directories\n"
                   << "  --coin-output-dir <dir>           LMF output directory\n"
@@ -143,8 +143,8 @@ int main(int argc, char **argv)
     std::cout << "singlesPerSec     : " << opts.singlesPerSec << std::endl;
 
     // Validate inputs
-    auto files0 = grpc_singles_replay::collectSinglesFiles(opts.node0Dir);
-    auto files1 = grpc_singles_replay::collectSinglesFiles(opts.node1Dir);
+    auto files0 = lsingle_replay::collectSinglesFiles(opts.node0Dir);
+    auto files1 = lsingle_replay::collectSinglesFiles(opts.node1Dir);
     if (files0.empty() || files1.empty())
     {
         std::cerr << "[CoinStream] ERROR: missing .lsingle files (node0=" << files0.size()
@@ -197,9 +197,9 @@ int main(int argc, char **argv)
     // Launch replay threads
     const auto t0 = std::chrono::steady_clock::now();
 
-    grpc_singles_replay::ReplayStats stats0, stats1;
+    lsingle_replay::ReplayStats stats0, stats1;
     auto makeOpts = [&](uint32_t nodeId) {
-        grpc_singles_replay::ReplayOptions ro;
+        lsingle_replay::ReplayOptions ro;
         ro.serverAddress = opts.address;
         ro.nodeId = nodeId;
         ro.channelCount = 288;
@@ -211,8 +211,8 @@ int main(int argc, char **argv)
         return ro;
     };
 
-    std::thread t0Thread([&] { stats0 = grpc_singles_replay::runNodeReplay(files0, makeOpts(0)); });
-    std::thread t1Thread([&] { stats1 = grpc_singles_replay::runNodeReplay(files1, makeOpts(1)); });
+    std::thread t0Thread([&] { stats0 = lsingle_replay::runNodeReplay(files0, makeOpts(0)); });
+    std::thread t1Thread([&] { stats1 = lsingle_replay::runNodeReplay(files1, makeOpts(1)); });
 
     t0Thread.join();
     t1Thread.join();

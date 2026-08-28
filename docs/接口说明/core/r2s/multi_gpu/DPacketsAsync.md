@@ -34,4 +34,4 @@ struct DPacketsAsync {
 ## 使用提示
 
 - 仅由 `R2S50100Compute::compute` 使用。
-- 与 [PinnedHostCopy](PinnedHostCopy.md) 方向相反：本文件是 H2D 包数据，后者是 D2H singles。
+- 与 [PinnedHostCopy](PinnedHostCopy.md) 方向相反：本文件是 H2D 包数据。50100 热路径 singles 不再经 PinnedHostCopy。

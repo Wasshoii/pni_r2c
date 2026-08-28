@@ -44,6 +44,8 @@ r2c/
 │       └── testTool.hpp
 ├── protos/
 ├── tests/
+│   ├── correctness/   # 行为断言
+│   └── performance/   # 吞吐/时延（暂无用例）
 ├── docs/
 ├── Data/
 └── README.md
@@ -67,7 +69,9 @@ r2c/
 - CUDA 单事件处理和测试辅助工具。
 
 ### 2.5 tests
-- 按单元模块 / 通信 / 集成覆盖，见 `docs/测试/README.md`。
+- `tests/correctness/`：正确性（内部仍按单元模块 / 通信 / 集成说明）。
+- `tests/performance/`：吞吐/时延，当前为空。
+- 见 `docs/测试/README.md`。
 
 ## 3. 依赖关系（维护要求）
 推荐依赖方向：

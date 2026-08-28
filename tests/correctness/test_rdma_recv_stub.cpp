@@ -778,18 +778,18 @@ int main(int argc, char **argv)
 
 /*
 Build:
-  cmake --build --preset build-tests-pni --target test_local_grpc_coin
+  cmake --build --preset build-tests-pni --target test_rdma_recv_stub
 
 Terminal 1 (coin receiver, orchestration only — no real StreamingTimeAligner):
-  ./bin/test/test_local_grpc_coin --address 127.0.0.1:50061 --expected-node-count 2
+  ./bin/test/test_rdma_recv_stub --address 127.0.0.1:50061 --expected-node-count 2
 
 Terminal 2 (9120 dual-node R2S; parallel required so both Register before start):
-  ./bin/test/test_local_grpc_r2s --no-local-receiver --parallel --address 127.0.0.1:50061
+  ./bin/test/test_r2s_rdma_send --no-local-receiver --parallel --address 127.0.0.1:50061
 
 For real R2S→coincidence E2E (multi-GPU only, single process):
-  ./bin/test/test_local_grpc_r2s_coin
+  ./bin/test/test_r2s_rdma_coin
 
 Preferred single-GPU alternatives (replay .lsingle, no R2S CUDA):
-  L2 ingress:  ./bin/test/test_local_grpc_singles_ingress --data-root /media/lenovo/1TB/50100data/test_9120
-  L3 coin:     ./bin/test/test_local_grpc_coin_stream --data-root /media/lenovo/1TB/50100data/test_9120 --disable-multi-gpu
+  L2 ingress:  ./bin/test/test_rdma_singles_ingress --data-root /media/lenovo/1TB/50100data/test_9120
+  L3 coin:     ./bin/test/test_coin_lsingle_stream --data-root /media/lenovo/1TB/50100data/test_9120 --disable-multi-gpu
 */

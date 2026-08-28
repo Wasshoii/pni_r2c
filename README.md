@@ -13,7 +13,7 @@ RawData 采集 -> R2S 单事件转换 -> 流式符合计算 -> 结果输出
 
 ## 2. 快速开始
 ### 2.1 构建与测试
-构建统一使用 CMake + `build.sh`。测试分类见 `docs/测试/README.md`。
+构建统一使用 CMake + `build.sh`。测试源码在 `tests/correctness/`（正确性）与 `tests/performance/`（性能，暂无用例）；分类见 `docs/测试/README.md`。
 
 ```bash
 # 一键构建 app/test/tools
@@ -26,7 +26,7 @@ RawData 采集 -> R2S 单事件转换 -> 流式符合计算 -> 结果输出
 ```bash
 ctest --test-dir build/tests/core -L core --output-on-failure
 ctest --test-dir build/tests/pni  -L pni  -LE "integration|manual" --output-on-failure
-./bin/test/test_synthetic_singles
+./bin/test/test_coin_synthetic_singles
 ```
 
 更详细的构建说明见 docs/BUILD_AND_SETUP.md。

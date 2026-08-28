@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file test_local_grpc_r2s_coin_r2s_runner.hpp
+ * @file test_r2s_rdma_coin_runner.hpp
  * @brief R2S→RDMA node runner for the E2E test, isolated from coin headers
  *        (pni/node/Coincidence.hpp vs pni/node/misc/Coincidence.hpp conflict).
  */

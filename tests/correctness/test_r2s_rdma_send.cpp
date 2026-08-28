@@ -844,10 +844,10 @@ int main(int argc, char **argv)
 
 /*
 Build example:
-    cmake --build --preset build-tests-cuda --target test_local_grpc_r2s
+    cmake --build --preset build-tests-cuda --target test_r2s_rdma_send
 
 Run (9120 dual-node; default serial to avoid dual-GPU OOM on one card):
-./bin/test/test_local_grpc_r2s \
+./bin/test/test_r2s_rdma_send \
     --address 127.0.0.1:50061 \
     --data-root /media/lenovo/1TB/50100data/test_9120 \
     --calibration-dir /media/lenovo/1TB/50100data/pni_res/caliFile \
@@ -855,20 +855,20 @@ Run (9120 dual-node; default serial to avoid dual-GPU OOM on one card):
     --max-pending-segments 32 \
     
 Parallel (requires enough free GPU VRAM for 2x 288ch R2S):
-./bin/test/test_local_grpc_r2s --parallel
+./bin/test/test_r2s_rdma_send --parallel
 
 External coincidence host (protocol-only receiver):
-./bin/test/test_local_grpc_coin --expected-node-count 2 --address 127.0.0.1:50061
-./bin/test/test_local_grpc_r2s --no-local-receiver --parallel --address 127.0.0.1:50061
+./bin/test/test_rdma_recv_stub --expected-node-count 2 --address 127.0.0.1:50061
+./bin/test/test_r2s_rdma_send --no-local-receiver --parallel --address 127.0.0.1:50061
 
 Real R2S→streaming coincidence E2E (CoinGrpcNode + dual R2S in one process, multi-GPU only):
-./bin/test/test_local_grpc_r2s_coin
+./bin/test/test_r2s_rdma_coin
 
 L2 RDMA ingress (no CUDA, replays .lsingle files):
-./bin/test/test_local_grpc_singles_ingress --data-root /media/lenovo/1TB/50100data/test_9120
+./bin/test/test_rdma_singles_ingress --data-root /media/lenovo/1TB/50100data/test_9120
 
 L3 gRPC + streaming coincidence (single-GPU safe, replays .lsingle files):
-./bin/test/test_local_grpc_coin_stream --data-root /media/lenovo/1TB/50100data/test_9120 --disable-multi-gpu
+./bin/test/test_coin_lsingle_stream --data-root /media/lenovo/1TB/50100data/test_9120 --disable-multi-gpu
 
 NOTE: L2/L3 require pre-computed singles from L1 offline R2S (pni_singles_node0/1).
 */

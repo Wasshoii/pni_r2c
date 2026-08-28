@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file grpc_singles_replay.hpp
+ * @file lsingle_replay.hpp
  * @brief Load .lsingle files and replay them over the RDMA singles data plane
  *        (gRPC control: Register / WaitForStart / OpenDataPlane).
  */
@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace grpc_singles_replay
+namespace lsingle_replay
 {
 
 struct ReplayOptions
@@ -53,4 +53,4 @@ std::vector<std::string> collectSinglesFiles(const std::string &dirOrFile);
 uint64_t countSinglesInFiles(const std::vector<std::string> &filePaths);
 ReplayStats runNodeReplay(const std::vector<std::string> &filePaths, const ReplayOptions &opts);
 
-} // namespace grpc_singles_replay
+} // namespace lsingle_replay

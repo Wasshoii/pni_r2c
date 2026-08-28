@@ -1,9 +1,9 @@
 /**
- * @file test_local_grpc_r2s_coin_r2s_runner.cpp
+ * @file test_r2s_rdma_coin_runner.cpp
  * @brief Implements 9120 R2S→RDMA node run without including streaming/coin headers.
  */
 
-#include "tests/test_local_grpc_r2s_coin_r2s_runner.hpp"
+#include "tests/correctness/test_r2s_rdma_coin_runner.hpp"
 
 #include <any>
 #include <valarray>

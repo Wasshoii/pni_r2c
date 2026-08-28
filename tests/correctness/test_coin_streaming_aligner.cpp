@@ -1,5 +1,5 @@
 /**
- * @file test_streaming_coincidence.cpp
+ * @file test_coin_streaming_aligner.cpp
  * @brief 流式符合计算系统测试
  *
  * 测试 StreamingTimeAligner 的核心功能：
@@ -12,7 +12,7 @@
 #include <pni/PnI-Config.hpp>
 
 #include "core/streaming/StreamingCoincidence.hpp"
-#include "tests/local_grpc_9120_common.hpp"
+#include "tests/correctness/data_9120_common.hpp"
 #include <pni/io/IO.hpp>
 #include <pni/io/ListmodeIO.hpp>
 #include <algorithm>

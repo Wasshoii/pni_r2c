@@ -49,5 +49,9 @@ void signal_no_more_data();
 ## 使用提示
 
 - 提交线程与消费线程必须各只有一个；worker 数量可变。
-- `next()` 拿到的 `Result` 指针在 lease 释放后无效。引擎在 `processSegmentSync` 内把 singles 暴露为 span 前会保持 lease 或拷到稳定缓冲。
+- `next()` 拿到的 `Result` 指针在 lease 释放后无效。引擎在 `processSegmentSync` 内把 `d_singles` 暴露为 span 前会保持 lease。
 - 失败路径：某 worker `compute` 抛错或 slot `Failed` 时，消费侧应停止继续 `submit` 并 `signal_no_more_data`。
+
+### 计算缩放
+
+多 worker 是 **整段任务并行**：各卡同时算不同段，`next()` 仍按 submit 序。吞吐在在飞段数 ≥ GPU 数时可接近线性；单段时延几乎不降。同卡 `instancePerGpu>1` 抢 SM。含 H2D/D2H/PCIe 时不要把 N× 当成承诺。详见 [R2S50100MultiGpuEngine](R2S50100MultiGpuEngine.md)「计算缩放」。

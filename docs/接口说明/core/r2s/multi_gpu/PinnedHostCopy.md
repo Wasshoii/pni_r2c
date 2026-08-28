@@ -4,9 +4,9 @@
 
 ## 目的
 
-把 device 上的 `span<const T>` 异步拷到 CUDA pinned host（`HostUniquePtr`），并在函数内 `cudaStreamSynchronize`。用于 R2S GPU 输出落到 host，再交给回调或 RDMA 发送。
+把 device 上的 `span<const T>` 异步拷到 CUDA pinned host（`HostUniquePtr`），并在函数内 `cudaStreamSynchronize`。S2C 等路径仍用；**50100 R2S 热路径已不再经此落到引擎 pinned**，singles 留在 `d_singles`，D2H 在 TX 填槽或 `materializeSinglesOnHost`。
 
-**应用代码不要直接 include。** 上层应使用 [R2S.md](../R2S.md) 的 `materializeSinglesOnHost` 或引擎返回的 pinned span。
+**应用代码不要直接 include。** 上层应使用 [R2S.md](../R2S.md) 的 `materializeSinglesOnHost`。
 
 命名空间：`openpni::distributed::r2s::multi_gpu`。
 

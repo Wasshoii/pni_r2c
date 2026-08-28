@@ -31,12 +31,12 @@ using SinglesSpanReadyCallback = std::function<bool(
     std::span<Single const> singles, uint64_t clock_ms, uint32_t duration_ms)>;
 ```
 
-- `onSinglesSpanReady` 已设置时，`processR2S` / `R2SStreamProcessor` **优先**调用它，避免再物化一份 host `vector`。
-- `span` 仅在回调返回前有效。回调内若异步使用（入队、跨线程发送），必须先拷贝，可用 `materializeSinglesOnHost`。
+- `onSinglesSpanReady` 已设置时，`processR2S` / `R2SStreamProcessor` **优先**调用它。50100 多 GPU 默认路径上 span 可能是 **device 指针**；回调必须 `cudaMemcpy` D2H（例如 `CoincidenceClient::sendSingles`）或 `materializeSinglesOnHost`，不可对显存做 host `memcpy`。
+- `span` 仅在回调返回前有效。回调内若异步使用（入队、跨线程发送），必须先拷贝。
 - 返回 `false` 表示调用方要求停止后续处理。
 - 可与 `saveData2SingleFile` 同时开启：一边写 `.lsingle`，一边流式送出。
 
-worker 热路径通常设 `onSinglesReady`，内部 `sendSingles`，见 [CoincidenceClient](../../grpcService/CoincidenceClient.md)。
+worker 热路径设 `onSinglesSpanReady` → `CoincidenceClient::sendSingles`，见 [CoincidenceClient](../../grpcService/CoincidenceClient.md)。
 
 ### R2SProcessConfig
 
@@ -47,6 +47,8 @@ worker 热路径通常设 `onSinglesReady`，内部 `sendSingles`，见 [Coincid
 - `channelNums`：整机通道上界；`channelIndices` 非空则本节点只处理该集合，空则处理 `[0, channelNums)`。
 - `detectorType`、`crystalsPerChannel`、`r2sResultIndex`：探测器与 `ConvergedR2S` 注册下标。
 - `onSinglesReady` / `onSinglesSpanReady`：流式输出。
+- `sortDataByTime`：默认 **false**。50100 段内排序由 libpni 完成；再开则在 host 上额外 H2D/sort/D2H。
+- `computePipelineDepth`：多 GPU 在飞段数，默认 1（`processSegment` 内 submit 后立刻完成）。`AsyncRawDataToR2SBridge` 在配置为 1 时改用 `leaseQueueCapacity`。
 - `saveData2SingleFile`、`asyncFileWrite`、`singlesMaxFileSizeBytes`：写盘；`maxFileSizeBytes==0` 表示不分卷。
 - `enableMultiGpu` / `gpuIds` / `instancePerGpu`：仅 BDM50100。`gpuIds` 空则使用全部可见 GPU。
 - `matchXTalkEnabled`、`timeWindow`、`timeShift`、`crossTalkEnabled`、能量窗等：传给 libpni generator，由 `create*Config` 工厂填默认值。
@@ -80,7 +82,9 @@ class R2SStreamProcessor {
 public:
   explicit R2SStreamProcessor(const R2SProcessConfig &config);
   bool initialize(uint16_t inputChannelNum = 0);
-  bool processSegment(const openpni::RawDataView &view);
+  bool processSegment(
+      const openpni::RawDataView &view,
+      std::shared_ptr<void> inputKeepAlive = {});
   bool reopenOutput(const std::string &filePrefix);
   bool finalize();
 };
@@ -91,7 +95,7 @@ public:
 - `reopenOutput`：目录批处理切换输出前缀。
 - `finalize`：刷写异步队列、释放 generator。
 
-BDM50100 且 `enableMultiGpu` 时内部使用 `R2S50100MultiGpuEngine::processSegmentSync`，输出 pinned host `span<Single>`。
+BDM50100 且 `enableMultiGpu` 时内部使用 `R2S50100MultiGpuEngine`（`submitView` + `nextLease`）。默认无 energy cut / 无外部 sort / 无通道 remap 时，`onSinglesSpanReady` 拿到 **device** span，回调返回前 output lease 有效（覆盖整段切槽 D2H）。H2D 优先对输入做 `cudaHostRegister`；失败则 R2S 线程 pin-bounce（槽数 = 流水深度），拷完即可归还采集包槽。`computePipelineDepth>1` 时 submit 后延迟 `next`，`finalize()` 排空在飞段。采集桥在未 bounce 时把 `RawDataLease` 交进 `processSegment` 的 keep-alive，直到对应段 H2D 完成。多卡吞吐缩放前提见 [R2S50100MultiGpuEngine](multi_gpu/R2S50100MultiGpuEngine.md)。
 
 ### RawDataLease / RawDataLeaseSpscRingQueue
 

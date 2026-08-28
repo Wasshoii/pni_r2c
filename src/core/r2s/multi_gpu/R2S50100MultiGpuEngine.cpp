@@ -58,6 +58,17 @@ R2S50100MultiGpuEngineConfig makeMultiGpuEngineConfig(
     engine_config.instance_per_gpu = std::max<uint32_t>(1u, config.instancePerGpu);
     engine_config.max_input_gibits = config.maxInputGibits;
     engine_config.input_burst_tolerance_coef = config.inputBurstToleranceCoef;
+    const size_t pipeline = std::max<uint32_t>(1u, config.computePipelineDepth);
+    if (config.maxInputGibits > 0.0L)
+    {
+        engine_config.ring_size = std::max(pipeline + 2, size_t{4});
+        engine_config.queue_cap = engine_config.ring_size;
+    }
+    else
+    {
+        engine_config.ring_size = std::max(R2S50100SPSCProcessor::DEFAULT_RING_SIZE, pipeline + 2);
+        engine_config.queue_cap = std::max(R2S50100SPSCProcessor::DEFAULT_QUEUE_CAP, pipeline + 2);
+    }
 
     engine_config.local_calib_files.reserve(channels_to_process.size());
     for (const auto global_channel : channels_to_process)
@@ -141,44 +152,55 @@ bool R2S50100MultiGpuEngine::initialize(const R2S50100MultiGpuEngineConfig &conf
 
 SegmentSinglesResult R2S50100MultiGpuEngine::processSegmentSync(const openpni::RawDataView &view)
 {
-    if (!initialized_ || !processor_)
+    submitView(&view);
+    held_lease_ = nextLease();
+    if (held_lease_.failed())
     {
-        throw std::runtime_error("R2S50100MultiGpuEngine: not initialized");
+        throw std::runtime_error("R2S50100MultiGpuEngine: compute failed");
     }
-
-    if (!view.count || !view.data)
+    if (!held_lease_)
     {
         return {};
     }
 
-    processor_->submit(&view);
-    auto lease = processor_->next();
-
-    if (lease.failed())
-    {
-        throw std::runtime_error("R2S50100MultiGpuEngine: compute failed");
-    }
-
-    if (!lease)
-    {
-        throw std::runtime_error("R2S50100MultiGpuEngine: empty result");
-    }
-
-    const auto &result = *lease;
+    const auto &result = *held_lease_;
     const uint64_t count = result.actualSinglesCount;
-    if (count == 0)
+    if (count == 0 || result.d_singles.Data() == nullptr)
     {
         return {};
     }
 
     return SegmentSinglesResult{
-        std::span<const Single>(result.singles.Data(), static_cast<size_t>(count)),
+        std::span<const Single>(result.d_singles.Data(), static_cast<size_t>(count)),
         count};
+}
+
+void R2S50100MultiGpuEngine::submitView(const openpni::RawDataView *view)
+{
+    if (!initialized_ || !processor_ || view == nullptr)
+    {
+        throw std::runtime_error("R2S50100MultiGpuEngine: not initialized");
+    }
+    if (!view->count || !view->data)
+    {
+        return;
+    }
+    processor_->submit(view);
+}
+
+R2S50100SPSCProcessor::OutputLease R2S50100MultiGpuEngine::nextLease()
+{
+    if (!initialized_ || !processor_)
+    {
+        throw std::runtime_error("R2S50100MultiGpuEngine: not initialized");
+    }
+    return processor_->next();
 }
 
 void R2S50100MultiGpuEngine::finalize()
 {
     processor_.reset();
+    held_lease_ = {};
     gpu_ids_.clear();
     initialized_ = false;
 }

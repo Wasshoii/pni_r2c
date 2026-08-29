@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include <cstdio>
 #include <pni/tools/CudaCompatibility.hpp>
 
 namespace openpni::distributed::r2s::multi_gpu
@@ -268,8 +269,20 @@ public:
             OutputPtr output = &slot->result.value();
             return OutputLease(NextStatus::Ready, output, slot_index, std::move(slot), reuse_state_);
         }
+        catch (const std::exception &e)
+        {
+            // 不留下原始信息的话，上层只能看到一句 "compute failed"，无从定位。
+            // 这个头文件被不链接 glog 的目标包含，因此直接写 stderr。
+            std::fprintf(stderr, "[SPSCProcessor] compute slot %zu failed: %s\n",
+                         slot_index, e.what());
+            release_slot(slot_index);
+            return OutputLease(NextStatus::Failed, nullptr, 0, nullptr, nullptr);
+        }
         catch (...)
         {
+            std::fprintf(stderr,
+                         "[SPSCProcessor] compute slot %zu failed with unknown exception\n",
+                         slot_index);
             release_slot(slot_index);
             return OutputLease(NextStatus::Failed, nullptr, 0, nullptr, nullptr);
         }

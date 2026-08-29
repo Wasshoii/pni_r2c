@@ -61,6 +61,77 @@ struct TimestampedSingleChunk {
 3. 合并排序后进行符合计算
 4. 更新时间边界，重复
 
+#### 触发机制
+
+处理循环是**事件驱动 + 多条件触发**，不是固定节拍轮询。`NodeRingBuffer::push` 在释放锁
+之后回调唤醒处理线程，处理线程在 `m_wakeCv.wait_for(processingIntervalMs)` 上等待——
+`processingIntervalMs` 的语义因此是「无 push 时的最长空转等待」，而不是处理周期。
+
+醒来后按顺序判定：
+
+1. 水位线必须前进（`watermark > lastWatermark`）。缓冲已到高水位却推不动水位线，说明某
+   节点数据滞后，此时**只背压 + 限流告警**，绝不越过水位线抽取。
+2. 段跨度必须达到硬下界 `minSegmentOverlapFactor × 重叠窗`，否则继续攒。
+3. 满足以下任一条件即处理：待处理量 ≥ `minSegmentSingles`、任一节点/内存池占用 ≥
+   `bufferHighWaterRatio`、距上次处理超过 `maxProcessLatencyMs`。
+
+一段被显存预算钳掉尾巴时不会回去等待，而是立即继续下一段，直到追平水位线。
+
+#### 三条不变式
+
+1. 压力触发与延迟兜底只改变「**何时**」处理，绝不改变「**处理到哪里**」。抽取边界恒
+   `<= calculateWatermark()`，跨节点对齐语义与触发策略完全解耦。
+2. 抽取边界恒 `>= lastWatermark + minSegmentOverlapFactor × 重叠窗`（停机 flush 除外）。
+3. 送入内核的批 = carry + 新数据，**两者合计**受 `maxSegmentSingles` 约束。
+
+#### 两个下界的分工
+
+`minSegmentSingles` 是**软下界**，管内核效率：批太小则 kernel 启动开销占比过高，所以不足
+时继续攒；但缓冲压力或延迟到期可以突破它。
+
+`minSegmentOverlapFactor` 是**硬下界**（以重叠窗为单位，随 `coinProtocol` 自动伸缩），管
+carry 占比与边界单调性：段跨度小于重叠窗时 carry 占比趋近 100%，同一批数据被反复重算，
+且抽取边界可能不再单调。压力和超时都**不能**突破它，唯一例外是停机 `flushRemaining`。
+取 4 时 carry 相对开销约 25%，调大可进一步摊薄。
+
+`carrySinglesTotal / totalSinglesProcessed` 就是 carry 重算开销比，可用来校准这个因子。
+
+#### 单批上限（重要）
+
+底层 `openpni::Coincidence::getDListmode` 对单批 singles 数存在上限，越界表现为 CUDA 非法
+访存（硬崩溃，不是降级）。9120 双节点数据实测在 5×10^5 与 10^6 之间触发。`maxSegmentSingles`
+就是这个上限的护栏，默认 262144；**不建议设为 0（不限制）**，突发流量下水位线一次推进很远
+就会踩到内核上限。初始化时若检测到 0 或估算显存不足会打 WARNING。
+
+#### 多 GPU 流水线与写盘顺序
+
+多 GPU 路径把处理循环拆成三条线程，不再在抽取线程上同步 `submit`+`next`+写盘：
+
+1. **抽取线程**：水位判定、归并、`updateCarrySingles`（仍用主机数据、在 `submit` 之前），然后把
+   有主 pinned 槽交给 `submitSingles`。槽活到对应的 `nextResult()`。
+2. **GPU 工人**：`SPSCProcessor` 谁空谁接下一段（负载均衡）。时间顺序只由 submit 序和 `next()`
+   序保证，不把 GPU i 绑死在第 i 段。
+3. **收回线程**：按提交序 `nextResult()`，把 prompt/delay listmode 拷进有界写队列后立刻释放
+   GPU lease 和输入槽。
+4. **写盘线程**：FIFO 先写 `prompt.lmf` 再写 `delay.lmf`。队列满则收回阻塞 → GPU 环填满 →
+   `submit` 阻塞 → 上游环形缓冲背压。停机时写线程排空后再 `RollingFileWriter::Stop()`。
+
+`coinPipelineDepth` 默认 0，按 `gpuCount × instancePerGpu` 推导 ring；也可显式设在飞段数。
+`ring_size = max(computeInstances+2, depth+2, 4)`。单 GPU 回退（`enableMultiGpu=false`）仍走
+同步 `processCoincidence`，不为 legacy `Coincidence` 再做一套环。
+
+流水线只改何时算、何时写，不改段边界与 cutoff；Test 9 分段不变性仍然成立。
+
+#### 已知上游缺陷
+
+`getDListmode(..., carryCutoffTime_100fs)` 的约定是「原始时间 ≤ cutoff 的事件视为尾部保
+留，彼此之间不配对」。预编译内核只在 **delay** 路径实现了该抑制，**prompt** 路径忽略
+cutoff。后果：每段的 carry 前缀内部的 prompt 配对会被重复计入，总 prompt 数比金标准多出
+恰好 `carrySinglesTotal` 条；delay 数严格与分段方式无关。
+`tests/correctness/test_coin_streaming_aligner.cpp` 的 Test 9a 用合成数据固化了这个契约，
+Test 9 则断言「prompt 偏差恰等于 carry 条数」——偏差一旦超出 carry，就说明分段/carry 逻辑
+真的出了回归。
+
 ### 4. CoincidenceServiceImpl
 
 gRPC 控制面。**热路径是 OpenDataPlane + RDMA（或本机 InProcess）**，不是 `StreamSingles`。
@@ -92,7 +163,20 @@ Worker 侧唯一发送入口（`sendSingles` / `acquireTxSlot` 路径）。
 | `alignmentWindow_pico` | 200ms | 对齐窗口大小 |
 | `safetyMargin_pico` | 10ms | 安全边距，补偿网络延迟 |
 | `maxChunksPerNode` | 100 | 每节点最大缓冲块数 |
-| `processingIntervalMs` | 5ms | 处理循环间隔 |
+| `processingIntervalMs` | 200ms | 无 push 事件时的最长空转等待（不是处理周期） |
+| `maxSegmentSingles` | 262144 | 单段 singles 上限，**含 carry**。按显存与内核上限设置，0=不限制（不推荐） |
+| `minSegmentSingles` | 65536 | 攒批软下界，压力或超时可突破。0=不攒批 |
+| `minSegmentOverlapFactor` | 4 | 段跨度硬下界，单位是重叠窗个数。压力与超时都不能突破 |
+| `bufferHighWaterRatio` | 0.80 | 任一节点缓冲或内存池占用超过此比例即立刻触发 |
+| `maxProcessLatencyMs` | 50ms | 延迟兜底触发，0=关闭 |
+| `coinPipelineDepth` | 0 | 多 GPU 在飞段数。0=按 GPU 数 × instancePerGpu 推导 |
+| `nodeStallWarnMs` | 1000ms | 「高水位但水位线不前进」的告警限流间隔 |
+| `allowStalledNodeBypass` | false | 开启后静默超时的节点会被剔出水位线计算（对齐降级） |
+| `nodeStallTimeoutMs` | 5000ms | 仅在 `allowStalledNodeBypass=true` 时生效 |
+
+`ProcessingStatistics` 相应新增：`triggerByWatermark / triggerByPressure / triggerByDeadline
+/ heldByMinDuration / watermarkStallEvents / degradedSegments / oversizedSegments /
+maxNodeBacklogChunks / carrySinglesTotal`。
 
 ### 符合协议
 

@@ -664,6 +664,38 @@ namespace openpni::distributed::app
                 {
                     return fail(err, "aligner.maxChunksPerNode must be non-negative integer");
                 }
+                if (!readUInt(*sec, "maxSegmentSingles", &cfg->aligner.maxSegmentSingles))
+                {
+                    return fail(err, "aligner.maxSegmentSingles must be non-negative integer");
+                }
+                if (!readUInt(*sec, "minSegmentSingles", &cfg->aligner.minSegmentSingles))
+                {
+                    return fail(err, "aligner.minSegmentSingles must be non-negative integer");
+                }
+                if (!readUInt(*sec, "minSegmentOverlapFactor", &cfg->aligner.minSegmentOverlapFactor))
+                {
+                    return fail(err, "aligner.minSegmentOverlapFactor must be non-negative integer");
+                }
+                if (!readDouble(*sec, "bufferHighWaterRatio", &cfg->aligner.bufferHighWaterRatio))
+                {
+                    return fail(err, "aligner.bufferHighWaterRatio must be number");
+                }
+                if (!readUInt(*sec, "maxProcessLatencyMs", &cfg->aligner.maxProcessLatencyMs))
+                {
+                    return fail(err, "aligner.maxProcessLatencyMs must be non-negative integer");
+                }
+                if (!readBool(*sec, "allowStalledNodeBypass", &cfg->aligner.allowStalledNodeBypass))
+                {
+                    return fail(err, "aligner.allowStalledNodeBypass must be bool");
+                }
+                if (!readUInt(*sec, "nodeStallTimeoutMs", &cfg->aligner.nodeStallTimeoutMs))
+                {
+                    return fail(err, "aligner.nodeStallTimeoutMs must be non-negative integer");
+                }
+                if (!readUInt(*sec, "coinPipelineDepth", &cfg->aligner.coinPipelineDepth))
+                {
+                    return fail(err, "aligner.coinPipelineDepth must be non-negative integer");
+                }
                 if (!readUInt(*sec, "maxTotalMemoryBytes", &cfg->aligner.maxTotalMemoryBytes))
                 {
                     return fail(err, "aligner.maxTotalMemoryBytes must be non-negative integer");

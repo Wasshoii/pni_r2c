@@ -278,7 +278,9 @@ int main(int argc, char **argv)
         }
         else
         {
-            auto pStats = analyzeLmfFile(promptLmf, k9120TimeWindowPs);
+            // analyzeLmfFile 的阈值单位是 100fs，而 k9120TimeWindowPs 是皮秒。
+            auto pStats = analyzeLmfFile(
+                promptLmf, static_cast<int16_t>(k9120TimeWindowPs * 10));
             std::cout << "[LMF] prompt events=" << pStats.totalEvents
                       << " overWindow=" << pStats.overWindowDtCount << std::endl;
             if (pStats.totalEvents == 0)
@@ -314,7 +316,8 @@ int main(int argc, char **argv)
         }
         else
         {
-            auto dStats = analyzeLmfFile(delayLmf, k9120TimeWindowPs);
+            auto dStats = analyzeLmfFile(
+                delayLmf, static_cast<int16_t>(k9120TimeWindowPs * 10));
             std::cout << "[LMF] delay events=" << dStats.totalEvents << std::endl;
             if (dStats.totalEvents == 0)
             {

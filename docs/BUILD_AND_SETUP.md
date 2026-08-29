@@ -116,7 +116,7 @@ ctest --test-dir build/tests/pni -R test_rdma_orchestration --output-on-failure
 ```
 
 3. CUDA（nvcc + libpni + tbb + openmp）
-- 编译：`test_pni_r2s_offline`、`test_pni_coin_offline`、`test_r2s_50100_multi_gpu`、`test_r2s_50100_single_ring`、`test_coin_multi_gpu`、`test_coin_carry_boundary`、`test_r2s_rdma_send`、`test_r2s_rdma_coin`、`test_rdma_singles_ingress`、`test_coin_lsingle_stream`、`test_r2s_online_pipeline`
+- 编译：`test_pni_r2s_offline`、`test_pni_coin_offline`、`test_r2s_50100_multi_gpu`、`test_r2s_50100_single_ring`、`test_coin_9120_aligner`、`test_coin_multi_gpu`、`test_coin_carry_boundary`、`test_r2s_rdma_send`、`test_r2s_rdma_coin`、`test_rdma_singles_ingress`、`test_coin_lsingle_stream`、`test_r2s_online_pipeline`
 - 多数要 9120/NECR 数据，标 `integration`、`manual` 或 `performance`。无数据时 `ctest -LE "integration|manual"` 可能没有可跑项。
 
 ```bash

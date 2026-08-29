@@ -170,8 +170,24 @@ namespace openpni::distributed::app
         uint16_t channelNum = 48;
         uint32_t crystalsPerChannel = 169 * 4;
         uint64_t networkLatencyMarginPico = 5'000'000'000ULL;
+        // 无事件时的最长空转等待；有数据推入会提前唤醒处理线程
         uint32_t processingIntervalMs = 200;
         size_t maxChunksPerNode = 100;
+        // 数据段上界（含 carry），按显存能力设置；0 = 不限制
+        size_t maxSegmentSingles = 262144;
+        // 攒批软下界；0 = 不攒批
+        size_t minSegmentSingles = 65536;
+        // 段时长硬下界，单位为重叠窗个数
+        uint32_t minSegmentOverlapFactor = 4;
+        // 缓冲占用超过该比例立即触发处理
+        double bufferHighWaterRatio = 0.80;
+        // 距上次处理超过该时长立即触发；0 = 关闭
+        uint32_t maxProcessLatencyMs = 50;
+        // 允许剔除长期静默的节点以维持实时性（牺牲对齐精度），默认关闭
+        bool allowStalledNodeBypass = false;
+        uint32_t nodeStallTimeoutMs = 5000;
+        // 多 GPU 在飞段数。0 = 按 GPU 数推导
+        size_t coinPipelineDepth = 0;
         size_t maxTotalMemoryBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
         bool useMemoryPool = true;
         bool savePrompt = true;

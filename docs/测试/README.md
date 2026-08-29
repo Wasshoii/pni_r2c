@@ -109,6 +109,7 @@ flowchart TB
 | 目标 | 用途 |
 |------|------|
 | `test_r2s_50100_single_ring` | 50100 单环 R2S 吞吐（生产 `processSegment` 多 GPU；预读真实 segment，不扩包） |
+| `test_coin_9120_aligner` | 9120 双节点符合吞吐（生产 `StreamingTimeAligner`；预读 `.lsingle`，burst push；事件驱动触发，段大小受 `maxSegmentSingles` 约束） |
 
 ## 编译
 

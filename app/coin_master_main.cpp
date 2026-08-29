@@ -397,6 +397,14 @@ int main(int argc, char **argv)
     alignerConfig.networkLatencyMargin_pico = cfg.aligner.networkLatencyMarginPico;
     alignerConfig.processingIntervalMs = cfg.aligner.processingIntervalMs;
     alignerConfig.maxChunksPerNode = cfg.aligner.maxChunksPerNode;
+    alignerConfig.maxSegmentSingles = cfg.aligner.maxSegmentSingles;
+    alignerConfig.minSegmentSingles = cfg.aligner.minSegmentSingles;
+    alignerConfig.minSegmentOverlapFactor = cfg.aligner.minSegmentOverlapFactor;
+    alignerConfig.bufferHighWaterRatio = cfg.aligner.bufferHighWaterRatio;
+    alignerConfig.maxProcessLatencyMs = cfg.aligner.maxProcessLatencyMs;
+    alignerConfig.allowStalledNodeBypass = cfg.aligner.allowStalledNodeBypass;
+    alignerConfig.nodeStallTimeoutMs = cfg.aligner.nodeStallTimeoutMs;
+    alignerConfig.coinPipelineDepth = cfg.aligner.coinPipelineDepth;
     alignerConfig.maxTotalMemoryBytes = cfg.aligner.maxTotalMemoryBytes;
     alignerConfig.useMemoryPool = cfg.aligner.useMemoryPool;
     alignerConfig.savePrompt = cfg.aligner.savePrompt;

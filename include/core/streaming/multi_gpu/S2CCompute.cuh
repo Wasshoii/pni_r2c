@@ -43,6 +43,10 @@ struct S2CInput
 {
     std::span<const Single> singles;
     uint64_t carryCutoffTime_100fs = 0;
+    // 配对数量可直接从设备端 span 的长度得到，无需回拷。没有对应 writer 时
+    // 关掉回拷可以省下与输入同量级的 D2H 流量。
+    bool copyPromptToHost = true;
+    bool copyDelayToHost = true;
 
     bool empty() const noexcept { return singles.empty(); }
     size_t size() const noexcept { return singles.size(); }
@@ -64,6 +68,9 @@ struct S2CComputeConfig
     CoincidenceProtocol protocol;
     std::vector<uint32_t> crystal_nums_per_channel;
     int gpuId = 0;
+    // 单批 singles 上限。>0 时设备缓冲按此容量一次性分配，避免批大小变化引发
+    // 每批一次 cudaFree + cudaMalloc（那是个同步点，代价可观）。
+    size_t maxSinglesCapacity = 0;
 };
 
 using IComputeS2C = ICompute<S2CInput, CoinResult>;
@@ -88,8 +95,11 @@ public:
     cudaStream_t stream() const noexcept;
 
 private:
+    void ensureDeviceCapacity(size_t elements);
+
     int gpu_id_;
     CoincidenceProtocol protocol_;
+    size_t max_singles_capacity_;
     openpni::Coincidence coincidence_;
     openpni::detail::CudaUniquePointer<Single> d_singles_{"S2CCompute_singles"};
 };

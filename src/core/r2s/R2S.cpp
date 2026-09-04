@@ -1051,19 +1051,22 @@ namespace openpni::distributed::r2s
         {
             auto &result = *lease;
             const uint64_t count = result.actualSinglesCount;
-            if (count > 0 && result.d_singles.Data() != nullptr)
+            if (count > 0)
             {
-                singlesSpan = std::span<Single const>(
-                    result.d_singles.Data(), static_cast<size_t>(count));
-                if (result.gpu_id >= 0)
+                if (result.d_singles.Data() != nullptr)
                 {
-                    const cudaError_t setErr = cudaSetDevice(result.gpu_id);
-                    if (setErr != cudaSuccess)
+                    singlesSpan = std::span<Single const>(
+                        result.d_singles.Data(), static_cast<size_t>(count));
+                    if (result.gpu_id >= 0)
                     {
-                        LOG(ERROR) << "cudaSetDevice failed for segment result GPU "
-                                   << result.gpu_id << ": " << cudaGetErrorString(setErr);
-                        m_hadError = true;
-                        return false;
+                        const cudaError_t setErr = cudaSetDevice(result.gpu_id);
+                        if (setErr != cudaSuccess)
+                        {
+                            LOG(ERROR) << "cudaSetDevice failed for segment result GPU "
+                                       << result.gpu_id << ": " << cudaGetErrorString(setErr);
+                            m_hadError = true;
+                            return false;
+                        }
                     }
                 }
 

@@ -55,6 +55,7 @@ struct R2S50100SinglesResultPolicy
     void prepare_for_reuse(SinglesResult &result, const openpni::RawDataView *) const noexcept
     {
         result.actualSinglesCount = 0;
+        result.gpu_id = -1;
     }
 
 private:

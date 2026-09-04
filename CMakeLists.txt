@@ -346,7 +346,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
     r2c_target_link_cuda_s2c(test_coin_multi_gpu)
   endif()
 
-  if(R2C_BUILD_TEST_COIN_PERF)
+    if(R2C_BUILD_TEST_COIN_PERF)
     add_executable(test_coin_9120_aligner
       tests/performance/test_coin_9120_aligner.cpp
       $<TARGET_OBJECTS:r2c_core_streaming_objs>
@@ -365,6 +365,21 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
         dl
     )
     r2c_target_link_cuda_s2c(test_coin_9120_aligner)
+
+    add_executable(test_listmode_write
+      tests/performance/test_listmode_write.cpp
+    )
+    target_include_directories(test_listmode_write
+      PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+    target_compile_options(test_listmode_write PRIVATE -O3 -march=native -pthread)
+    target_link_libraries(test_listmode_write
+      PRIVATE
+        PkgConfig::R2C_PNI
+        dl
+    )
   endif()
 
   if(R2C_BUILD_TEST_COIN_CARRY_BOUNDARY)
@@ -1528,6 +1543,7 @@ r2c_set_output_dir(test_r2s_online_pipeline test)
 r2c_set_output_dir(test_r2s_50100_multi_gpu test)
 r2c_set_output_dir(test_r2s_50100_single_ring test)
 r2c_set_output_dir(test_coin_9120_aligner test)
+r2c_set_output_dir(test_listmode_write test)
 
 # CTest registration: only register targets that are enabled and built.
 function(r2c_register_test target_name tier_label)
@@ -1584,4 +1600,8 @@ endif()
 r2c_register_test(test_coin_9120_aligner cuda performance manual)
 if(BUILD_TESTING AND TARGET test_coin_9120_aligner)
   set_tests_properties(test_coin_9120_aligner PROPERTIES TIMEOUT 7200)
+endif()
+r2c_register_test(test_listmode_write performance manual)
+if(BUILD_TESTING AND TARGET test_listmode_write)
+  set_tests_properties(test_listmode_write PROPERTIES TIMEOUT 600)
 endif()

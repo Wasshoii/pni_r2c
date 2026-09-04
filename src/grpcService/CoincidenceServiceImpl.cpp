@@ -67,7 +67,17 @@ namespace openpni::distributed::streaming
             std::string err;
             if (!ingestRdmaSlot(view, &err))
             {
-                LOG(ERROR) << "RDMA ingest failed: " << err;
+                const bool backpressure =
+                    err.find("Buffer full") != std::string::npos ||
+                    err.find("Acquisition not started") != std::string::npos;
+                if (backpressure)
+                {
+                    LOG_EVERY_N(WARNING, 10000) << "RDMA ingest backpressure: " << err;
+                }
+                else
+                {
+                    LOG(ERROR) << "RDMA ingest failed: " << err;
+                }
                 return false;
             }
             return true; });

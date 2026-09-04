@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -380,9 +381,66 @@ int main(int argc, char **argv)
 
     namespace rdma = openpni::distributed::dataplane::rdma;
     const size_t maxSinglesPerTxSlot = rdma::maxSinglesPerSlot(rdma::kDefaultSlotBytes);
-    std::vector<uint8_t> txScratch(rdma::kDefaultSlotBytes);
+    constexpr size_t kTxSlotCount = 2;
+    std::vector<uint8_t> txScratch(kTxSlotCount * rdma::kDefaultSlotBytes);
     static_cast<void>(openpni::distributed::r2s::multi_gpu::tryCudaHostRegister(
         txScratch.data(), txScratch.size()));
+    cudaStream_t txFillStream = nullptr;
+    cudaEvent_t txFillEvents[kTxSlotCount]{};
+    int txFillDevice = -1;
+    const auto destroyTxFill = [&]()
+    {
+        if (txFillDevice >= 0)
+        {
+            static_cast<void>(cudaSetDevice(txFillDevice));
+        }
+        for (auto &ev : txFillEvents)
+        {
+            if (ev)
+            {
+                static_cast<void>(cudaEventDestroy(ev));
+                ev = nullptr;
+            }
+        }
+        if (txFillStream)
+        {
+            static_cast<void>(cudaStreamDestroy(txFillStream));
+            txFillStream = nullptr;
+        }
+        txFillDevice = -1;
+    };
+    const auto ensureTxFillStream = [&](int device) -> bool
+    {
+        if (device < 0)
+        {
+            return false;
+        }
+        if (txFillStream && txFillDevice == device)
+        {
+            return true;
+        }
+        destroyTxFill();
+        if (cudaSetDevice(device) != cudaSuccess)
+        {
+            return false;
+        }
+        if (cudaStreamCreateWithFlags(&txFillStream, cudaStreamNonBlocking) != cudaSuccess ||
+            !txFillStream)
+        {
+            return false;
+        }
+        for (size_t i = 0; i < kTxSlotCount; ++i)
+        {
+            if (cudaEventCreateWithFlags(&txFillEvents[i], cudaEventDisableTiming) != cudaSuccess ||
+                !txFillEvents[i])
+            {
+                destroyTxFill();
+                return false;
+            }
+        }
+        txFillDevice = device;
+        return true;
+    };
     std::atomic<uint64_t> callbackSingles{0};
     std::atomic<uint64_t> callbackCount{0};
     std::atomic<uint64_t> fillNs{0};
@@ -391,12 +449,14 @@ int main(int argc, char **argv)
     {
         const auto fillBegin = std::chrono::steady_clock::now();
         const bool srcDevice = !singles.empty() && r2s::isDevicePointer(singles.data());
+        int srcDeviceId = -1;
         if (srcDevice)
         {
             cudaPointerAttributes attr{};
             if (cudaPointerGetAttributes(&attr, singles.data()) == cudaSuccess && attr.device >= 0)
             {
-                const cudaError_t setErr = cudaSetDevice(attr.device);
+                srcDeviceId = attr.device;
+                const cudaError_t setErr = cudaSetDevice(srcDeviceId);
                 if (setErr != cudaSuccess)
                 {
                     std::cerr << "cudaSetDevice failed in TX fill: "
@@ -405,27 +465,101 @@ int main(int argc, char **argv)
                 }
             }
         }
+
+        struct PendingTxFill
+        {
+            size_t slot = 0;
+            cudaEvent_t event = nullptr;
+        };
+        std::deque<PendingTxFill> pending;
         size_t offset = 0;
-        while (offset < singles.size() && maxSinglesPerTxSlot > 0)
+        size_t nextSlot = 0;
+        const bool useAsync =
+            srcDevice && srcDeviceId >= 0 && ensureTxFillStream(srcDeviceId);
+
+        const auto enqueueDeviceSlice = [&]() -> bool
         {
             const size_t n = std::min(maxSinglesPerTxSlot, singles.size() - offset);
-            uint8_t *dst = txScratch.data() + rdma::kSlotHeaderBytes;
+            const size_t slot = nextSlot % kTxSlotCount;
+            uint8_t *dst = txScratch.data() + slot * rdma::kDefaultSlotBytes + rdma::kSlotHeaderBytes;
             const size_t bytes = n * openpni::distributed::streaming::kPackedSingleSize;
-            if (srcDevice)
+            const cudaError_t err = cudaMemcpyAsync(
+                dst, singles.data() + offset, bytes, cudaMemcpyDeviceToHost, txFillStream);
+            if (err != cudaSuccess)
             {
-                const cudaError_t err = cudaMemcpy(
-                    dst, singles.data() + offset, bytes, cudaMemcpyDeviceToHost);
-                if (err != cudaSuccess)
+                std::cerr << "D2H into TX scratch failed: " << cudaGetErrorString(err) << '\n';
+                return false;
+            }
+            const cudaError_t recErr = cudaEventRecord(txFillEvents[slot], txFillStream);
+            if (recErr != cudaSuccess)
+            {
+                std::cerr << "cudaEventRecord failed in TX fill: "
+                          << cudaGetErrorString(recErr) << '\n';
+                return false;
+            }
+            pending.push_back(PendingTxFill{slot, txFillEvents[slot]});
+            ++nextSlot;
+            offset += n;
+            return true;
+        };
+
+        if (useAsync)
+        {
+            while (offset < singles.size() || !pending.empty())
+            {
+                while (pending.size() < kTxSlotCount && offset < singles.size() &&
+                       maxSinglesPerTxSlot > 0)
                 {
-                    std::cerr << "D2H into TX scratch failed: " << cudaGetErrorString(err) << '\n';
-                    return false;
+                    if (!enqueueDeviceSlice())
+                    {
+                        if (txFillStream)
+                        {
+                            static_cast<void>(cudaStreamSynchronize(txFillStream));
+                        }
+                        return false;
+                    }
+                }
+                if (!pending.empty())
+                {
+                    const cudaError_t waitErr = cudaEventSynchronize(pending.front().event);
+                    if (waitErr != cudaSuccess)
+                    {
+                        std::cerr << "cudaEventSynchronize failed in TX fill: "
+                                  << cudaGetErrorString(waitErr) << '\n';
+                        static_cast<void>(cudaStreamSynchronize(txFillStream));
+                        return false;
+                    }
+                    pending.pop_front();
                 }
             }
-            else
+        }
+        else
+        {
+            while (offset < singles.size() && maxSinglesPerTxSlot > 0)
             {
-                std::memcpy(dst, singles.data() + offset, bytes);
+                const size_t n = std::min(maxSinglesPerTxSlot, singles.size() - offset);
+                const size_t slot = nextSlot % kTxSlotCount;
+                uint8_t *dst =
+                    txScratch.data() + slot * rdma::kDefaultSlotBytes + rdma::kSlotHeaderBytes;
+                const size_t bytes = n * openpni::distributed::streaming::kPackedSingleSize;
+                if (srcDevice)
+                {
+                    const cudaError_t err = cudaMemcpy(
+                        dst, singles.data() + offset, bytes, cudaMemcpyDeviceToHost);
+                    if (err != cudaSuccess)
+                    {
+                        std::cerr << "D2H into TX scratch failed: "
+                                  << cudaGetErrorString(err) << '\n';
+                        return false;
+                    }
+                }
+                else
+                {
+                    std::memcpy(dst, singles.data() + offset, bytes);
+                }
+                ++nextSlot;
+                offset += n;
             }
-            offset += n;
         }
         fillNs.fetch_add(
             static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -456,6 +590,7 @@ int main(int argc, char **argv)
     if (!processor.initialize(channelNum))
     {
         std::cerr << "Failed to initialize R2SStreamProcessor\n";
+        destroyTxFill();
         return 1;
     }
 
@@ -487,11 +622,13 @@ int main(int argc, char **argv)
     if (!finalizeOk)
     {
         std::cerr << "R2SStreamProcessor::finalize failed\n";
+        destroyTxFill();
         return 1;
     }
     if (failedSegments != 0)
     {
         std::cerr << "processSegment failed after " << (segmentMs.size() - 1) << " segments\n";
+        destroyTxFill();
         return 1;
     }
 
@@ -508,6 +645,11 @@ int main(int argc, char **argv)
     const double segPerS = combinedS > 0.0 ? static_cast<double>(segments.size()) / combinedS : 0.0;
     const double singlesPerS =
         combinedS > 0.0 ? static_cast<double>(callbackSingles.load()) / combinedS : 0.0;
+    const double payloadBytes =
+        static_cast<double>(callbackSingles.load()) *
+        static_cast<double>(openpni::distributed::streaming::kPackedSingleSize);
+    const double payloadGib = payloadBytes * 8.0 / static_cast<double>(kBitsPerGibit);
+    const double payloadFillGBs = fillS > 0.0 ? (payloadBytes / 1e9) / fillS : 0.0;
 
     std::cout << std::fixed << std::setprecision(3)
               << "===== Pref-style R2S summary (includes RDMA-like TX fill) =====\n"
@@ -521,11 +663,14 @@ int main(int argc, char **argv)
               << "Input traffic          : " << static_cast<double>(inputGib) << " Gib\n"
               << "Callback invocations   : " << callbackCount.load() << '\n'
               << "Singles (callback)     : " << callbackSingles.load() << '\n'
+              << "Payload                : " << payloadGib << " Gib\n"
+              << "TX-fill payload        : " << payloadFillGBs << " GB/s\n"
               << "Combined throughput    : " << gibCombined << " Gib/s\n"
               << "R2S-only throughput    : " << gibR2s << " Gib/s\n"
               << "Segment rate           : " << segPerS << " segment/s\n"
               << "Singles rate           : " << singlesPerS << " singles/s\n"
               << "Per-segment latency ms : mean=" << meanMs
               << " p50=" << p50 << " p99=" << p99 << '\n';
+    destroyTxFill();
     return 0;
 }

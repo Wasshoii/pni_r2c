@@ -11,14 +11,17 @@
 │                        流式时间对齐架构                                       │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  Node1 ──┬──> [RingBuffer1] ──┐                                            │
-│  Node2 ──┼──> [RingBuffer2] ──┼──> [TimeAligner] ──> [Coincidence] ──> LMF │
-│  Node3 ──┼──> [RingBuffer3] ──┤                                            │
-│  ...     │        ...         │                                            │
-│  NodeN ──┴──> [RingBufferN] ──┘                                            │
+│  Node1 ──> [RingBuffer1] ──> stealThread1 ──> stolenDeque1 ─┐               │
+│  Node2 ──> [RingBuffer2] ──> stealThread2 ──> stolenDeque2 ─┼─> coord      │
+│  ...                                                        │   merge      │
+│  NodeN ──> [RingBufferN] ──> stealThreadN ──> stolenDequeN ─┘   submit     │
+│                                                                      │      │
+│                                                              [Coincidence]  │
+│                                                                      ▼      │
+│                                                                    LMF      │
 │                                                                             │
 │  关键：以 PET 时钟的 timeValue_pico 作为全局时间基准                          │
-│        滑动窗口逐步推进，避免全局排序                                         │
+│        水位线只定时间上界；条数预算在协调线程归并前缀上切，不按节点均分         │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -35,9 +38,10 @@ struct TimestampedSingleChunk {
     uint64_t computerClock_ms; // 计算机时钟（粗略参考）
     uint32_t duration_ms;      // 持续时间
     std::vector<GlobalSingle_t> singles;  // 单事件数据
-    
-    uint64_t minTime_pico;     // 块内最小时间（PET时钟）
-    uint64_t maxTime_pico;     // 块内最大时间（PET时钟）
+    size_t consumed;           // 未消费起点；半块只推进此下标，不 assign/erase
+
+    uint64_t minTime_pico;     // 未消费区间最小时间（PET时钟）
+    uint64_t maxTime_pico;     // 未消费区间最大时间（PET时钟）
 };
 ```
 
@@ -75,6 +79,17 @@ struct TimestampedSingleChunk {
 3. 满足以下任一条件即处理：待处理量 ≥ `minSegmentSingles`、任一节点/内存池占用 ≥
    `bufferHighWaterRatio`、距上次处理超过 `maxProcessLatencyMs`。
 
+待处理量用各节点 **stolen deque + 环** 的 chunk 条数前缀和（跨水位线的半块按整块上界估计），不扫 singles。
+水位线只定时间上界；真正抽出时一次扫描，时间 ≤ watermark 且新条数 ≤
+`maxSegmentSingles - carry`。每节点一条常驻 steal 线程把环里的**整块** swap 进有界 stolen
+deque（默认 8 个 chunk），**不按水位切前缀**。段边界、条数预算、半块 `upper_bound` 只在
+协调线程上做。协调线程从 N 个 deque 按全局时间前缀切预算；半块只推进 chunk 的 `consumed`
+游标，merge 只读 `[consumed, consumed+takeN)`，锁外 `std::merge` 写入 pinned 输入槽。
+不要按节点各抽 `budget/N`：会破坏跨节点符合。
+硬下界仍优先于预算（超预算记 `oversizedSegments`）。Steal 相对 merge 超前：merge/GPU 在处理
+段 i 时，steal 已在把后续 chunk 搬进 deque。停机顺序：steal join → 协调线程抽空 deque 并
+`flushRemaining` → `signalNoMoreData`（非 extract-only）。
+
 一段被显存预算钳掉尾巴时不会回去等待，而是立即继续下一段，直到追平水位线。
 
 #### 三条不变式
@@ -105,15 +120,23 @@ carry 占比与边界单调性：段跨度小于重叠窗时 carry 占比趋近 
 
 #### 多 GPU 流水线与写盘顺序
 
-多 GPU 路径把处理循环拆成三条线程，不再在抽取线程上同步 `submit`+`next`+写盘：
+多 GPU 路径把处理循环拆成 steal / 协调 / GPU / 收回 / 写盘，不再在抽取线程上同步 `submit`+`next`+写盘：
 
-1. **抽取线程**：水位判定、归并、`updateCarrySingles`（仍用主机数据、在 `submit` 之前），然后把
-   有主 pinned 槽交给 `submitSingles`。槽活到对应的 `nextResult()`。
-2. **GPU 工人**：`SPSCProcessor` 谁空谁接下一段（负载均衡）。时间顺序只由 submit 序和 `next()`
+1. **Steal 线程**（每节点 1 条）：环非空且 deque 未满时短锁整块 `stealWholeFronts` 进该节点
+   有界 stolen deque。不看水位、不切半块。满则背压在 deque cap，环堆积后走上游高水位。
+2. **协调 / 抽取线程**：水位判定（`watermarkNs`）、等到各节点到齐（deque 可见或环/在途确认
+   无 `<= W` 数据）、从 stolen deque 按全局时间前缀切预算（完整块按 chunk `maxTime` 批量弹出，
+   半块对 singles 二分切 `takeN` 后只推进 `consumed`，merge 读 `[consumed, consumed+takeN)`）、
+   锁外归并进 pinned 槽（`extractNs` = 切点/归并/carry；其中归并另记 `mergeNs`，steal
+   工人记 `stealNs`）、`updateCarrySingles`（仍用主机数据、在 `submit` 之前），然后把有主 pinned 槽交给 `submitSingles`。等输入槽记 `slotWaitNs`。
+   槽活到对应的 `nextResult()`。`extractOnly` 仍走 steal→merge→carry→推进水位，但不
+   `submitSingles`、不建 GPU 工人；归并写入 pageable `m_extractHost`，避免 pinned 写带宽
+   污染抽取墙。未到齐时不得把 `lastWatermark` 跳到全水位。
+3. **GPU 工人**：`SPSCProcessor` 谁空谁接下一段（负载均衡）。时间顺序只由 submit 序和 `next()`
    序保证，不把 GPU i 绑死在第 i 段。
-3. **收回线程**：按提交序 `nextResult()`，把 prompt/delay listmode 拷进有界写队列后立刻释放
+4. **收回线程**：按提交序 `nextResult()`，把 prompt/delay listmode 拷进有界写队列后立刻释放
    GPU lease 和输入槽。
-4. **写盘线程**：FIFO 先写 `prompt.lmf` 再写 `delay.lmf`。队列满则收回阻塞 → GPU 环填满 →
+5. **写盘线程**：FIFO 先写 `prompt.lmf` 再写 `delay.lmf`。队列满则收回阻塞 → GPU 环填满 →
    `submit` 阻塞 → 上游环形缓冲背压。停机时写线程排空后再 `RollingFileWriter::Stop()`。
 
 `coinPipelineDepth` 默认 0，按 `gpuCount × instancePerGpu` 推导 ring；也可显式设在飞段数。
@@ -169,7 +192,8 @@ Worker 侧唯一发送入口（`sendSingles` / `acquireTxSlot` 路径）。
 | `minSegmentOverlapFactor` | 4 | 段跨度硬下界，单位是重叠窗个数。压力与超时都不能突破 |
 | `bufferHighWaterRatio` | 0.80 | 任一节点缓冲或内存池占用超过此比例即立刻触发 |
 | `maxProcessLatencyMs` | 50ms | 延迟兜底触发，0=关闭 |
-| `coinPipelineDepth` | 0 | 多 GPU 在飞段数。0=按 GPU 数 × instancePerGpu 推导 |
+| `listmodeWriteQueueCap` | 32 | 写队列深度，与 GPU `ring_size` 脱钩。队列满只背压，不丢已算出的 pair |
+| `listmodeIoQueueSize` | 8 | Listmode/Unimode 两层 IO 环深度 |
 | `nodeStallWarnMs` | 1000ms | 「高水位但水位线不前进」的告警限流间隔 |
 | `allowStalledNodeBypass` | false | 开启后静默超时的节点会被剔出水位线计算（对齐降级） |
 | `nodeStallTimeoutMs` | 5000ms | 仅在 `allowStalledNodeBypass=true` 时生效 |

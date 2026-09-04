@@ -17,11 +17,11 @@ struct Config {
   uint32_t nodeId = 0;
   std::string deviceName;
   size_t stagingSlotBytes = kDefaultSlotBytes;
-  bool preferHugePages = true;
+  bool preferHugePages = false;
   bool forceInProcess = false;
   bool requireRoce = false;
   int gidIndex = -1;
-  uint32_t txSlotCount = 8;
+  uint32_t txSlotCount = 2;
 };
 
 struct TxSlotLease {
@@ -32,7 +32,8 @@ struct TxSlotLease {
 };
 ```
 
-- `txSlotCount`：本地已注册 TX 暂存槽（默认 8；与远端 ring 槽数不是同一个数）。
+- `txSlotCount`：本地已注册 TX 暂存槽（默认 **2** ping-pong；与远端 ring 槽数不是同一个数）。
+- `preferHugePages`：worker 默认 **false**，不与 DPDK 争 hugetlb。
 - `requireRoce` 且对端/本地不是 RoCE 则 `connect` 失败。
 
 ### 握手与发送
@@ -50,8 +51,8 @@ void abortTxSlot(const TxSlotLease &lease);
 - `prepareLocalEndpoint`：建本地 QP（INIT）及 credit 镜像 MR，填 worker 端点给 OpenDataPlane。
 - `connect`：用 coin 端点完成 RC，或按 `inprocessHandle` 找到 [RdmaNodeRecvSession](RdmaRecvServer.md)。
 - `sendPackedSingles`：按远端 `slotStride` 切槽，填 [SlotHeader](SlotProtocol.md) 与 payload，等待 credit 后写出。RoCE 拷进已注册 TX 槽；InProcess 从源缓冲直接 memcpy 进接收环。
-- `acquireTxSlot` / `commitTxSlot`：CoincidenceClient 在 RoCE 上于 **有序消费线程** 填槽（device 源则 D2H 进 payload），sender 再提交。`abortTxSlot` 在入队失败时释放 lease。
-- `txStagingBase` / `txStagingBytes` / `txCudaRegistered`：供上层对 TX hugepage `cudaHostRegister`。dataplane **不链接 CUDA**；`close()` 只清标志、不 `cudaHostUnregister`。CoincidenceClient 必须在 `close()` 前 unregister。
+- `acquireTxSlot` / `commitTxSlot`： CoincidenceClient 在有序消费线程上填槽后当场提交。`abortTxSlot` 在填槽失败时释放 lease。
+- `txStagingBase` / `txStagingBytes` / `txCudaRegistered`：供上层对 TX mmap `cudaHostRegister`。dataplane **不链接 CUDA**；`close()` 只清标志、不 `cudaHostUnregister`。CoincidenceClient 必须在 `close()` 前 unregister。
 
 ### 反压
 
@@ -62,6 +63,8 @@ void abortTxSlot(const TxSlotLease &lease);
 ```cpp
 uint64_t slotsInFlight() const;
 uint32_t creditRemaining() const;
+uint32_t txStagingSlotCount() const;
+uint32_t txSlotsBusy() const;
 DataPlaneKind kind() const;
 ```
 

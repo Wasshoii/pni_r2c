@@ -23,7 +23,7 @@ enum class IngestMode : uint8_t {
 ```
 
 - `Full`：每槽一次回调；`view.singlesPacked` 指向环内内存，返回前有效。多槽逻辑块共享 `chunkId`，SOF/EOF 在 `view.flags`。
-- 回调返回 `false` 表示 ingest 失败（例如符合 ring 满）；实现会记日志且该槽 credit 行为见源码（失败路径不应假设已释放给 sender）。
+- 回调返回 `false` 表示暂时无法 ingest（例如符合 ring 满）。该槽保持 pending，下次 `pollOnce` 重试同一 `expected` seq，**不释放 credit**。这是反压，不是丢槽。
 
 ### RdmaNodeRecvSession
 
@@ -49,7 +49,7 @@ int pollOnce(int maxSlots = 8);
 - `prepare`：分配环并注册 MR，或生成 `inprocessHandle`。
 - `localEndpoint()` 经 gRPC 发给 worker。
 - `acceptRemote`：对端 QP 进入 RTR/RTS，或 InProcess 绑定 sender。
-- `pollOnce`：处理最多 `maxSlots` 个就绪槽，返回实际 ingest 数。
+- `pollOnce`：先重试 pending 槽，再处理最多 `maxSlots` 个新就绪槽；返回实际 ingest 数。RoCE IMM 与 `seqToImm(expected)` 比较；Recv CQ 一次取 1 条，ingest 失败时不把后续 IMM 从 CQ 抽走。
 
 ### RdmaRecvServer
 
@@ -64,7 +64,7 @@ static std::shared_ptr<RdmaNodeRecvSession> findInProcessSession(uint64_t handle
 ```
 
 - `ensureSession`：OpenDataPlane 时按 node 创建会话。
-- `startPoller==true`（默认）时 `start()` 起 `pollLoop`。
+- `startPoller==true`（默认）时 `start()` 起 `pollLoop`。poller 持锁只拷贝 session 列表，ingest 不持该锁。
 - `findInProcessSession`：同进程 sender `connect` 用全局弱引用表查找 handle。
 
 ## 使用提示

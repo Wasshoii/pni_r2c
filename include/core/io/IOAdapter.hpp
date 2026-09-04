@@ -230,6 +230,19 @@ namespace coreio
             return (output_->GetStatus() & ::openpni::io::IOStatus_DiskSpaceNotEnough) == 0;
         }
 
+        void FlushToDisk()
+        {
+            if (output_)
+            {
+                output_->FlushToDisk();
+            }
+        }
+
+        ::openpni::io::IOStatus GetStatus() const
+        {
+            return output_ ? output_->GetStatus() : ::openpni::io::IOStatus_Success;
+        }
+
         ::openpni::io::ListmodeFileOutput *RawHandle()
         {
             return output_.get();
@@ -301,6 +314,44 @@ namespace coreio
             segment.SetDurationMs(durationMs);
             latestWriter_->AppendSegment(std::move(segment));
             return (latestWriter_->GetStatus() & ::openpni::io::IOStatus_DiskSpaceNotEnough) == 0;
+        }
+
+        bool AppendSegment(std::vector<::openpni::Listmode> &&listmodes,
+                           uint64_t clockMs,
+                           uint32_t durationMs)
+        {
+            if (listmodes.empty())
+            {
+                return true;
+            }
+            if (!latestWriter_)
+            {
+                return false;
+            }
+            ::openpni::io::listmode::ListmodeFileSegment segment;
+            segment.SetListmodes(std::move(listmodes));
+            segment.SetClockMs(clockMs);
+            segment.SetDurationMs(durationMs);
+            latestWriter_->AppendSegment(std::move(segment));
+            return (latestWriter_->GetStatus() & ::openpni::io::IOStatus_DiskSpaceNotEnough) == 0;
+        }
+
+        void FlushToDisk()
+        {
+            if (latestWriter_)
+            {
+                latestWriter_->FlushToDisk();
+            }
+        }
+
+        ::openpni::io::IOStatus GetStatus() const
+        {
+            return latestWriter_ ? latestWriter_->GetStatus() : ::openpni::io::IOStatus_Success;
+        }
+
+        ::openpni::io::ListmodeFileOutput *RawHandle()
+        {
+            return latestWriter_.get();
         }
 
     private:
@@ -382,6 +433,10 @@ namespace coreio
             {
                 currentBytes_ += sizeEstimateBytes;
             }
+            else if constexpr (requires { writer_->GetStatus(); })
+            {
+                lastStatus_ = writer_->GetStatus();
+            }
             return ok;
         }
 
@@ -393,6 +448,18 @@ namespace coreio
         Writer *RawHandle()
         {
             return writer_.get();
+        }
+
+        ::openpni::io::IOStatus GetStatus() const
+        {
+            if (writer_)
+            {
+                if constexpr (requires { writer_->GetStatus(); })
+                {
+                    return writer_->GetStatus();
+                }
+            }
+            return lastStatus_;
         }
 
         const std::string &CurrentPath() const
@@ -443,6 +510,14 @@ namespace coreio
         {
             if (writer_)
             {
+                if constexpr (requires { writer_->FlushToDisk(); })
+                {
+                    writer_->FlushToDisk();
+                }
+                if constexpr (requires { writer_->GetStatus(); })
+                {
+                    lastStatus_ = writer_->GetStatus();
+                }
                 writer_.reset();
             }
             if (!currentPath_.empty() && callback_)
@@ -465,6 +540,7 @@ namespace coreio
 
         std::unique_ptr<Writer> writer_;
         std::string currentPath_;
+        ::openpni::io::IOStatus lastStatus_ = ::openpni::io::IOStatus_Success;
     };
 
 } // namespace coreio

@@ -82,6 +82,7 @@ private:
     bool releaseSlot(uint32_t slotIndex);
     int pollNotifyRing(int maxSlots);
     int pollVerbsCompletions(int maxSlots);
+    int retryPendingReady();
     bool postCreditWrite();
 
     Config m_cfg;
@@ -98,6 +99,7 @@ private:
     RdmaEndpointInfo m_remoteEp{};
     uint64_t m_inprocessHandle = 0;
     uint64_t m_nextExpectedNotifySeq = 1;
+    bool m_pendingReady = false;
     std::atomic<bool> m_ready{false};
 };
 

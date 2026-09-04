@@ -102,11 +102,11 @@ namespace
         }
     }
 
-    void printWorkerStatus(streaming::CoincidenceClient &client, size_t pendingCap)
+    void printWorkerStatus(streaming::CoincidenceClient &client)
     {
         std::cout << "[AcqR2SNode status]"
                   << " state=" << sourceStateName(client.sourceState())
-                  << " pend=" << client.getPendingMessageCount() << "/" << pendingCap
+                  << " pend=" << client.getPendingMessageCount() << "/" << client.txStagingSlotCount()
                   << " rdma=" << client.rdmaCreditRemaining() << "/" << client.rdmaSlotCount()
                   << " sent=" << client.getTotalSinglesSent()
                   << " rtt=" << client.lastRttMs()
@@ -598,10 +598,10 @@ int main(int argc, char **argv)
                                               : cfg.coinClient.heartbeatIntervalMs;
         std::atomic<bool> statusStop{false};
         std::thread statusThread(
-            [&coinClient, pendingCap = cfg.coinClient.maxPendingChunks, statusIntervalMs, &statusStop]()
+            [&coinClient, statusIntervalMs, &statusStop]()
             {
                 auto lastPrint = std::chrono::steady_clock::now();
-                printWorkerStatus(coinClient, pendingCap);
+                printWorkerStatus(coinClient);
                 while (!statusStop.load(std::memory_order_relaxed) &&
                        !g_stopRequested.load(std::memory_order_relaxed))
                 {
@@ -609,7 +609,7 @@ int main(int argc, char **argv)
                     const auto now = std::chrono::steady_clock::now();
                     if (now - lastPrint >= std::chrono::milliseconds(statusIntervalMs))
                     {
-                        printWorkerStatus(coinClient, pendingCap);
+                        printWorkerStatus(coinClient);
                         lastPrint = now;
                     }
                 }
@@ -658,7 +658,7 @@ int main(int argc, char **argv)
         {
             statusThread.join();
         }
-        printWorkerStatus(coinClient, cfg.coinClient.maxPendingChunks);
+        printWorkerStatus(coinClient);
         if (sent)
         {
             (void)coinClient.notifyProducerComplete();

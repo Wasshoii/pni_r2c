@@ -70,7 +70,7 @@ struct Loopback
         wcfg.preferHugePages = false;
         wcfg.forceInProcess = !requireRoce;
         wcfg.requireRoce = requireRoce;
-        wcfg.txSlotCount = 4;
+        wcfg.txSlotCount = 2;
 
         server = std::make_unique<rdma::RdmaRecvServer>(scfg);
         return true;
@@ -540,6 +540,55 @@ bool testAcquireCommit(bool requireRoce)
     return true;
 }
 
+bool testIngestRetry(bool requireRoce)
+{
+    Loopback lb;
+    if (!lb.setup(requireRoce, 8, 64 * 1024, false))
+    {
+        return false;
+    }
+
+    std::atomic<int> attempts{0};
+    std::atomic<uint64_t> received{0};
+    lb.server->setIngest([&](const rdma::SlotChunkView &view)
+                         {
+        const int n = attempts.fetch_add(1);
+        if (n < 2)
+        {
+            return false;
+        }
+        received.fetch_add(view.singlesCount);
+        return true; });
+    if (!lb.handshake())
+    {
+        lb.stop();
+        return false;
+    }
+
+    auto sent = makeSingles(8, 9000);
+    if (!lb.sender->sendPackedSingles(1, 1, 1, sent.data(), static_cast<uint32_t>(sent.size())))
+    {
+        std::cerr << "ingest retry send failed\n";
+        lb.stop();
+        return false;
+    }
+
+    for (int i = 0; i < 16 && received.load() == 0; ++i)
+    {
+        (void)lb.session->pollOnce(8);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const uint64_t consumer = lb.session->ring().consumerSeq()->load();
+    lb.stop();
+    if (received.load() != sent.size() || attempts.load() < 3 || consumer < 1)
+    {
+        std::cerr << "ingest retry got=" << received.load()
+                  << " attempts=" << attempts.load() << " consumer=" << consumer << "\n";
+        return false;
+    }
+    return true;
+}
+
 int runNamed(const char *name, bool (*fn)())
 {
     std::cout << "  " << name << " ... " << std::flush;
@@ -572,6 +621,7 @@ int runSuite(bool requireRoce)
     rc |= runNamedRoce("backpressure", testBackpressure, requireRoce);
     rc |= runNamedRoce("sof_eof", testSofEof, requireRoce);
     rc |= runNamedRoce("acquire_commit", testAcquireCommit, requireRoce);
+    rc |= runNamedRoce("ingest_retry", testIngestRetry, requireRoce);
     return rc;
 }
 

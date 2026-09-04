@@ -4,9 +4,12 @@
  */
 
 #include "core/acquisition/RawIngress.hpp"
+#include "core/streaming/PackedSingle.hpp"
 #include "core/streaming/StreamingCoincidence.hpp"
 #include "core/streaming/SyntheticSingles.hpp"
 #include "dataplane/rdma/RdmaContext.hpp"
+#include "dataplane/rdma/RdmaRecvServer.hpp"
+#include "dataplane/rdma/SlotProtocol.hpp"
 #include "grpcNode/coinNode.hpp"
 #include "grpcService/CoincidenceClient.hpp"
 #include "protos/coincidence.grpc.pb.h"
@@ -20,7 +23,6 @@
 #include <grpcpp/grpcpp.h>
 #include <iostream>
 #include <memory>
-#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -228,6 +230,11 @@ namespace
         }
         if (prompt == 0 || delay == 0)
         {
+            if (coin.aligner().gpuCount() == 0)
+            {
+                std::cout << "[WARN] coincidence products not checked (no GPU)\n";
+                return true;
+            }
             std::cerr << "expected prompt>0 and delay>0, got prompt=" << prompt
                       << " delay=" << delay << "\n";
             return false;
@@ -294,30 +301,56 @@ namespace
         }
         (void)client.waitUntilIdle();
 
-        streaming::NodeRingBuffer *nodeBuf = nullptr;
-        std::optional<streaming::TimestampedSingleChunk> chunk;
-        for (int i = 0; i < 80 && !chunk; ++i)
+        // stealLoop empties NodeRingBuffer within ~1ms; wait on ingest stats instead,
+        // then read remapped payload from the InProcess slot (still valid until reuse).
+        coincidence::StatusResponse st;
+        uint64_t ingested = 0;
+        for (int i = 0; i < 80 && ingested < buf.size(); ++i)
         {
-            nodeBuf = coin.aligner().getNodeBuffer(0);
-            if (nodeBuf && !nodeBuf->empty())
+            st.Clear();
+            if (coin.copyStatus(&st))
             {
-                chunk = nodeBuf->tryPop();
+                for (const auto &ns : st.node_stats())
+                {
+                    if (ns.node_id() == 0)
+                    {
+                        ingested = ns.singles_received();
+                    }
+                }
+            }
+            if (ingested >= buf.size())
+            {
                 break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(25));
         }
+
+        std::vector<streaming::Single> got;
+        const uint64_t handle = client.rdmaInprocessHandle();
+        if (auto sess = rdma::RdmaRecvServer::findInProcessSession(handle))
+        {
+            const uint32_t slot = rdma::slotIndexFromSeq(1, sess->ring().slotCount());
+            const auto *hdr = sess->ring().slotHeader(slot);
+            const auto *payload = sess->ring().slotPayload(slot);
+            if (hdr && payload && hdr->singlesCount == buf.size())
+            {
+                got.resize(hdr->singlesCount);
+                streaming::unpackBinaryToSingles(payload, got.size(), got.data());
+            }
+        }
         client.stop();
         coin.stop();
-        if (!chunk || chunk->singles.size() != buf.size())
+        if (ingested < buf.size() || got.size() != buf.size())
         {
-            std::cerr << "remap chunk missing or size mismatch\n";
+            std::cerr << "remap chunk missing ingested=" << ingested
+                      << " ring=" << got.size() << " expected=" << buf.size() << "\n";
             return false;
         }
-        for (size_t i = 0; i < chunk->singles.size(); ++i)
+        for (size_t i = 0; i < got.size(); ++i)
         {
-            if (chunk->singles[i].channelIndex != kExpected)
+            if (got[i].channelIndex != kExpected)
             {
-                std::cerr << "remap channelIndex[" << i << "]=" << chunk->singles[i].channelIndex
+                std::cerr << "remap channelIndex[" << i << "]=" << got[i].channelIndex
                           << " expected " << kExpected << "\n";
                 return false;
             }
@@ -353,6 +386,7 @@ namespace
         c0.detectorType = "BDM2";
         c0.forceInProcess = true;
         c0.requireRoce = false;
+        // JSON-compat field; hot path sends inline. Assert send completes, not queue depth.
         c0.maxPendingChunks = 2;
         c0.batchSize = 1;
         c0.waitForStartTimeoutMs = 15000;

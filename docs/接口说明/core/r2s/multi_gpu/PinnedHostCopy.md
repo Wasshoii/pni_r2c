@@ -4,7 +4,7 @@
 
 ## 目的
 
-把 device 上的 `span<const T>` 异步拷到 CUDA pinned host（`HostUniquePtr`），并在函数内 `cudaStreamSynchronize`。S2C 等路径仍用；**50100 R2S 热路径已不再经此落到引擎 pinned**，singles 留在 `d_singles`，D2H 在 TX 填槽或 `materializeSinglesOnHost`。
+把 device 上的 `span<const T>` 异步拷到 CUDA pinned host（`HostUniquePtr`），并在函数内 `cudaStreamSynchronize`。S2C 等路径仍用；**50100 R2S 热路径已不再经此落到引擎 pinned**，singles 留在 `d_singles`，D2H 在 TX 填槽的 copy stream 或 `materializeSinglesOnHost`。
 
 **应用代码不要直接 include。** 上层应使用 [R2S.md](../R2S.md) 的 `materializeSinglesOnHost`。
 

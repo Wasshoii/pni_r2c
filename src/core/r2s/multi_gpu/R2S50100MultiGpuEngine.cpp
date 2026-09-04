@@ -165,7 +165,11 @@ SegmentSinglesResult R2S50100MultiGpuEngine::processSegmentSync(const openpni::R
 
     const auto &result = *held_lease_;
     const uint64_t count = result.actualSinglesCount;
-    if (count == 0 || result.d_singles.Data() == nullptr)
+    if (count == 0)
+    {
+        return {};
+    }
+    if (result.d_singles.Data() == nullptr)
     {
         return {};
     }

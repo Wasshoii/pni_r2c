@@ -78,11 +78,34 @@ namespace openpni::distributed::streaming
         uint64_t computerClock_ms = 0;
         uint32_t duration_ms = 0;
         std::vector<Single> singles;
+        // 未消费起点。半块只推进此下标，不 assign/erase。
+        size_t consumed = 0;
 
         uint64_t minTime_pico = UINT64_MAX;
         uint64_t maxTime_pico = 0;
+        // stealWholeFront 从环里 swap 走的块仍占内存池配额；切前缀得到的拷贝则否。
+        bool poolOwned = true;
+
+        size_t remainingBegin() const noexcept
+        {
+            return consumed > singles.size() ? singles.size() : consumed;
+        }
+        size_t remainingCount() const noexcept
+        {
+            return singles.size() - remainingBegin();
+        }
+        bool remainingEmpty() const noexcept { return remainingCount() == 0; }
+        const Single *remainingData() const noexcept
+        {
+            return remainingEmpty() ? nullptr : singles.data() + remainingBegin();
+        }
+        void consumePrefix(size_t n);
 
         void updateTimeRange();
+        // 未消费区间按时间有序时，只需看两端。
+        void refreshTimeRangeFromSortedEnds();
+        // 入环热路径：front<=back 时用两端 O(1)，否则回退全扫。upper_bound 已要求有序。
+        void fillTimeRangePreferSortedEnds();
         size_t memorySize() const;
         size_t singlesMemorySize() const;
         bool operator<(const TimestampedSingleChunk &other) const;
@@ -106,8 +129,22 @@ namespace openpni::distributed::streaming
         // 未取走的部分留在环形缓冲里等待下一轮。
         size_t extractSinglesBeforeInto(uint64_t boundary, Single *dst, size_t cap,
                                         bool *truncated = nullptr);
+        // 短锁抽出：整 chunk swap 走 vector；半块只切时间/预算前缀。返回空表示
+        // 队头已超过 boundary 或 budget=0。
+        std::vector<Single> stealFront(uint64_t boundary, size_t budget);
+        // 队头 minTime <= boundary 则 swap 走整块（不释放内存池）；否则空。
+        std::optional<TimestampedSingleChunk> stealWholeFront(uint64_t boundary);
+        // 短锁批量整块 swap，不看水位。steal 线程专用：切段仍在协调线程。
+        std::vector<TimestampedSingleChunk> stealWholeFronts(size_t maxCount);
+        // 把未抽完的半块放回队头；允许短暂超过 maxChunks（抽取线程持有的那一块）。
+        void reinsertFront(TimestampedSingleChunk &&chunk);
+        // 整块已消费完：释放 stealWholeFront 时仍记在池上的配额。
+        void dropStolenChunk(TimestampedSingleChunk &&chunk);
+        bool peekFront(uint64_t *minTime, uint64_t *maxTime, size_t *count) const;
         std::vector<TimestampedSingleChunk> extractCompleteBefore(uint64_t boundary);
         size_t countSinglesBefore(uint64_t boundary) const;
+        // 整 chunk 条数之和；跨 boundary 的半块用 chunk.size 作上界，不扫 singles。
+        size_t countReadySingles(uint64_t boundary) const;
         // 返回不超过 boundary 且累计条数不超过 budget 的最大 chunk 边界时间。
         // outCount 回填该边界下的条数。没有任何整 chunk 可取时返回 0。
         uint64_t chunkBoundaryWithin(uint64_t boundary, size_t budget, size_t *outCount) const;
@@ -173,6 +210,10 @@ namespace openpni::distributed::streaming
         // （单文件，默认行为，与既有 Coincidence 输出保持一致）
         uint64_t listmodeMaxFileSizeBytes = 0;
         bool listmodeOverwriteExisting = true;
+        // 写队列深度，与 GPU ring 脱钩。队列满只背压，不丢已算出的 pair。
+        size_t listmodeWriteQueueCap = 32;
+        // Listmode/Unimode 两层 IO 环深度（默认 8；历史写死为 2）。
+        unsigned listmodeIoQueueSize = 8;
 
         size_t maxChunksPerNode = 100; // 每个节点的 RingBuffer 大小（单位：Chunk 数量）
         // 处理循环“无事件时”的最长空转等待，单位毫秒。有数据推入时由条件变量提前唤醒，
@@ -218,6 +259,13 @@ namespace openpni::distributed::streaming
         // 多 GPU 在飞段数。0 = 按 GPU 数 × instancePerGpu 推导（与 R2S computePipelineDepth 同一思路）。
         size_t coinPipelineDepth = 0;
 
+        // 每节点 steal 超前队列容量（chunk 数）。满则 steal 阻塞，环堆积后走高水位。
+        size_t stolenDequeCap = 8;
+        // 只抽不核：协调线程仍 steal→merge→carry→推进水位，不建 GPU 工人、不 submit。
+        bool extractOnly = false;
+        // 诊断：steal 进 deque 后直接丢弃，不 merge。用来拆锁/swap 墙和 memcpy 墙。
+        bool stealOnly = false;
+
         uint64_t getTotalSafetyMargin() const;
         // 重叠窗长度（100fs）：coinWindow + delayTime，即 carry 需要覆盖的回溯长度。
         uint64_t overlapLength_100fs() const;
@@ -236,6 +284,10 @@ namespace openpni::distributed::streaming
         std::atomic<uint64_t> currentTimeBoundary_pico{0};
         std::atomic<uint64_t> coinKernelNs{0};
         std::atomic<uint64_t> extractNs{0};
+        std::atomic<uint64_t> stealNs{0};
+        std::atomic<uint64_t> mergeNs{0};
+        std::atomic<uint64_t> watermarkNs{0};
+        std::atomic<uint64_t> slotWaitNs{0};
         std::atomic<uint64_t> sinkNs{0};
         std::atomic<uint64_t> drainWaitNs{0};
         std::atomic<uint64_t> writeQueueWaitNs{0};
@@ -289,21 +341,50 @@ namespace openpni::distributed::streaming
             size_t pendingCount = 0; // boundary 之下待抽取的 singles 条数
         };
 
+        struct StolenLane
+        {
+            std::deque<TimestampedSingleChunk> chunks;
+            mutable std::mutex mutex;
+            std::condition_variable cvNotEmpty;
+            std::condition_variable cvNotFull;
+            std::thread thread;
+            size_t singles = 0;
+            // steal 已从环拿出、尚未 pushBack。waitStolenReady 必须看见在途块。
+            std::atomic<bool> inFlight{false};
+
+            bool peekFront(uint64_t *minTime, uint64_t *maxTime, size_t *count) const;
+            std::optional<TimestampedSingleChunk> popWholeFront(uint64_t boundary);
+            // 短锁弹出所有 maxTime <= bound 的完整块（不碰 singles）。骑跨块留在队头。
+            std::vector<TimestampedSingleChunk> popCompleteBefore(uint64_t bound,
+                                                                  size_t maxSingles);
+            std::optional<TimestampedSingleChunk> tryPop();
+            void reinsertFront(TimestampedSingleChunk &&chunk);
+            void pushBack(TimestampedSingleChunk &&chunk, size_t cap,
+                          const std::atomic<bool> &stop);
+            bool empty() const;
+            size_t size() const;
+            size_t countReadySingles(uint64_t boundary) const;
+        };
+
         void initializeOutput();
         void finalizeOutput();
         // 非 const：allowStalledNodeBypass 生效时会累加 degradedSegments。
         uint64_t calculateWatermark();
-        // 在 [m_lastWatermark, watermark] 内解出满足显存预算与段时长硬下界的抽取边界。
-        uint64_t clampSegmentBoundary(uint64_t watermark, size_t pending, size_t *outCount);
-        size_t countPendingBefore(uint64_t boundary) const;
+        size_t countReadyBefore(uint64_t boundary) const;
         bool anyNodeAboveHighWater() const;
+        bool hasStolenChunks() const;
+        bool waitStolenReady(uint64_t watermark);
+        void publishWatermark(uint64_t watermark);
+        void stealLoop(size_t nodeIdx);
+        void startStealWorkers();
+        void joinStealWorkers();
+        void wakeStealAndCoord();
         void processingLoop();
         void drainLoop();
         void writerLoop();
         void processCoincidence(std::span<const Single> singles, uint64_t carryCutoffTime_100fs);
-        // 抽取 -> 归并 -> 分批送内核 -> 更新 carry。
-        bool processSegment(uint64_t boundary, size_t expectedCount);
-        size_t extractAndMergeInto(Single *dest, size_t destCap, uint64_t boundary, bool *truncated);
+        // 水位线为时间上界，一次扫描按预算抽出并送内核。
+        bool processSegment(uint64_t watermark);
         size_t acquireInputSlot();
         void releaseInputSlot(size_t idx);
         bool submitOwnedSlot(size_t slotIdx, size_t count, uint64_t carryCutoff,
@@ -326,12 +407,23 @@ namespace openpni::distributed::streaming
                 openpni::distributed::coreio::ListmodeWriterOptions> &output,
             std::span<Listmode const> coins,
             bool alreadyOnHost = false);
+        void saveCoincidenceResult(
+            openpni::distributed::coreio::RollingFileWriter<
+                openpni::distributed::coreio::ListmodeFileWriter,
+                openpni::distributed::coreio::ListmodeWriterOptions> &output,
+            std::vector<Listmode> &&coins);
         void flushRemaining();
 
         TimeAlignerConfig m_config;
         size_t m_nodeCount;
 
         std::vector<std::unique_ptr<NodeRingBuffer>> m_nodeBuffers;
+        std::vector<std::unique_ptr<StolenLane>> m_stolenLanes;
+        std::atomic<uint64_t> m_publishedWatermark{0};
+        std::atomic<bool> m_stealStop{false};
+        std::atomic<size_t> m_stealAlive{0};
+        std::mutex m_stealMutex;
+        std::condition_variable m_stealCv;
 
         openpni::Coincidence m_coinNode;
         openpni::tools::UniPtr<Single> m_singleBuffer{"StreamingTimeAligner_singles"};
@@ -373,14 +465,15 @@ namespace openpni::distributed::streaming
         std::vector<Single> m_carrySingles;
         uint64_t m_lastWatermark = 0;
 
-        // 抽取暂存：m_stageRaw 按 [carry][node0][node1][...] 布局收集各节点有序段，
-        // 归并后落到 m_stageMerged，再整体（或分批）送内核。两块都是 pinned 内存，
-        // 使 H2D 走真异步路径。
+        // 单 GPU / 超槽路径的归并目标。多 GPU 热路径把各节点 steal 出的有序段
+        // 直接 merge 进 pinned 输入槽，不再经 m_stageRaw 中转。
         openpni::tools::HostUniquePtr<Single> m_stageRaw{
             std::make_unique<openpni::detail::VAllocatorCUDAHost>()};
         openpni::tools::HostUniquePtr<Single> m_stageMerged{
             std::make_unique<openpni::detail::VAllocatorCUDAHost>()};
         size_t m_stageCapacity = 0;
+        // extract-only：pageable 归并缓冲，避免 cudaMallocHost 写带宽拖慢抽取墙。
+        std::vector<Single> m_extractHost;
         std::vector<std::pair<size_t, size_t>> m_mergeRuns;
         // calculateWatermark 是否因 allowStalledNodeBypass 剔除了停滞节点
         bool m_watermarkDegraded = false;

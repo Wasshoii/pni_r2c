@@ -39,11 +39,11 @@ public:
         uint32_t nodeId = 0;
         std::string deviceName;
         size_t stagingSlotBytes = kDefaultSlotBytes;
-        bool preferHugePages = true;
+        bool preferHugePages = false; // worker TX must not compete with DPDK hugetlb
         bool forceInProcess = false;
         bool requireRoce = false;
         int gidIndex = -1;
-        uint32_t txSlotCount = 8;
+        uint32_t txSlotCount = 2;
     };
 
     explicit RdmaWriteSender(Config cfg);
@@ -84,6 +84,9 @@ public:
     bool ok() const noexcept { return m_connected; }
     DataPlaneKind kind() const noexcept { return m_kind; }
     uint32_t slotCount() const noexcept { return m_slotCount; }
+    uint32_t txStagingSlotCount() const noexcept { return m_txSlotCount; }
+    uint32_t txSlotsBusy() const noexcept { return m_txBusyCount.load(std::memory_order_relaxed); }
+    uint64_t inprocessHandle() const noexcept { return m_remote.inprocessHandle; }
     size_t slotStride() const noexcept { return m_slotStride; }
     uint64_t slotsInFlight() const noexcept;
     uint32_t creditRemaining() const noexcept;
@@ -117,6 +120,7 @@ private:
     ibv_mr *m_txMr = nullptr;
     uint32_t m_txSlotCount = 0;
     std::vector<uint8_t> m_txBusy;
+    std::atomic<uint32_t> m_txBusyCount{0};
 
     // InProcess acquireTxSlot fallback (not registered).
     HugepageArena m_inprocessTxArena;

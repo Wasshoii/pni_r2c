@@ -14,6 +14,36 @@
 #define VLOG(level) if(true) ; else ::std::cerr
 #define LOG_EVERY_N(severity, n) ::std::cerr
 
+namespace
+{
+inline void cpuRelax()
+{
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    asm volatile("yield" ::: "memory");
+#else
+    std::this_thread::yield();
+#endif
+}
+
+inline void backoffSpin(uint32_t *spins)
+{
+    const uint32_t n = ++(*spins);
+    if (n < 64u)
+    {
+        cpuRelax();
+        return;
+    }
+    if (n < 256u)
+    {
+        std::this_thread::yield();
+        return;
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(10));
+}
+} // namespace
+
 namespace openpni::distributed::dataplane::rdma
 {
 
@@ -287,12 +317,14 @@ void RdmaWriteSender::close()
     m_inprocessTxArena.release();
     m_txBusy.clear();
     m_inprocessTxBusy.clear();
+    m_txBusyCount.store(0, std::memory_order_relaxed);
     m_txCudaRegistered = false;
 }
 
 bool RdmaWriteSender::waitForCredit(uint64_t needProducerSeq)
 {
     const uint64_t limit = static_cast<uint64_t>(m_slotCount);
+    uint32_t spins = 0;
     while (m_connected)
     {
         uint64_t consumer = 0;
@@ -317,7 +349,7 @@ bool RdmaWriteSender::waitForCredit(uint64_t needProducerSeq)
         {
             recycleTxCompletionsLocked();
         }
-        std::this_thread::sleep_for(std::chrono::microseconds(50));
+        backoffSpin(&spins);
     }
     return false;
 }
@@ -376,7 +408,7 @@ bool RdmaWriteSender::recycleTxCompletionsLocked()
         const uint64_t wr = wcs[i].wrId;
         if (wr >= 1 && wr <= m_txSlotCount)
         {
-            m_txBusy[static_cast<size_t>(wr - 1)] = 0;
+            clearTxBusyLocked(static_cast<uint32_t>(wr - 1));
         }
     }
     return true;
@@ -402,10 +434,11 @@ bool RdmaWriteSender::tryAcquireTxSlotLocked(TxSlotLease *out)
         if (busy[i] == 0)
         {
             busy[i] = 1;
+            m_txBusyCount.fetch_add(1, std::memory_order_relaxed);
             uint8_t *base = txSlotBase(i);
             if (!base)
             {
-                busy[i] = 0;
+                clearTxBusyLocked(i);
                 return false;
             }
             out->localIndex = i;
@@ -420,22 +453,24 @@ bool RdmaWriteSender::tryAcquireTxSlotLocked(TxSlotLease *out)
 
 bool RdmaWriteSender::acquireTxSlotLocked(TxSlotLease *out)
 {
+    uint32_t spins = 0;
     for (;;)
     {
         if (tryAcquireTxSlotLocked(out))
         {
             return true;
         }
-        std::this_thread::sleep_for(std::chrono::microseconds(10));
         if (!m_connected)
         {
             return false;
         }
+        backoffSpin(&spins);
     }
 }
 
 bool RdmaWriteSender::acquireTxSlot(TxSlotLease *out)
 {
+    uint32_t spins = 0;
     for (;;)
     {
         std::unique_lock<std::mutex> lock(m_sendMutex);
@@ -448,19 +483,17 @@ bool RdmaWriteSender::acquireTxSlot(TxSlotLease *out)
             return true;
         }
         lock.unlock();
-        std::this_thread::sleep_for(std::chrono::microseconds(10));
+        backoffSpin(&spins);
     }
 }
 
 void RdmaWriteSender::clearTxBusyLocked(uint32_t localIndex)
 {
-    if (m_kind == DataPlaneKind::RdmaRoceV2 && localIndex < m_txBusy.size())
+    auto &busy = (m_kind == DataPlaneKind::RdmaRoceV2) ? m_txBusy : m_inprocessTxBusy;
+    if (localIndex < busy.size() && busy[localIndex] != 0)
     {
-        m_txBusy[localIndex] = 0;
-    }
-    else if (localIndex < m_inprocessTxBusy.size())
-    {
-        m_inprocessTxBusy[localIndex] = 0;
+        busy[localIndex] = 0;
+        m_txBusyCount.fetch_sub(1, std::memory_order_relaxed);
     }
 }
 
@@ -478,7 +511,7 @@ bool RdmaWriteSender::postRemoteSlotLocked(uint32_t localIndex, uint32_t remoteS
     if (!m_conn->postWriteImm(base, length, m_txMr->lkey, remote, m_remote.rkey,
                               seqToImm(seq), /*wrId=*/localIndex + 1, /*signaled=*/true))
     {
-        m_txBusy[localIndex] = 0;
+        clearTxBusyLocked(localIndex);
         return false;
     }
     return true;
@@ -508,6 +541,7 @@ bool RdmaWriteSender::writeSlotInProcess(uint32_t slotIndex, const SlotHeader &h
 
 bool RdmaWriteSender::commitTxSlot(const TxSlotLease &lease, const SlotHeader &hdr, uint32_t singlesCount)
 {
+    uint32_t spins = 0;
     for (;;)
     {
         std::unique_lock<std::mutex> lock(m_sendMutex);
@@ -541,7 +575,7 @@ bool RdmaWriteSender::commitTxSlot(const TxSlotLease &lease, const SlotHeader &h
                 return false;
             }
             lock.unlock();
-            std::this_thread::sleep_for(std::chrono::microseconds(50));
+            backoffSpin(&spins);
             continue;
         }
 

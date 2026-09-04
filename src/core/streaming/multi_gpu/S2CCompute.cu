@@ -54,7 +54,6 @@ void S2CCompute::ensureDeviceCapacity(size_t elements)
     {
         return;
     }
-    d_singles_.Clear();
     d_singles_.Reserve(elements);
 }
 

@@ -89,7 +89,7 @@ bool shouldUseMultiGpu50100(const R2SProcessConfig &config);
 即使只谈计算，也不是严格 N×：
 
 - **单段时延几乎不降。** 8 卡不会把一段 350 ms 变成 44 ms。线性指 **多段吞吐**，不是单段加速。
-- **`compute()` 含 H2D（及随后消费侧 D2H）。** 多路同时从同一 NUMA hugepage DMA，会打主机内存和 PCIe。
+- **`compute()` 含 H2D。** 多路同时从同一 NUMA hugepage DMA，会打主机内存和 PCIe。D2H 在消费线程 copy stream 上按槽直写 TX，不插进 compute stream。
 - **喂不饱就不线性。** Bridge 默认深度 2 时最多约 2 卡有活——这是供给问题，不是 worker 公式错。
 - **同卡 `instancePerGpu>1`** 抢同一 SM，不是加卡。
 
@@ -97,4 +97,4 @@ bool shouldUseMultiGpu50100(const R2SProcessConfig &config);
 
 - 本类不是线程安全的多生产者：与 `R2SStreamProcessor` 一样由单消费者线程串行 submit/next。
 - 应用代码应走 `R2SProcessConfig`，不要直接 include 本头文件，除非写引擎级测试。
-- CUDA 包缓冲见 [DPacketsAsync](DPacketsAsync.md)。热路径不再经 [PinnedHostCopy](PinnedHostCopy.md) 落到引擎 pinned；D2H 在 `CoincidenceClient::fillRoceTxAndEnqueue` 或 `materializeSinglesOnHost`。
+- CUDA 包缓冲见 [DPacketsAsync](DPacketsAsync.md)。热路径不再经 [PinnedHostCopy](PinnedHostCopy.md) 落到引擎 pinned；D2H 在 `CoincidenceClient::fillRoceTxAndCommit` 的 copy stream 或 `materializeSinglesOnHost`。

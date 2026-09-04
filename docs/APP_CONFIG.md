@@ -19,7 +19,7 @@
 - forceInProcess: 强制同进程 memcpy（仅本机测试）。
 - deviceName: RNIC 名，空则自动。
 - gidIndex: GID 索引，-1 自动。
-- txSlotCount: 本地 TX 槽数（0 用 RdmaWriteSender 默认 8）。slotCount / slotBytes: 向 coin 请求的接收环尺寸（0 表示服务端默认）。
+- txSlotCount: 本地 TX 槽数（0 用 RdmaWriteSender 默认 **2**）。TX 不用 hugepage。slotCount / slotBytes: 向 coin 请求的接收环尺寸（0 表示服务端默认，当前服务端忽略请求值）。
 
 ### source
 - type: `synthetic` | `lsingle_replay` | `acquisition`（本阶段 acquisition 只留 StubRawIngress）。
@@ -82,7 +82,7 @@
 - remapLocalToGlobalChannels: 是否重映射通道。
 - globalChannelOffset: 全局通道偏移。
 - crystalsPerChannel: 每通道晶体数。
-- maxPendingChunks: 最大待发送 chunk 数。
+- maxPendingChunks: JSON 兼容字段；热路径不再作为发送队列深度（`pend` 为本地 TX busy / `txSlotCount`）。
 - batchSize: 批量发送大小。
 - heartbeatIntervalMs: 心跳间隔（默认 1000 ms）。主控通过心跳下发 Pause/Stop 并收集速率/缓冲。
 - waitForStartSignal: 是否等待启动信号。

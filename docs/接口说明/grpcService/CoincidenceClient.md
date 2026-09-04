@@ -36,9 +36,9 @@ struct CoincidenceClientConfig {
 
 - `requireRoce`：对端必须是 RoCE，不允许静默落到 InProcess。
 - `forceInProcess`：同进程 memcpy（CI / 单机编排测试）。
-- `txSlotCount`：本地 TX 暂存槽数，交给 `RdmaWriteSender::Config`（0 用 sender 默认 **8**）。
-- `requestedSlotCount` / `requestedSlotBytes`：OpenDataPlane 向 coin 请求的接收环尺寸。
-- `maxPendingChunks`：入队上限；RoCE 热路径 payload 已在 TX 槽里，实际深度还受 `txSlotCount` 限制。
+- `txSlotCount`：本地 TX 暂存槽数，交给 `RdmaWriteSender::Config`（0 用 sender 默认 **2**）。
+- `requestedSlotCount` / `requestedSlotBytes`：OpenDataPlane 向 coin 请求的接收环尺寸（服务端可忽略）。
+- `maxPendingChunks`：JSON 兼容字段；热路径不再作为发送队列深度。
 - `remapLocalToGlobalChannels`：发送前把 `channelIndex` 加上 `globalChannelOffset`。
 
 ### sendSingles
@@ -55,9 +55,8 @@ bool sendSingles(std::vector<Single> &&singles,
                  uint32_t duration_ms);
 ```
 
-- **RoCE**：调用线程（必须是有序 `next()` 的消费线程）按槽 `acquireTxSlot`，源为 device 时 `cudaMemcpy` D2H 进已 `cudaHostRegister` 的 TX payload，源为 host 时 memcpy；入队已填 lease；`senderLoop` 只 `waitForCredit` + `commitTxSlot`（WRITE）。一块过大拆多槽，同一 `chunkId`。PAUSE 仍挡在入队侧。`OpenDataPlane` 成功后对 TX hugepage `cudaHostRegister`；`stop()` 先 `cudaHostUnregister` 再 `close()`。
-- **InProcess**：不填 TX；device span 先 D2H 进 pending，host span 拷进 pending（或 `sendSinglesView` 借指针），sender 直写接收环。
-- 队列达到 `maxPendingChunks` 时阻塞，直到发送推进或 `stop` / `STOP_PRODUCE`。
+- **RoCE**：调用线程（必须是有序 `next()` 的消费线程）按槽 `acquireTxSlot`。50100 热路径源为 **device**，用每节点专用 `cudaStreamNonBlocking` `cudaMemcpyAsync` + event（管线深 2～4）直写已 `cudaHostRegister` 的 TX payload，再 remap 并当场 `commitTxSlot`（等 credit + WRITE）。源为 host 时 memcpy。一块过大拆多槽，同一 `chunkId`。PAUSE 挡在填槽前。`OpenDataPlane` 成功后对 TX mmap `cudaHostRegister`；`stop()` 先销毁 D2H stream/event，再 `cudaHostUnregister`，再 `close()`。
+- **InProcess**：调用线程里 `sendPackedSingles`（一次 memcpy 进接收环）。device span 先 D2H；`sendSinglesView` 对 host 直接发，调用期间 span 必须有效。
 
 ### sendSinglesView
 
@@ -67,8 +66,8 @@ bool sendSinglesView(std::span<const Single> singles,
                      uint32_t duration_ms);
 ```
 
-- InProcess：只入队指针，不拷 payload。**device span 不能借**，退回 `sendSingles` 做 D2H。调用方保证 host span 在该 chunk 真正发出前一直有效。
-- RoCE：与 `sendSingles(span)` 相同，D2H/memcpy 进 TX 槽后即可释放调用方缓冲。
+- InProcess：调用期间从 host span `sendPackedSingles`，不拷 payload。**device span 不能借**，退回 `sendSingles` 做 D2H。
+- RoCE：与 `sendSingles(span)` 相同，async D2H（device）或 memcpy（host）进 TX 并 commit 后即可释放调用方缓冲。
 - 开启 channel remap 时退回拷贝路径（不能改调用方缓冲）。
 
 `computerClock_ms` / `duration_ms` 写入槽头，符合对齐仍以 PET `timevalue_100fs` 为准。
@@ -78,7 +77,7 @@ bool sendSinglesView(std::span<const Single> singles,
 1. `RegisterNode`
 2. `OpenDataPlane`：`prepareLocalEndpoint` 得到本端 `RdmaEndpointInfo`，经 [ProtoConvert](../dataplane/rdma/ProtoConvert.md) 放入请求；响应里的 coin 端点交给 `RdmaWriteSender::connect`
 3. `WaitForStart`（可关）
-4. 启动 sender 线程与 heartbeat 线程
+4. 启动 heartbeat 线程。`sendSingles` 在调用线程上填槽并提交。
 
 `dataPlaneKind()` 返回实际连接类型（RoCE 或 InProcess）。
 
@@ -88,14 +87,17 @@ bool sendSinglesView(std::span<const Single> singles,
 uint64_t getTotalSinglesSent() const;
 size_t getPendingMessageCount() const;
 uint32_t rdmaSlotCount() const;
+uint32_t txStagingSlotCount() const;
 uint64_t rdmaSlotsInFlight() const;
 uint32_t rdmaCreditRemaining() const;
 bool waitUntilIdle();
 bool notifyProducerComplete();
 ```
 
+- `getPendingMessageCount()`：本地 TX busy 槽数。
+- `txStagingSlotCount()`：本地 TX 槽数（默认 2）。
 - `rdmaSlotsInFlight` / `rdmaCreditRemaining` 来自 sender 对远端 `consumerSeq` 的镜像，对应调试日志里的 `rdma` / credit。
-- `waitUntilIdle`：等到 pending 队列空且当前 slot 写完。
+- `waitUntilIdle`：等到当前 `sendSingles` 返回（无在飞提交）。
 - `notifyProducerComplete`：先 `waitUntilIdle`，再发 gRPC 完成通知。
 
 ## 典型流程
@@ -106,7 +108,7 @@ bool notifyProducerComplete();
 
 ## 使用提示
 
-- `span` 仅在回调返回前有效：RoCE 下 `sendSingles(span)` 在返回前已 D2H/拷进 TX 槽；InProcess 对 host 拷进 pending，对 device 先 D2H。不要假设 span 在回调返回后仍指向 GPU/租约缓冲。
+- `span` 仅在回调返回前有效：RoCE 下 `sendSingles(span)` 在返回前已 async D2H（device）或 memcpy（host）并提交 WRITE；InProcess 对 host 当场 memcpy 进环，对 device 先 D2H。不要假设 span 在回调返回后仍指向 GPU/租约缓冲。
 - 不要绕过本类直接对未 connect 的 `RdmaWriteSender` 发包；槽尺寸与 rkey 来自 OpenDataPlane。
 - 不要在 GPU worker 里 `acquireTxSlot`：多卡完成序 ≠ 段序，会打乱 QP `seq` 与符合水位线。
 - Heartbeat 上的 PAUSE/STOP 会挡住或结束生产，细节见状态机文档。

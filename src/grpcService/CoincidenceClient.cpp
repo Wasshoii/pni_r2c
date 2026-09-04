@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <deque>
 #include <iostream>
 #include <limits>
 #include <span>
@@ -57,6 +58,46 @@ namespace openpni::distributed::streaming
         std::memcpy(dst, src, bytes);
         return true;
     }
+
+    rdma::SlotHeader makeTxSlotHeader(
+        uint64_t chunkId,
+        uint64_t computerClock_ms,
+        uint32_t duration_ms,
+        bool first,
+        bool last,
+        bool partial)
+    {
+        rdma::SlotHeader hdr{};
+        rdma::clearSlotHeader(&hdr);
+        hdr.chunkId = chunkId;
+        hdr.computerClockMs = computerClock_ms;
+        hdr.durationMs = duration_ms;
+        hdr.flags = 0;
+        if (first)
+        {
+            hdr.flags = static_cast<uint16_t>(hdr.flags | rdma::kSlotFlagSof);
+        }
+        if (last)
+        {
+            hdr.flags = static_cast<uint16_t>(hdr.flags | rdma::kSlotFlagEof);
+        }
+        if (partial)
+        {
+            hdr.flags = static_cast<uint16_t>(hdr.flags | rdma::kSlotFlagPartial);
+        }
+        return hdr;
+    }
+
+    struct PendingTxFill
+    {
+        rdma::TxSlotLease lease{};
+        uint32_t n = 0;
+        uint32_t absOffset = 0;
+        bool first = false;
+        bool last = false;
+        bool partial = false;
+        cudaEvent_t event = nullptr;
+    };
     } // namespace
 
     CoincidenceClient::CoincidenceClient(const CoincidenceClientConfig &config)
@@ -105,9 +146,6 @@ namespace openpni::distributed::streaming
             }
         }
 
-        m_senderThread = std::thread([this]()
-                                     { senderLoop(); });
-
         m_heartbeatThread = std::thread([this]()
                                         { heartbeatLoop(); });
 
@@ -125,14 +163,12 @@ namespace openpni::distributed::streaming
 
         m_cv.notify_all();
 
-        if (m_senderThread.joinable())
-        {
-            m_senderThread.join();
-        }
         if (m_heartbeatThread.joinable())
         {
             m_heartbeatThread.join();
         }
+
+        destroyTxD2hResources();
 
         if (m_rdmaSender)
         {
@@ -155,6 +191,7 @@ namespace openpni::distributed::streaming
         sc.deviceName = m_config.rdmaDeviceName;
         sc.requireRoce = m_config.requireRoce;
         sc.forceInProcess = m_config.forceInProcess;
+        sc.preferHugePages = false;
         sc.gidIndex = m_config.gidIndex;
         if (m_config.txSlotCount > 0)
         {
@@ -231,6 +268,102 @@ namespace openpni::distributed::streaming
         return true;
     }
 
+    void CoincidenceClient::destroyTxD2hResources()
+    {
+        if (m_txD2hDevice >= 0)
+        {
+            static_cast<void>(cudaSetDevice(m_txD2hDevice));
+        }
+        for (void *ev : m_txD2hEvents)
+        {
+            if (ev)
+            {
+                static_cast<void>(cudaEventDestroy(static_cast<cudaEvent_t>(ev)));
+            }
+        }
+        m_txD2hEvents.clear();
+        if (m_txD2hStream)
+        {
+            static_cast<void>(cudaStreamDestroy(static_cast<cudaStream_t>(m_txD2hStream)));
+            m_txD2hStream = nullptr;
+        }
+        m_txD2hDevice = -1;
+    }
+
+    bool CoincidenceClient::ensureTxD2hStream(int device)
+    {
+        if (device < 0)
+        {
+            return false;
+        }
+        if (m_txD2hStream && m_txD2hDevice == device && !m_txD2hEvents.empty())
+        {
+            return true;
+        }
+        destroyTxD2hResources();
+        const cudaError_t setErr = cudaSetDevice(device);
+        if (setErr != cudaSuccess)
+        {
+            LOG(ERROR) << "cudaSetDevice failed for TX D2H stream: " << cudaGetErrorString(setErr);
+            return false;
+        }
+        cudaStream_t stream = nullptr;
+        const cudaError_t stErr =
+            cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+        if (stErr != cudaSuccess || !stream)
+        {
+            LOG(ERROR) << "cudaStreamCreate failed for TX D2H: " << cudaGetErrorString(stErr);
+            return false;
+        }
+        const uint32_t nEvents = std::max<uint32_t>(
+            2, m_rdmaSender ? m_rdmaSender->txStagingSlotCount() : 2);
+        m_txD2hEvents.resize(nEvents, nullptr);
+        for (uint32_t i = 0; i < nEvents; ++i)
+        {
+            cudaEvent_t ev = nullptr;
+            const cudaError_t evErr =
+                cudaEventCreateWithFlags(&ev, cudaEventDisableTiming);
+            if (evErr != cudaSuccess || !ev)
+            {
+                LOG(ERROR) << "cudaEventCreate failed for TX D2H: " << cudaGetErrorString(evErr);
+                m_txD2hStream = stream;
+                m_txD2hDevice = device;
+                destroyTxD2hResources();
+                return false;
+            }
+            m_txD2hEvents[i] = ev;
+        }
+        m_txD2hStream = stream;
+        m_txD2hDevice = device;
+        return true;
+    }
+
+    bool CoincidenceClient::remapTxSlotPayload(Single *dst, uint32_t n, uint32_t absIndex)
+    {
+        if (!dst || !m_config.remapLocalToGlobalChannels)
+        {
+            return true;
+        }
+        for (uint32_t i = 0; i < n; ++i)
+        {
+            const uint64_t globalChannel =
+                static_cast<uint64_t>(dst[i].channelIndex) +
+                static_cast<uint64_t>(m_config.globalChannelOffset);
+            if (globalChannel > static_cast<uint64_t>(std::numeric_limits<uint16_t>::max()))
+            {
+                LOG(ERROR) << "remapped channel index overflow: " << globalChannel;
+                return false;
+            }
+            dst[i].channelIndex = static_cast<uint16_t>(globalChannel);
+            if (absIndex + i == 0 && !m_remapSampleLogged.exchange(true))
+            {
+                LOG(INFO) << "remap sample node=" << m_config.nodeId
+                          << " global_channel=" << dst[i].channelIndex;
+            }
+        }
+        return true;
+    }
+
     bool CoincidenceClient::remapChannels(std::vector<Single> *singles)
     {
         if (!singles || !m_config.remapLocalToGlobalChannels)
@@ -262,57 +395,21 @@ namespace openpni::distributed::streaming
         return true;
     }
 
-    bool CoincidenceClient::enqueuePendingChunk(std::unique_ptr<PendingChunk> chunk)
+    bool CoincidenceClient::waitIfPausedOrStopped()
     {
-        if (!chunk)
+        if (!m_paused.load(std::memory_order_acquire) &&
+            !m_stopProduce.load(std::memory_order_acquire))
         {
-            return false;
+            return m_running.load();
         }
-        const size_t n = (chunk->hasTxLease || chunk->borrowed != nullptr)
-                             ? static_cast<size_t>(chunk->singlesCount)
-                             : chunk->singles.size();
-        if (!chunk->hasTxLease && chunk->borrowed == nullptr)
-        {
-            chunk->singlesCount = static_cast<uint32_t>(n);
-        }
-
-        {
-            std::unique_lock<std::mutex> lock(m_mutex);
-
-            if (m_paused.load(std::memory_order_acquire))
-            {
-                m_cv.wait(lock, [this]()
-                          {
-                              return !m_paused.load(std::memory_order_acquire) ||
-                                     m_stopProduce.load(std::memory_order_acquire) ||
-                                     !m_running.load();
-                          });
-            }
-
-            if (!m_running.load() || m_stopProduce.load(std::memory_order_acquire))
-            {
-                return false;
-            }
-
-            if (m_pendingMessages.size() >= m_config.maxPendingChunks)
-            {
-                m_cv.wait(lock, [this]()
-                          { return m_pendingMessages.size() < m_config.maxPendingChunks ||
-                                   !m_running.load() ||
-                                   m_stopProduce.load(std::memory_order_acquire); });
-            }
-
-            if (!m_running.load() || m_stopProduce.load(std::memory_order_acquire))
-            {
-                return false;
-            }
-
-            m_pendingMessages.push(std::move(chunk));
-        }
-
-        m_cv.notify_one();
-        m_totalSinglesSent += n;
-        return true;
+        std::unique_lock<std::mutex> lock(m_mutex);
+        m_cv.wait(lock, [this]()
+                  {
+                      return !m_paused.load(std::memory_order_acquire) ||
+                             m_stopProduce.load(std::memory_order_acquire) ||
+                             !m_running.load();
+                  });
+        return m_running.load() && !m_stopProduce.load(std::memory_order_acquire);
     }
 
     bool CoincidenceClient::useRoceTxFill() const
@@ -321,7 +418,32 @@ namespace openpni::distributed::streaming
                m_rdmaSender->kind() == rdma::DataPlaneKind::RdmaRoceV2;
     }
 
-    bool CoincidenceClient::fillRoceTxAndEnqueue(
+    bool CoincidenceClient::sendPackedOnCallerThread(
+        uint64_t chunkId,
+        uint64_t computerClock_ms,
+        uint32_t duration_ms,
+        const Single *src,
+        uint32_t count)
+    {
+        if (!m_rdmaSender)
+        {
+            return false;
+        }
+        if (count == 0)
+        {
+            return true;
+        }
+        if (!src)
+        {
+            return false;
+        }
+        const bool ok = m_rdmaSender->sendPackedSingles(
+            chunkId, computerClock_ms, duration_ms, src, count);
+        m_connected = ok;
+        return ok;
+    }
+
+    bool CoincidenceClient::fillRoceTxAndCommit(
         std::span<const Single> singles,
         uint64_t computerClock_ms,
         uint32_t duration_ms)
@@ -342,16 +464,16 @@ namespace openpni::distributed::streaming
         }
 
         const uint64_t chunkId = m_chunkIdCounter++;
-        uint32_t offset = 0;
-        bool first = true;
         const uint32_t total = static_cast<uint32_t>(singles.size());
         const bool srcDevice = singlesOnDevice(singles.data());
+        int srcDeviceId = -1;
         if (srcDevice)
         {
             cudaPointerAttributes attr{};
             if (cudaPointerGetAttributes(&attr, singles.data()) == cudaSuccess && attr.device >= 0)
             {
-                const cudaError_t setErr = cudaSetDevice(attr.device);
+                srcDeviceId = attr.device;
+                const cudaError_t setErr = cudaSetDevice(srcDeviceId);
                 if (setErr != cudaSuccess)
                 {
                     LOG(ERROR) << "cudaSetDevice failed before TX D2H: " << cudaGetErrorString(setErr);
@@ -360,87 +482,183 @@ namespace openpni::distributed::streaming
             }
         }
 
-        while (offset < total)
+        const auto abortPending = [this](std::deque<PendingTxFill> *q)
         {
+            if (m_txD2hStream)
+            {
+                static_cast<void>(
+                    cudaStreamSynchronize(static_cast<cudaStream_t>(m_txD2hStream)));
+            }
+            if (!q)
+            {
+                return;
+            }
+            for (auto &p : *q)
+            {
+                m_rdmaSender->abortTxSlot(p.lease);
+            }
+            q->clear();
+        };
+        const auto commitFilled = [&](PendingTxFill &p) -> bool
+        {
+            auto *dst = reinterpret_cast<Single *>(p.lease.payload);
+            if (!remapTxSlotPayload(dst, p.n, p.absOffset))
+            {
+                return false;
+            }
+            const rdma::SlotHeader hdr = makeTxSlotHeader(
+                chunkId, computerClock_ms, duration_ms, p.first, p.last, p.partial);
+            if (!m_rdmaSender->commitTxSlot(p.lease, hdr, p.n))
+            {
+                LOG(ERROR) << "commitTxSlot failed node=" << m_config.nodeId;
+                m_connected = false;
+                return false;
+            }
+            m_totalSinglesSent += p.n;
+            return true;
+        };
+
+        if (!srcDevice || srcDeviceId < 0 || !ensureTxD2hStream(srcDeviceId))
+        {
+            uint32_t offset = 0;
+            bool first = true;
+            while (offset < total)
+            {
+                if (!waitIfPausedOrStopped())
+                {
+                    return false;
+                }
+
+                rdma::TxSlotLease lease{};
+                if (!m_rdmaSender->acquireTxSlot(&lease) || !lease.payload)
+                {
+                    LOG(ERROR) << "acquireTxSlot failed node=" << m_config.nodeId;
+                    return false;
+                }
+
+                uint32_t n = static_cast<uint32_t>(
+                    std::min(maxPerSlot, static_cast<size_t>(total - offset)));
+                const size_t capSingles = lease.payloadCapacity / kPackedSingleSize;
+                if (capSingles == 0)
+                {
+                    m_rdmaSender->abortTxSlot(lease);
+                    return false;
+                }
+                n = static_cast<uint32_t>(std::min<size_t>(n, capSingles));
+
+                auto *dst = reinterpret_cast<Single *>(lease.payload);
+                if (!copySinglesIntoTxPayload(dst, singles.data() + offset, n, srcDevice))
+                {
+                    m_rdmaSender->abortTxSlot(lease);
+                    return false;
+                }
+                PendingTxFill p{};
+                p.lease = lease;
+                p.n = n;
+                p.absOffset = offset;
+                p.first = first;
+                p.last = (offset + n >= total);
+                p.partial = (n < total);
+                if (!commitFilled(p))
+                {
+                    m_rdmaSender->abortTxSlot(lease);
+                    return false;
+                }
+                first = false;
+                offset += n;
+            }
+            return true;
+        }
+
+        auto *stream = static_cast<cudaStream_t>(m_txD2hStream);
+        const uint32_t slotCount = std::max<uint32_t>(1, m_rdmaSender->txStagingSlotCount());
+        const size_t depth = std::min<size_t>(4, static_cast<size_t>(slotCount));
+        std::deque<PendingTxFill> pending;
+        uint32_t offset = 0;
+        bool first = true;
+
+        const auto enqueueSlice = [&]() -> bool
+        {
+            if (!waitIfPausedOrStopped())
+            {
+                return false;
+            }
             rdma::TxSlotLease lease{};
             if (!m_rdmaSender->acquireTxSlot(&lease) || !lease.payload)
             {
                 LOG(ERROR) << "acquireTxSlot failed node=" << m_config.nodeId;
                 return false;
             }
-
             uint32_t n = static_cast<uint32_t>(
                 std::min(maxPerSlot, static_cast<size_t>(total - offset)));
             const size_t capSingles = lease.payloadCapacity / kPackedSingleSize;
-            if (capSingles == 0)
+            if (capSingles == 0 || lease.localIndex >= m_txD2hEvents.size() ||
+                !m_txD2hEvents[lease.localIndex])
             {
                 m_rdmaSender->abortTxSlot(lease);
                 return false;
             }
             n = static_cast<uint32_t>(std::min<size_t>(n, capSingles));
-
             auto *dst = reinterpret_cast<Single *>(lease.payload);
-            if (!copySinglesIntoTxPayload(dst, singles.data() + offset, n, srcDevice))
+            const size_t bytes = static_cast<size_t>(n) * kPackedSingleSize;
+            const cudaError_t copyErr = cudaMemcpyAsync(
+                dst, singles.data() + offset, bytes, cudaMemcpyDeviceToHost, stream);
+            if (copyErr != cudaSuccess)
             {
+                LOG(ERROR) << "cudaMemcpyAsync D2H into TX failed: "
+                           << cudaGetErrorString(copyErr);
                 m_rdmaSender->abortTxSlot(lease);
                 return false;
             }
-            if (m_config.remapLocalToGlobalChannels)
+            auto *ev = static_cast<cudaEvent_t>(m_txD2hEvents[lease.localIndex]);
+            const cudaError_t recErr = cudaEventRecord(ev, stream);
+            if (recErr != cudaSuccess)
             {
-                for (uint32_t i = 0; i < n; ++i)
+                LOG(ERROR) << "cudaEventRecord failed: " << cudaGetErrorString(recErr);
+                static_cast<void>(cudaStreamSynchronize(stream));
+                m_rdmaSender->abortTxSlot(lease);
+                return false;
+            }
+            PendingTxFill p{};
+            p.lease = lease;
+            p.n = n;
+            p.absOffset = offset;
+            p.first = first;
+            p.last = (offset + n >= total);
+            p.partial = (n < total);
+            p.event = ev;
+            pending.push_back(p);
+            first = false;
+            offset += n;
+            return true;
+        };
+
+        while (offset < total || !pending.empty())
+        {
+            while (pending.size() < depth && offset < total)
+            {
+                if (!enqueueSlice())
                 {
-                    const uint64_t globalChannel =
-                        static_cast<uint64_t>(dst[i].channelIndex) +
-                        static_cast<uint64_t>(m_config.globalChannelOffset);
-                    if (globalChannel > static_cast<uint64_t>(std::numeric_limits<uint16_t>::max()))
-                    {
-                        LOG(ERROR) << "remapped channel index overflow: " << globalChannel;
-                        m_rdmaSender->abortTxSlot(lease);
-                        return false;
-                    }
-                    dst[i].channelIndex = static_cast<uint16_t>(globalChannel);
-                    if (offset + i == 0 && !m_remapSampleLogged.exchange(true))
-                    {
-                        LOG(INFO) << "remap sample node=" << m_config.nodeId
-                                  << " global_channel=" << dst[i].channelIndex;
-                    }
+                    abortPending(&pending);
+                    return false;
                 }
             }
-
-            rdma::SlotHeader hdr{};
-            rdma::clearSlotHeader(&hdr);
-            hdr.chunkId = chunkId;
-            hdr.computerClockMs = computerClock_ms;
-            hdr.durationMs = duration_ms;
-            hdr.flags = 0;
-            if (first)
+            if (!pending.empty())
             {
-                hdr.flags = static_cast<uint16_t>(hdr.flags | rdma::kSlotFlagSof);
-                first = false;
+                PendingTxFill &p = pending.front();
+                const cudaError_t waitErr = cudaEventSynchronize(p.event);
+                if (waitErr != cudaSuccess || !commitFilled(p))
+                {
+                    if (waitErr != cudaSuccess)
+                    {
+                        LOG(ERROR) << "cudaEventSynchronize failed: "
+                                   << cudaGetErrorString(waitErr);
+                    }
+                    abortPending(&pending);
+                    return false;
+                }
+                pending.pop_front();
             }
-            if (offset + n >= total)
-            {
-                hdr.flags = static_cast<uint16_t>(hdr.flags | rdma::kSlotFlagEof);
-            }
-            if (n < total)
-            {
-                hdr.flags = static_cast<uint16_t>(hdr.flags | rdma::kSlotFlagPartial);
-            }
-
-            auto chunk = std::make_unique<PendingChunk>();
-            chunk->chunkId = chunkId;
-            chunk->computerClockMs = computerClock_ms;
-            chunk->durationMs = duration_ms;
-            chunk->singlesCount = n;
-            chunk->hasTxLease = true;
-            chunk->lease = lease;
-            chunk->hdr = hdr;
-            if (!enqueuePendingChunk(std::move(chunk)))
-            {
-                m_rdmaSender->abortTxSlot(lease);
-                return false;
-            }
-            offset += n;
         }
         return true;
     }
@@ -458,50 +676,72 @@ namespace openpni::distributed::streaming
         uint64_t computerClock_ms,
         uint32_t duration_ms)
     {
-        if (!m_running.load())
+        if (!m_running.load() || !waitIfPausedOrStopped())
         {
             return false;
         }
+        m_sendInFlight.store(true, std::memory_order_release);
+        bool ok = false;
         if (useRoceTxFill())
         {
-            return fillRoceTxAndEnqueue(singles, computerClock_ms, duration_ms);
+            ok = fillRoceTxAndCommit(singles, computerClock_ms, duration_ms);
         }
-
-        auto chunk = std::make_unique<PendingChunk>();
-        chunk->chunkId = m_chunkIdCounter++;
-        chunk->computerClockMs = computerClock_ms;
-        chunk->durationMs = duration_ms;
-        chunk->singles.resize(singles.size());
-        if (!singles.empty())
+        else if (singles.empty())
         {
+            ok = true;
+        }
+        else
+        {
+            std::vector<Single> host;
+            const Single *src = singles.data();
+            uint32_t count = static_cast<uint32_t>(singles.size());
             const bool srcDevice = singlesOnDevice(singles.data());
-            if (srcDevice)
+            if (srcDevice || m_config.remapLocalToGlobalChannels)
             {
-                cudaPointerAttributes attr{};
-                if (cudaPointerGetAttributes(&attr, singles.data()) == cudaSuccess &&
-                    attr.device >= 0)
+                host.resize(singles.size());
+                if (srcDevice)
                 {
-                    const cudaError_t setErr = cudaSetDevice(attr.device);
-                    if (setErr != cudaSuccess)
+                    cudaPointerAttributes attr{};
+                    if (cudaPointerGetAttributes(&attr, singles.data()) == cudaSuccess &&
+                        attr.device >= 0)
                     {
-                        LOG(ERROR) << "cudaSetDevice failed before InProcess D2H: "
-                                   << cudaGetErrorString(setErr);
-                        return false;
+                        const cudaError_t setErr = cudaSetDevice(attr.device);
+                        if (setErr != cudaSuccess)
+                        {
+                            LOG(ERROR) << "cudaSetDevice failed before InProcess D2H: "
+                                       << cudaGetErrorString(setErr);
+                            m_sendInFlight.store(false, std::memory_order_release);
+                            m_cv.notify_all();
+                            return false;
+                        }
                     }
                 }
+                if (!copySinglesIntoTxPayload(
+                        host.data(), singles.data(), count, srcDevice))
+                {
+                    m_sendInFlight.store(false, std::memory_order_release);
+                    m_cv.notify_all();
+                    return false;
+                }
+                if (!remapChannels(&host))
+                {
+                    m_sendInFlight.store(false, std::memory_order_release);
+                    m_cv.notify_all();
+                    return false;
+                }
+                src = host.data();
             }
-            if (!copySinglesIntoTxPayload(
-                    chunk->singles.data(), singles.data(),
-                    static_cast<uint32_t>(singles.size()), srcDevice))
+            const uint64_t chunkId = m_chunkIdCounter++;
+            ok = sendPackedOnCallerThread(
+                chunkId, computerClock_ms, duration_ms, src, count);
+            if (ok)
             {
-                return false;
+                m_totalSinglesSent += count;
             }
         }
-        if (!remapChannels(&chunk->singles))
-        {
-            return false;
-        }
-        return enqueuePendingChunk(std::move(chunk));
+        m_sendInFlight.store(false, std::memory_order_release);
+        m_cv.notify_all();
+        return ok;
     }
 
     bool CoincidenceClient::sendSingles(
@@ -509,25 +749,30 @@ namespace openpni::distributed::streaming
         uint64_t computerClock_ms,
         uint32_t duration_ms)
     {
-        if (!m_running.load())
+        if (!m_running.load() || !waitIfPausedOrStopped())
         {
             return false;
         }
         if (useRoceTxFill())
         {
-            return fillRoceTxAndEnqueue(singles, computerClock_ms, duration_ms);
+            return sendSingles(std::span<const Single>(singles), computerClock_ms, duration_ms);
         }
         if (!remapChannels(&singles))
         {
             return false;
         }
-
-        auto chunk = std::make_unique<PendingChunk>();
-        chunk->chunkId = m_chunkIdCounter++;
-        chunk->computerClockMs = computerClock_ms;
-        chunk->durationMs = duration_ms;
-        chunk->singles = std::move(singles);
-        return enqueuePendingChunk(std::move(chunk));
+        m_sendInFlight.store(true, std::memory_order_release);
+        const uint32_t count = static_cast<uint32_t>(singles.size());
+        const uint64_t chunkId = m_chunkIdCounter++;
+        const bool ok = sendPackedOnCallerThread(
+            chunkId, computerClock_ms, duration_ms, singles.data(), count);
+        if (ok)
+        {
+            m_totalSinglesSent += count;
+        }
+        m_sendInFlight.store(false, std::memory_order_release);
+        m_cv.notify_all();
+        return ok;
     }
 
     bool CoincidenceClient::sendSinglesView(
@@ -540,22 +785,32 @@ namespace openpni::distributed::streaming
         {
             return sendSingles(singles, computerClock_ms, duration_ms);
         }
-        if (!m_running.load())
+        if (!m_running.load() || !waitIfPausedOrStopped())
         {
             return false;
         }
         if (useRoceTxFill())
         {
-            return fillRoceTxAndEnqueue(singles, computerClock_ms, duration_ms);
+            m_sendInFlight.store(true, std::memory_order_release);
+            const bool ok = fillRoceTxAndCommit(singles, computerClock_ms, duration_ms);
+            m_sendInFlight.store(false, std::memory_order_release);
+            m_cv.notify_all();
+            return ok;
         }
 
-        auto chunk = std::make_unique<PendingChunk>();
-        chunk->chunkId = m_chunkIdCounter++;
-        chunk->computerClockMs = computerClock_ms;
-        chunk->durationMs = duration_ms;
-        chunk->borrowed = singles.empty() ? nullptr : singles.data();
-        chunk->singlesCount = static_cast<uint32_t>(singles.size());
-        return enqueuePendingChunk(std::move(chunk));
+        m_sendInFlight.store(true, std::memory_order_release);
+        const uint32_t count = static_cast<uint32_t>(singles.size());
+        const uint64_t chunkId = m_chunkIdCounter++;
+        const bool ok = sendPackedOnCallerThread(
+            chunkId, computerClock_ms, duration_ms,
+            singles.empty() ? nullptr : singles.data(), count);
+        if (ok)
+        {
+            m_totalSinglesSent += count;
+        }
+        m_sendInFlight.store(false, std::memory_order_release);
+        m_cv.notify_all();
+        return ok;
     }
 
     bool CoincidenceClient::getServerStatus(coincidence::StatusResponse *response)
@@ -572,8 +827,7 @@ namespace openpni::distributed::streaming
     {
         std::unique_lock<std::mutex> lock(m_mutex);
         m_cv.wait(lock, [this]()
-                  { return (m_pendingMessages.empty() && !m_sendInFlight.load()) ||
-                           !m_running.load(); });
+                  { return !m_sendInFlight.load() || !m_running.load(); });
         return m_running.load();
     }
 
@@ -612,8 +866,7 @@ namespace openpni::distributed::streaming
 
     size_t CoincidenceClient::getPendingMessageCount() const
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        return m_pendingMessages.size();
+        return m_rdmaSender ? static_cast<size_t>(m_rdmaSender->txSlotsBusy()) : 0;
     }
 
     bool CoincidenceClient::isRunning() const
@@ -649,6 +902,16 @@ namespace openpni::distributed::streaming
     uint32_t CoincidenceClient::rdmaSlotCount() const
     {
         return m_rdmaSender ? m_rdmaSender->slotCount() : 0;
+    }
+
+    uint32_t CoincidenceClient::txStagingSlotCount() const
+    {
+        return m_rdmaSender ? m_rdmaSender->txStagingSlotCount() : 0;
+    }
+
+    uint64_t CoincidenceClient::rdmaInprocessHandle() const
+    {
+        return m_rdmaSender ? m_rdmaSender->inprocessHandle() : 0;
     }
 
     uint64_t CoincidenceClient::rdmaSlotsInFlight() const
@@ -741,87 +1004,6 @@ namespace openpni::distributed::streaming
         return false;
     }
 
-    void CoincidenceClient::senderLoop()
-    {
-        while (m_running.load())
-        {
-            std::unique_ptr<PendingChunk> msg;
-
-            {
-                std::unique_lock<std::mutex> lock(m_mutex);
-                m_cv.wait(lock, [this]()
-                          { return !m_pendingMessages.empty() || !m_running.load(); });
-
-                if (!m_running.load() && m_pendingMessages.empty())
-                {
-                    break;
-                }
-
-                if (!m_pendingMessages.empty())
-                {
-                    msg = std::move(m_pendingMessages.front());
-                    m_pendingMessages.pop();
-                    // Wake producers blocked on maxPendingChunks (same CV as empty-wait).
-                    m_cv.notify_all();
-                }
-            }
-
-            if (msg)
-            {
-                m_sendInFlight.store(true, std::memory_order_release);
-                sendChunk(*msg);
-                m_sendInFlight.store(false, std::memory_order_release);
-                m_cv.notify_all();
-            }
-        }
-
-        flushPendingMessages();
-    }
-
-    bool CoincidenceClient::sendChunk(const PendingChunk &chunk)
-    {
-        if (!m_rdmaSender)
-        {
-            return false;
-        }
-        if (chunk.hasTxLease)
-        {
-            const bool ok = m_rdmaSender->commitTxSlot(
-                chunk.lease, chunk.hdr, chunk.singlesCount);
-            m_connected = ok;
-            return ok;
-        }
-        const Single *src = chunk.payload();
-        if (chunk.singlesCount == 0)
-        {
-            return true;
-        }
-        if (!src)
-        {
-            return false;
-        }
-        const bool ok = m_rdmaSender->sendPackedSingles(
-            chunk.chunkId,
-            chunk.computerClockMs,
-            chunk.durationMs,
-            src,
-            chunk.singlesCount);
-        m_connected = ok;
-        return ok;
-    }
-
-    void CoincidenceClient::flushPendingMessages()
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-
-        while (!m_pendingMessages.empty())
-        {
-            auto &msg = m_pendingMessages.front();
-            sendChunk(*msg);
-            m_pendingMessages.pop();
-        }
-    }
-
     void CoincidenceClient::heartbeatLoop()
     {
         while (m_running.load())
@@ -889,7 +1071,8 @@ namespace openpni::distributed::streaming
     {
         request->set_source_state(currentSourceState());
         request->set_chunks_pending(getPendingMessageCount());
-        request->set_chunks_pending_cap(m_config.maxPendingChunks);
+        request->set_chunks_pending_cap(
+            m_rdmaSender ? m_rdmaSender->txStagingSlotCount() : 0u);
         request->set_last_rtt_ms(m_lastRttMs.load(std::memory_order_acquire));
         if (m_rdmaSender)
         {

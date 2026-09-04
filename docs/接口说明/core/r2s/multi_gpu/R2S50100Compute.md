@@ -23,8 +23,8 @@ struct SinglesResult {
 };
 ```
 
-- kernel 输出先 **D2D** 到 `d_singles`（generator `temp` 会被下一轮覆盖）。默认不再 D2H 到 pinned。
-- `gpu_id` 供消费线程 `cudaSetDevice` 后再 D2H。
+- kernel 输出先 **D2D** 到 `d_singles`（generator `temp` 会被下一轮覆盖）。热路径 **不** 整段 D2H 到 pinned。
+- `gpu_id` 供消费线程 `cudaSetDevice` 后再按槽 D2H 进 TX。
 - `actualSinglesCount` 为本次有效条数。
 
 ### R2S50100SinglesResultPolicy

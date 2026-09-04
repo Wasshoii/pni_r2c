@@ -5,6 +5,8 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <memory>
+#include <vector>
 
 #include <infiniband/verbs.h>
 #include <iostream>
@@ -283,6 +285,23 @@ bool RdmaNodeRecvSession::ingestSlot(uint32_t slotIndex, const NotifyEntry *note
     return releaseSlot(slotIndex);
 }
 
+int RdmaNodeRecvSession::retryPendingReady()
+{
+    if (!m_pendingReady)
+    {
+        return 0;
+    }
+    const uint32_t slot = slotIndexFromSeq(m_nextExpectedNotifySeq, m_ring.slotCount());
+    std::atomic_thread_fence(std::memory_order_acquire);
+    if (!ingestSlot(slot, nullptr))
+    {
+        return 0;
+    }
+    ++m_nextExpectedNotifySeq;
+    m_pendingReady = false;
+    return 1;
+}
+
 int RdmaNodeRecvSession::pollNotifyRing(int maxSlots)
 {
     int done = 0;
@@ -300,10 +319,11 @@ int RdmaNodeRecvSession::pollNotifyRing(int maxSlots)
             std::atomic_thread_fence(std::memory_order_acquire);
             if (!ingestSlot(s, &note))
             {
-                LOG(ERROR) << "ingest failed node=" << m_cfg.nodeId << " slot=" << s;
+                m_pendingReady = true;
                 return done;
             }
             ++m_nextExpectedNotifySeq;
+            m_pendingReady = false;
             ++done;
             progressed = true;
             break;
@@ -323,10 +343,12 @@ int RdmaNodeRecvSession::pollVerbsCompletions(int maxSlots)
         return 0;
     }
     int done = 0;
-    RdmaWorkCompletion wcs[16];
+    // One WC at a time: ingest failure must not drain later IMMs from the CQ.
+    // Payload is already in the ring; a lost IMM would stall seq forever.
+    RdmaWorkCompletion wc{};
     while (done < maxSlots)
     {
-        const int n = m_conn->pollCq(wcs, 16);
+        const int n = m_conn->pollCq(&wc, 1);
         if (n < 0)
         {
             return done;
@@ -335,42 +357,37 @@ int RdmaNodeRecvSession::pollVerbsCompletions(int maxSlots)
         {
             break;
         }
-        for (int i = 0; i < n; ++i)
+        if (wc.status != 0)
         {
-            if (wcs[i].status != 0)
+            LOG(ERROR) << "verbs WC error node=" << m_cfg.nodeId;
+            continue;
+        }
+        if (!wc.isRecv)
+        {
+            continue;
+        }
+        const uint32_t imm = wc.hasImm ? wc.immData : 0;
+        m_conn->postRecv(wc.wrId);
+        if (imm == 0 || imm != seqToImm(m_nextExpectedNotifySeq))
+        {
+            if (!m_pendingReady)
             {
-                LOG(ERROR) << "verbs WC error node=" << m_cfg.nodeId;
-                continue;
-            }
-            if (!wcs[i].isRecv)
-            {
-                continue;
-            }
-            const uint64_t seq = wcs[i].hasImm
-                                     ? static_cast<uint64_t>(wcs[i].immData)
-                                     : 0;
-            m_conn->postRecv(wcs[i].wrId);
-            if (seq == 0 || seq != m_nextExpectedNotifySeq)
-            {
-                LOG(ERROR) << "IMM seq mismatch got=" << seq
+                LOG(ERROR) << "IMM seq mismatch got=" << imm
                            << " expected=" << m_nextExpectedNotifySeq
                            << " node=" << m_cfg.nodeId;
-                continue;
             }
-            const uint32_t slot = slotIndexFromSeq(seq, m_ring.slotCount());
-            std::atomic_thread_fence(std::memory_order_acquire);
-            if (!ingestSlot(slot, nullptr))
-            {
-                LOG(ERROR) << "ingest failed node=" << m_cfg.nodeId << " slot=" << slot;
-                return done;
-            }
-            ++m_nextExpectedNotifySeq;
-            ++done;
-            if (done >= maxSlots)
-            {
-                break;
-            }
+            continue;
         }
+        const uint32_t slot = slotIndexFromSeq(m_nextExpectedNotifySeq, m_ring.slotCount());
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (!ingestSlot(slot, nullptr))
+        {
+            m_pendingReady = true;
+            return done;
+        }
+        ++m_nextExpectedNotifySeq;
+        m_pendingReady = false;
+        ++done;
     }
     return done;
 }
@@ -385,17 +402,28 @@ int RdmaNodeRecvSession::pollOnce(int maxSlots)
     {
         return 0;
     }
+    int done = retryPendingReady();
+    if (m_pendingReady)
+    {
+        return done;
+    }
+    const int remain = maxSlots - done;
+    if (remain <= 0)
+    {
+        return done;
+    }
     if (m_kind == DataPlaneKind::RdmaRoceV2)
     {
-        return pollVerbsCompletions(maxSlots);
+        return done + pollVerbsCompletions(remain);
     }
-    return pollNotifyRing(maxSlots);
+    return done + pollNotifyRing(remain);
 }
 
 void RdmaNodeRecvSession::close()
 {
     m_ready = false;
     m_nextExpectedNotifySeq = 1;
+    m_pendingReady = false;
     if (m_inprocessHandle != 0)
     {
         std::lock_guard<std::mutex> lock(g_inprocessMutex);
@@ -550,14 +578,20 @@ void RdmaRecvServer::pollLoop()
 {
     while (m_running.load(std::memory_order_acquire))
     {
-        int total = 0;
+        std::vector<std::shared_ptr<RdmaNodeRecvSession>> sessions;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
+            sessions.reserve(m_sessions.size());
             for (auto &[id, session] : m_sessions)
             {
                 (void)id;
-                total += session->pollOnce(16);
+                sessions.push_back(session);
             }
+        }
+        int total = 0;
+        for (auto &session : sessions)
+        {
+            total += session->pollOnce(16);
         }
         if (total == 0)
         {

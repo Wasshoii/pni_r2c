@@ -2,7 +2,7 @@
 
 本页是 **档 2** 的设计说明：把 R2S 产出的 device singles 经 `nvidia_peermem` 注册成 verbs MR，由 NIC 从 GPU VA DMA 到对端 coin 的 host [SlotRing](SlotRing.md)。**本仓库尚未实现**，没有 `ibv_reg_mr(GPU)`、没有 `enableGpuDirectRdma` JSON、没有采集侧 GPUDirect 入 GPU。实现阶段按本页，不要改槽协议。
 
-热路径现状是 **档 1**：有序 `next()` 之后 `cudaMemcpy` D2H 进已 `ibv_reg_mr` 且 `cudaHostRegister` 的 TX 槽。见 [README.md](README.md)「拷贝与优化」。通路边界见 [R2S到RDMA](../../通路/R2S到RDMA.md)。
+热路径现状：有序 `next()` 之后，消费线程用专用 non-blocking stream 把 device singles `cudaMemcpyAsync` 进已 `ibv_reg_mr` 且 `cudaHostRegister` 的 TX 槽。现行发送模型见 [README.md](README.md#发送端缓冲)。通路边界见 [R2S到RDMA](../../通路/R2S到RDMA.md)。
 
 ## 原理
 
@@ -33,7 +33,7 @@ flowchart LR
 | 头 | **整槽在 GPU**：头由小 kernel 或 `cudaMemcpy` 写到 device 槽。不采用「头在 host、payload 在 GPU」的两次 WR。 |
 | 多卡 → 一 QP | 8 卡完成顺序 ≠ 段序。仍由 **单发送线程** 按 SPSC `next()` 的 submit 序 `post_send`，保证 `seq` 与 chunk 边界。某卡算完但前一段未 post 则排队，**禁止 GPU worker `acquireTxSlot` / `post_send`**。 |
 | 信用 | 远端 ring 满时不能 post；对应 **device 槽** 等到 CQ（及 credit）才能还给该卡 compute ring。 |
-| 切槽 | 一段 ~637 MB 仍切成 ~150 个 4 MiB WRITE，与现在 `fillRoceTxAndEnqueue` 相同；只是源地址从 host payload 换成 GPU VA。 |
+| 切槽 | 一段 ~637 MB 仍切成 ~150 个 4 MiB WRITE，与现在 `fillRoceTxAndCommit` 相同；只是源地址从 host payload 换成 GPU VA。 |
 
 ```mermaid
 flowchart LR
@@ -67,4 +67,4 @@ flowchart LR
 - 不增加 `enableGpuDirectRdma` JSON（将来字段默认 `false`：开启时探测 peermem + P2P，失败报错退出、不静默回退）。
 - 不做 GPUDirect 入 GPU 的采集路径。
 
-实现时从 [README.md](README.md) 的拷贝阶梯档 2 切入，并保持与 [R2S50100MultiGpuEngine](../../core/r2s/multi_gpu/R2S50100MultiGpuEngine.md) 的 submit/next 段序一致。
+实现时按本页数据模型切入，并保持与 [R2S50100MultiGpuEngine](../../core/r2s/multi_gpu/R2S50100MultiGpuEngine.md) 的 submit/next 段序一致。现行槽协议与发送序见 [README.md](README.md)。

@@ -31,7 +31,7 @@ using SinglesSpanReadyCallback = std::function<bool(
     std::span<Single const> singles, uint64_t clock_ms, uint32_t duration_ms)>;
 ```
 
-- `onSinglesSpanReady` 已设置时，`processR2S` / `R2SStreamProcessor` **优先**调用它。50100 多 GPU 默认路径上 span 可能是 **device 指针**；回调必须 `cudaMemcpy` D2H（例如 `CoincidenceClient::sendSingles`）或 `materializeSinglesOnHost`，不可对显存做 host `memcpy`。
+- `onSinglesSpanReady` 已设置时，`processR2S` / `R2SStreamProcessor` **优先**调用它。50100 多 GPU 默认路径上 span 是 **device 指针**；回调必须用 copy stream `cudaMemcpyAsync` D2H 进 TX（例如 `CoincidenceClient::sendSingles`）或 `materializeSinglesOnHost`，不可对显存做 host `memcpy`。
 - `span` 仅在回调返回前有效。回调内若异步使用（入队、跨线程发送），必须先拷贝。
 - 返回 `false` 表示调用方要求停止后续处理。
 - 可与 `saveData2SingleFile` 同时开启：一边写 `.lsingle`，一边流式送出。

@@ -12,7 +12,6 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <queue>
 #include <span>
 #include <string>
 #include <thread>
@@ -34,6 +33,7 @@ namespace openpni::distributed::streaming
         uint32_t globalChannelOffset = 0;
         uint32_t crystalsPerChannel = 169 * 4;
 
+        /** Kept for JSON compatibility. Hot path sends inline; this is not a queue depth. */
         size_t maxPendingChunks = 100;
         size_t batchSize = 1000;
 
@@ -54,24 +54,6 @@ namespace openpni::distributed::streaming
         uint32_t txSlotCount = 0;
         uint32_t requestedSlotCount = 0;
         uint32_t requestedSlotBytes = 0;
-    };
-
-    struct PendingChunk
-    {
-        uint64_t chunkId = 0;
-        uint64_t computerClockMs = 0;
-        uint32_t durationMs = 0;
-        std::vector<Single> singles;
-        const Single *borrowed = nullptr;
-        uint32_t singlesCount = 0;
-        bool hasTxLease = false;
-        openpni::distributed::dataplane::rdma::TxSlotLease lease{};
-        openpni::distributed::dataplane::rdma::SlotHeader hdr{};
-
-        const Single *payload() const noexcept
-        {
-            return borrowed != nullptr ? borrowed : singles.data();
-        }
     };
 
     struct WorkerTelemetry
@@ -105,8 +87,8 @@ namespace openpni::distributed::streaming
             std::vector<Single> &&singles,
             uint64_t computerClock_ms,
             uint32_t duration_ms);
-        /** InProcess: queue a view without copying (span must stay valid until sent).
-         *  RoCE: copies into TX like sendSingles(span). Remap copies. */
+        /** InProcess host span: sendPackedSingles from the view (valid for this call).
+         *  RoCE: D2H/memcpy into TX then commit. Remap or device span copies. */
         bool sendSinglesView(
             std::span<const Single> singles,
             uint64_t computerClock_ms,
@@ -124,6 +106,8 @@ namespace openpni::distributed::streaming
         uint64_t lastRttMs() const;
         coincidence::SourceState sourceState() const;
         uint32_t rdmaSlotCount() const;
+        uint32_t txStagingSlotCount() const;
+        uint64_t rdmaInprocessHandle() const;
         uint64_t rdmaSlotsInFlight() const;
         uint32_t rdmaCreditRemaining() const;
 
@@ -139,16 +123,22 @@ namespace openpni::distributed::streaming
 
         bool registerNode();
         bool openRdmaDataPlane();
-        void senderLoop();
-        bool sendChunk(const PendingChunk &chunk);
-        bool enqueuePendingChunk(std::unique_ptr<PendingChunk> chunk);
-        bool fillRoceTxAndEnqueue(
+        bool waitIfPausedOrStopped();
+        bool fillRoceTxAndCommit(
             std::span<const Single> singles,
             uint64_t computerClock_ms,
             uint32_t duration_ms);
+        bool sendPackedOnCallerThread(
+            uint64_t chunkId,
+            uint64_t computerClock_ms,
+            uint32_t duration_ms,
+            const Single *src,
+            uint32_t count);
         bool remapChannels(std::vector<Single> *singles);
+        bool remapTxSlotPayload(Single *dst, uint32_t n, uint32_t absIndex);
         bool useRoceTxFill() const;
-        void flushPendingMessages();
+        bool ensureTxD2hStream(int device);
+        void destroyTxD2hResources();
         void heartbeatLoop();
         void applyProducerCommand(coincidence::ProducerCommand command);
         coincidence::SourceState currentSourceState() const;
@@ -162,9 +152,7 @@ namespace openpni::distributed::streaming
 
         mutable std::mutex m_mutex;
         std::condition_variable m_cv;
-        std::queue<std::unique_ptr<PendingChunk>> m_pendingMessages;
 
-        std::thread m_senderThread;
         std::thread m_heartbeatThread;
 
         std::atomic<bool> m_running{false};
@@ -179,6 +167,10 @@ namespace openpni::distributed::streaming
         std::atomic<uint64_t> m_lastRttMs{0};
         std::mutex m_telemetryMutex;
         std::function<WorkerTelemetry()> m_telemetryHook;
+
+        void *m_txD2hStream = nullptr;
+        std::vector<void *> m_txD2hEvents;
+        int m_txD2hDevice = -1;
     };
 
 } // namespace openpni::distributed::streaming

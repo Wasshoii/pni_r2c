@@ -60,6 +60,8 @@ namespace
         size_t burstSkew = 0;
         size_t pipelineDepth = 0;
         bool writeLmf = true;
+        bool extractOnly = false;
+        bool stealOnly = false;
         bool helpOnly = false;
     };
 
@@ -85,6 +87,8 @@ namespace
             << "  --pipeline-depth N       In-flight GPU segments (0 = derive from GPU count)\n"
             << "  --write-lmf              Write prompt/delay LMF (default; counted as sink wall)\n"
             << "  --no-write-lmf           Skip LMF write (kernel-only overlap measurement)\n"
+            << "  --extract-only           Steal+merge+carry, skip GPU (implies --no-write-lmf)\n"
+            << "  --steal-only             Steal into deques then drop, no merge (implies --no-write-lmf)\n"
             << "  --help                   Show this help\n";
     }
 
@@ -180,6 +184,18 @@ namespace
             }
             if (arg == "--no-write-lmf")
             {
+                opts.writeLmf = false;
+                continue;
+            }
+            if (arg == "--extract-only")
+            {
+                opts.extractOnly = true;
+                opts.writeLmf = false;
+                continue;
+            }
+            if (arg == "--steal-only")
+            {
+                opts.stealOnly = true;
                 opts.writeLmf = false;
                 continue;
             }
@@ -426,7 +442,9 @@ int main(int argc, char **argv)
 
     auto alignerConfig = streaming::createBDM50100_9120AlignerConfig(
         "/tmp/r2c_coin_9120_perf", coinProtocol);
-    alignerConfig.enableMultiGpu = true;
+    alignerConfig.enableMultiGpu = !opts.extractOnly && !opts.stealOnly;
+    alignerConfig.extractOnly = opts.extractOnly;
+    alignerConfig.stealOnly = opts.stealOnly;
     alignerConfig.savePrompt = opts.writeLmf;
     alignerConfig.saveDelay = opts.writeLmf;
     alignerConfig.processingIntervalMs = 0;
@@ -463,6 +481,8 @@ int main(int argc, char **argv)
               << "node1 files         : " << files1.size() << '\n'
               << "CUDA devices        : " << gpuCount << '\n'
               << "enableMultiGpu      : " << (alignerConfig.enableMultiGpu ? "true" : "false") << '\n'
+              << "extract-only        : " << (opts.extractOnly ? "true" : "false") << '\n'
+              << "steal-only          : " << (opts.stealOnly ? "true" : "false") << '\n'
               << "write LMF           : " << (opts.writeLmf ? "true" : "false") << '\n'
               << "coinPipelineDepth   : " << alignerConfig.coinPipelineDepth
               << (alignerConfig.coinPipelineDepth == 0 ? " (derive from GPU count)" : "") << '\n'
@@ -558,6 +578,10 @@ int main(int argc, char **argv)
     const auto &stats = aligner.getStatistics();
     const double kernelS = static_cast<double>(stats.coinKernelNs.load()) / 1e9;
     const double extractS = static_cast<double>(stats.extractNs.load()) / 1e9;
+    const double stealS = static_cast<double>(stats.stealNs.load()) / 1e9;
+    const double mergeS = static_cast<double>(stats.mergeNs.load()) / 1e9;
+    const double watermarkS = static_cast<double>(stats.watermarkNs.load()) / 1e9;
+    const double slotWaitS = static_cast<double>(stats.slotWaitNs.load()) / 1e9;
     const double sinkS = static_cast<double>(stats.sinkNs.load()) / 1e9;
     const double drainWaitS = static_cast<double>(stats.drainWaitNs.load()) / 1e9;
     const double writeQueueWaitS = static_cast<double>(stats.writeQueueWaitNs.load()) / 1e9;
@@ -578,6 +602,11 @@ int main(int argc, char **argv)
     const double gibKernel = kernelS > 0.0 ? static_cast<double>(inputGib) / kernelS : 0.0;
     const double singlesPerS =
         combinedS > 0.0 ? static_cast<double>(processed) / combinedS : 0.0;
+    const double extractSinglesPerS =
+        extractS > 0.0 ? static_cast<double>(processed) / extractS : 0.0;
+    constexpr double kGpuKernelSinglesPerS = 92.0e6;
+    const double gpuEquivalent =
+        singlesPerS > 0.0 ? singlesPerS / kGpuKernelSinglesPerS : 0.0;
     const double pairsPerS = combinedS > 0.0 ? static_cast<double>(pairs) / combinedS : 0.0;
     const double batchPerS = combinedS > 0.0 ? static_cast<double>(batches) / combinedS : 0.0;
 
@@ -587,6 +616,10 @@ int main(int argc, char **argv)
               << "Combined wall          : " << combinedS << " s\n"
               << "Coin-kernel wall       : " << kernelS << " s\n"
               << "Align-extract wall     : " << extractS << " s\n"
+              << "Steal wall             : " << stealS << " s\n"
+              << "Merge wall             : " << mergeS << " s\n"
+              << "Watermark wall         : " << watermarkS << " s\n"
+              << "Slot wait              : " << slotWaitS << " s\n"
               << "Drain wait             : " << drainWaitS << " s\n"
               << "Write queue wait       : " << writeQueueWaitS << " s\n"
               << "Sink wall              : " << sinkS << " s\n"
@@ -612,6 +645,8 @@ int main(int argc, char **argv)
               << "Coin-kernel throughput : " << gibKernel << " Gib/s\n"
               << "Batch rate             : " << batchPerS << " batch/s\n"
               << "Singles rate           : " << singlesPerS << " singles/s\n"
+              << "Extract singles rate   : " << extractSinglesPerS << " singles/s\n"
+              << "GPU-equivalent (92 M/s): " << gpuEquivalent << " x\n"
               << "Pairs rate             : " << pairsPerS << " pairs/s\n";
     return 0;
 }

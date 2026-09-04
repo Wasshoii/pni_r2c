@@ -6,7 +6,9 @@
 #include <chrono>
 #include <iterator>
 #include <limits>
+#include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <glog/logging.h>
 
@@ -126,7 +128,7 @@ namespace openpni::distributed::streaming
 
     void TimestampedSingleChunk::updateTimeRange()
     {
-        if (singles.empty())
+        if (remainingEmpty())
         {
             minTime_pico = UINT64_MAX;
             maxTime_pico = 0;
@@ -135,11 +137,51 @@ namespace openpni::distributed::streaming
 
         minTime_pico = UINT64_MAX;
         maxTime_pico = 0;
-        for (const auto &s : singles)
+        const size_t begin = remainingBegin();
+        for (size_t i = begin; i < singles.size(); ++i)
         {
-            minTime_pico = std::min(minTime_pico, s.timevalue_100fs);
-            maxTime_pico = std::max(maxTime_pico, s.timevalue_100fs);
+            minTime_pico = std::min(minTime_pico, singles[i].timevalue_100fs);
+            maxTime_pico = std::max(maxTime_pico, singles[i].timevalue_100fs);
         }
+    }
+
+    void TimestampedSingleChunk::refreshTimeRangeFromSortedEnds()
+    {
+        if (remainingEmpty())
+        {
+            minTime_pico = UINT64_MAX;
+            maxTime_pico = 0;
+            return;
+        }
+        minTime_pico = singles[remainingBegin()].timevalue_100fs;
+        maxTime_pico = singles.back().timevalue_100fs;
+    }
+
+    void TimestampedSingleChunk::fillTimeRangePreferSortedEnds()
+    {
+        consumed = remainingBegin();
+        if (remainingEmpty())
+        {
+            minTime_pico = UINT64_MAX;
+            maxTime_pico = 0;
+            return;
+        }
+        const uint64_t first = singles[consumed].timevalue_100fs;
+        const uint64_t last = singles.back().timevalue_100fs;
+        if (first <= last)
+        {
+            minTime_pico = first;
+            maxTime_pico = last;
+            return;
+        }
+        updateTimeRange();
+    }
+
+    void TimestampedSingleChunk::consumePrefix(size_t n)
+    {
+        const size_t take = std::min(n, remainingCount());
+        consumed = remainingBegin() + take;
+        refreshTimeRangeFromSortedEnds();
     }
 
     size_t TimestampedSingleChunk::memorySize() const
@@ -220,7 +262,7 @@ namespace openpni::distributed::streaming
         }
         m_expectedChunkId = chunk.chunkId + 1;
 
-        chunk.updateTimeRange();
+        chunk.fillTimeRangePreferSortedEnds();
         m_maxEventTimeReceived = std::max(m_maxEventTimeReceived, chunk.maxTime_pico);
         m_bufferMemoryBytes += chunkMemory;
         m_lastPushTime = std::chrono::steady_clock::now();
@@ -493,6 +535,184 @@ namespace openpni::distributed::streaming
         return written;
     }
 
+    std::optional<TimestampedSingleChunk> NodeRingBuffer::stealWholeFront(uint64_t boundary)
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        while (!m_buffer.empty() && m_buffer.front().remainingEmpty())
+        {
+            TimestampedSingleChunk empty = std::move(m_buffer.front());
+            m_buffer.pop_front();
+            const size_t mem = empty.memorySize();
+            m_bufferMemoryBytes =
+                mem <= m_bufferMemoryBytes ? m_bufferMemoryBytes - mem : 0;
+            lock.unlock();
+            dropStolenChunk(std::move(empty));
+            lock.lock();
+        }
+        if (m_buffer.empty() || m_buffer.front().minTime_pico > boundary)
+        {
+            return std::nullopt;
+        }
+
+        const size_t memBefore = m_buffer.front().memorySize();
+        TimestampedSingleChunk stolen = std::move(m_buffer.front());
+        m_buffer.pop_front();
+        m_bufferMemoryBytes =
+            memBefore <= m_bufferMemoryBytes ? m_bufferMemoryBytes - memBefore : 0;
+        lock.unlock();
+        m_cvNotFull.notify_all();
+        return stolen;
+    }
+
+    std::vector<TimestampedSingleChunk> NodeRingBuffer::stealWholeFronts(size_t maxCount)
+    {
+        std::vector<TimestampedSingleChunk> out;
+        if (maxCount == 0)
+        {
+            return out;
+        }
+        out.reserve(maxCount);
+
+        std::unique_lock<std::mutex> lock(m_mutex);
+        const size_t canTake = std::min(maxCount, m_buffer.size());
+        out.reserve(canTake);
+        while (out.size() < maxCount)
+        {
+            while (!m_buffer.empty() && m_buffer.front().remainingEmpty())
+            {
+                TimestampedSingleChunk empty = std::move(m_buffer.front());
+                m_buffer.pop_front();
+                const size_t mem = empty.memorySize();
+                m_bufferMemoryBytes =
+                    mem <= m_bufferMemoryBytes ? m_bufferMemoryBytes - mem : 0;
+                lock.unlock();
+                dropStolenChunk(std::move(empty));
+                lock.lock();
+            }
+            if (m_buffer.empty())
+            {
+                break;
+            }
+
+            const size_t memBefore = m_buffer.front().memorySize();
+            out.push_back(std::move(m_buffer.front()));
+            m_buffer.pop_front();
+            m_bufferMemoryBytes =
+                memBefore <= m_bufferMemoryBytes ? m_bufferMemoryBytes - memBefore : 0;
+        }
+        lock.unlock();
+        if (!out.empty())
+        {
+            m_cvNotFull.notify_all();
+        }
+        return out;
+    }
+
+    void NodeRingBuffer::reinsertFront(TimestampedSingleChunk &&chunk)
+    {
+        if (chunk.remainingEmpty())
+        {
+            dropStolenChunk(std::move(chunk));
+            return;
+        }
+
+        const size_t mem = chunk.memorySize();
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_buffer.push_front(std::move(chunk));
+            m_bufferMemoryBytes += mem;
+        }
+        m_cvNotEmpty.notify_one();
+    }
+
+    void NodeRingBuffer::dropStolenChunk(TimestampedSingleChunk &&chunk)
+    {
+        const size_t mem = chunk.memorySize();
+        chunk.singles = {};
+        if (m_memoryPool && mem > 0)
+        {
+            m_memoryPool->release(mem);
+        }
+    }
+
+    bool NodeRingBuffer::peekFront(uint64_t *minTime, uint64_t *maxTime, size_t *count) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_buffer.empty() || m_buffer.front().remainingEmpty())
+        {
+            return false;
+        }
+        if (minTime)
+        {
+            *minTime = m_buffer.front().minTime_pico;
+        }
+        if (maxTime)
+        {
+            *maxTime = m_buffer.front().maxTime_pico;
+        }
+        if (count)
+        {
+            *count = m_buffer.front().remainingCount();
+        }
+        return true;
+    }
+
+    std::vector<Single> NodeRingBuffer::stealFront(uint64_t boundary, size_t budget)
+    {
+        if (budget == 0)
+        {
+            return {};
+        }
+
+        auto stolenChunk = stealWholeFront(boundary);
+        if (!stolenChunk)
+        {
+            return {};
+        }
+
+        auto timeEnd = stolenChunk->singles.end();
+        if (stolenChunk->maxTime_pico > boundary)
+        {
+            timeEnd = std::upper_bound(
+                stolenChunk->singles.begin(), stolenChunk->singles.end(), boundary,
+                [](uint64_t bound, const Single &s)
+                { return bound < s.timevalue_100fs; });
+        }
+
+        const size_t available = static_cast<size_t>(
+            std::distance(stolenChunk->singles.begin(), timeEnd));
+        if (available == 0)
+        {
+            reinsertFront(std::move(*stolenChunk));
+            return {};
+        }
+
+        size_t take = std::min(budget, available);
+        while (take < available &&
+               stolenChunk->singles[take].timevalue_100fs ==
+                   stolenChunk->singles[take - 1].timevalue_100fs)
+        {
+            ++take;
+        }
+
+        std::vector<Single> stolen;
+        if (take == stolenChunk->singles.size())
+        {
+            stolen.swap(stolenChunk->singles);
+            dropStolenChunk(std::move(*stolenChunk));
+            return stolen;
+        }
+
+        stolen.assign(stolenChunk->singles.begin(),
+                      stolenChunk->singles.begin() + static_cast<std::ptrdiff_t>(take));
+        stolenChunk->singles.erase(
+            stolenChunk->singles.begin(),
+            stolenChunk->singles.begin() + static_cast<std::ptrdiff_t>(take));
+        stolenChunk->refreshTimeRangeFromSortedEnds();
+        reinsertFront(std::move(*stolenChunk));
+        return stolen;
+    }
+
     uint64_t NodeRingBuffer::chunkBoundaryWithin(uint64_t boundary, size_t budget,
                                                  size_t *outCount) const
     {
@@ -567,6 +787,26 @@ namespace openpni::distributed::streaming
                     });
                 n += static_cast<size_t>(
                     std::distance(chunk.singles.begin(), splitPoint));
+            }
+            break;
+        }
+        return n;
+    }
+
+    size_t NodeRingBuffer::countReadySingles(uint64_t boundary) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        size_t n = 0;
+        for (const auto &chunk : m_buffer)
+        {
+            if (chunk.maxTime_pico <= boundary)
+            {
+                n += chunk.remainingCount();
+                continue;
+            }
+            if (chunk.minTime_pico <= boundary)
+            {
+                n += chunk.remainingCount();
             }
             break;
         }
@@ -696,6 +936,10 @@ namespace openpni::distributed::streaming
         currentTimeBoundary_pico = 0;
         coinKernelNs = 0;
         extractNs = 0;
+        stealNs = 0;
+        mergeNs = 0;
+        watermarkNs = 0;
+        slotWaitNs = 0;
         sinkNs = 0;
         drainWaitNs = 0;
         writeQueueWaitNs = 0;
@@ -726,11 +970,158 @@ namespace openpni::distributed::streaming
             return a.timevalue_100fs < b.timevalue_100fs;
         }
 
+        struct EarlierByTime
+        {
+            bool operator()(const Single &a, const Single &b) const noexcept
+            {
+                return a.timevalue_100fs < b.timevalue_100fs;
+            }
+        };
+
+        size_t countLeTime(const Single *b, size_t n, uint64_t t)
+        {
+            if (n == 0 || b == nullptr)
+            {
+                return 0;
+            }
+            auto it = std::upper_bound(
+                b, b + n, t,
+                [](uint64_t bound, const Single &s)
+                { return bound < s.timevalue_100fs; });
+            return static_cast<size_t>(it - b);
+        }
+
+        uint64_t firstTimeGe(const Single *b, size_t n, uint64_t t)
+        {
+            if (n == 0 || b == nullptr)
+            {
+                return UINT64_MAX;
+            }
+            auto it = std::lower_bound(
+                b, b + n, t,
+                [](const Single &s, uint64_t bound)
+                { return s.timevalue_100fs < bound; });
+            return it == b + n ? UINT64_MAX : it->timevalue_100fs;
+        }
+
+        // 与逐元素 k-way 停点相同：取满 budget 且 lastT>=floorBound，并收齐 lastT 上的并列。
+        // 有序区间上用二分找切点，避免热路径再扫一遍 262k。
+        void planLayerTakeN(const std::vector<TimestampedSingleChunk> &layer,
+                            const std::vector<char> &has,
+                            const std::vector<size_t> &off,
+                            const std::vector<size_t> &limit,
+                            size_t nNodes, size_t alreadyTaken, size_t budget,
+                            uint64_t floorBound, uint64_t *lastT,
+                            std::vector<size_t> *takeN, size_t *got)
+        {
+            takeN->assign(nNodes, 0);
+            *got = 0;
+            const size_t prefixK = alreadyTaken < budget ? budget - alreadyTaken : 0;
+
+            auto view = [&](size_t i) -> const Single *
+            {
+                return layer[i].singles.data() + off[i];
+            };
+
+            auto countLe = [&](uint64_t t) -> size_t
+            {
+                size_t n = 0;
+                for (size_t i = 0; i < nNodes; ++i)
+                {
+                    if (has[i])
+                    {
+                        n += countLeTime(view(i), limit[i], t);
+                    }
+                }
+                return n;
+            };
+
+            size_t nAvail = 0;
+            uint64_t lo = UINT64_MAX;
+            uint64_t hi = 0;
+            for (size_t i = 0; i < nNodes; ++i)
+            {
+                if (!has[i] || limit[i] == 0)
+                {
+                    continue;
+                }
+                nAvail += limit[i];
+                lo = std::min(lo, view(i)[0].timevalue_100fs);
+                hi = std::max(hi, view(i)[limit[i] - 1].timevalue_100fs);
+            }
+            if (nAvail == 0)
+            {
+                return;
+            }
+
+            const size_t k = std::max(prefixK, size_t{1});
+            uint64_t tK = hi;
+            if (k <= nAvail)
+            {
+                uint64_t blo = lo;
+                uint64_t bhi = hi;
+                while (blo < bhi)
+                {
+                    const uint64_t mid = blo + (bhi - blo) / 2;
+                    if (countLe(mid) >= k)
+                    {
+                        bhi = mid;
+                    }
+                    else if (mid == UINT64_MAX)
+                    {
+                        break;
+                    }
+                    else
+                    {
+                        blo = mid + 1;
+                    }
+                }
+                tK = blo;
+            }
+
+            uint64_t tStop = tK;
+            if (tK < floorBound)
+            {
+                tStop = UINT64_MAX;
+                for (size_t i = 0; i < nNodes; ++i)
+                {
+                    if (!has[i] || limit[i] == 0)
+                    {
+                        continue;
+                    }
+                    tStop = std::min(tStop, firstTimeGe(view(i), limit[i], floorBound));
+                }
+                if (tStop == UINT64_MAX)
+                {
+                    for (size_t i = 0; i < nNodes; ++i)
+                    {
+                        if (has[i])
+                        {
+                            (*takeN)[i] = limit[i];
+                            *got += limit[i];
+                        }
+                    }
+                    *lastT = hi;
+                    return;
+                }
+            }
+
+            for (size_t i = 0; i < nNodes; ++i)
+            {
+                if (!has[i])
+                {
+                    continue;
+                }
+                (*takeN)[i] = countLeTime(view(i), limit[i], tStop);
+                *got += (*takeN)[i];
+            }
+            *lastT = tStop;
+        }
+
         // 把若干条各自有序的段归并成一条全局有序序列。段数等于节点数（通常 2），
         // 每元素 k 次比较，比对整批 std::sort 的 O(n log n) 便宜得多。
-        void mergeSortedRuns(const Single *src,
-                             const std::vector<std::pair<size_t, size_t>> &runs,
-                             Single *dst)
+        void mergeSortedViews(const std::vector<std::pair<const Single *, const Single *>> &runs,
+                              Single *dst)
         {
             if (runs.empty())
             {
@@ -738,17 +1129,17 @@ namespace openpni::distributed::streaming
             }
             if (runs.size() == 1)
             {
-                std::copy(src + runs[0].first, src + runs[0].second, dst);
+                std::copy(runs[0].first, runs[0].second, dst);
                 return;
             }
             if (runs.size() == 2)
             {
-                std::merge(src + runs[0].first, src + runs[0].second,
-                           src + runs[1].first, src + runs[1].second, dst, earlier);
+                std::merge(runs[0].first, runs[0].second,
+                           runs[1].first, runs[1].second, dst, EarlierByTime{});
                 return;
             }
 
-            std::vector<size_t> cursor(runs.size());
+            std::vector<const Single *> cursor(runs.size());
             for (size_t i = 0; i < runs.size(); ++i)
             {
                 cursor[i] = runs[i].first;
@@ -765,7 +1156,7 @@ namespace openpni::distributed::streaming
                     {
                         continue;
                     }
-                    const uint64_t t = src[cursor[i]].timevalue_100fs;
+                    const uint64_t t = cursor[i]->timevalue_100fs;
                     if (pick == runs.size() || t < pickTime)
                     {
                         pick = i;
@@ -776,10 +1167,171 @@ namespace openpni::distributed::streaming
                 {
                     break;
                 }
-                dst[out++] = src[cursor[pick]++];
+                dst[out++] = *cursor[pick]++;
             }
         }
     } // namespace
+
+    bool StreamingTimeAligner::StolenLane::peekFront(uint64_t *minTime, uint64_t *maxTime,
+                                                     size_t *count) const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (chunks.empty() || chunks.front().remainingEmpty())
+        {
+            return false;
+        }
+        if (minTime)
+        {
+            *minTime = chunks.front().minTime_pico;
+        }
+        if (maxTime)
+        {
+            *maxTime = chunks.front().maxTime_pico;
+        }
+        if (count)
+        {
+            *count = chunks.front().remainingCount();
+        }
+        return true;
+    }
+
+    std::optional<TimestampedSingleChunk>
+    StreamingTimeAligner::StolenLane::popWholeFront(uint64_t boundary)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        while (!chunks.empty() && chunks.front().remainingEmpty())
+        {
+            chunks.pop_front();
+        }
+        if (chunks.empty() || chunks.front().minTime_pico > boundary)
+        {
+            return std::nullopt;
+        }
+        TimestampedSingleChunk stolen = std::move(chunks.front());
+        chunks.pop_front();
+        const size_t n = stolen.remainingCount();
+        singles = singles >= n ? singles - n : 0;
+        cvNotFull.notify_one();
+        return stolen;
+    }
+
+    std::vector<TimestampedSingleChunk>
+    StreamingTimeAligner::StolenLane::popCompleteBefore(uint64_t bound, size_t maxSingles)
+    {
+        std::vector<TimestampedSingleChunk> out;
+        size_t takenSingles = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            while (!chunks.empty())
+            {
+                if (chunks.front().remainingEmpty())
+                {
+                    chunks.pop_front();
+                    continue;
+                }
+                const auto &front = chunks.front();
+                if (front.minTime_pico > bound || front.maxTime_pico > bound)
+                {
+                    break;
+                }
+                const size_t n = front.remainingCount();
+                if (takenSingles > 0 && maxSingles != std::numeric_limits<size_t>::max() &&
+                    takenSingles + n > maxSingles)
+                {
+                    break;
+                }
+                TimestampedSingleChunk stolen = std::move(chunks.front());
+                chunks.pop_front();
+                singles = singles >= n ? singles - n : 0;
+                takenSingles += n;
+                out.push_back(std::move(stolen));
+            }
+        }
+        if (!out.empty())
+        {
+            cvNotFull.notify_all();
+        }
+        return out;
+    }
+
+    std::optional<TimestampedSingleChunk> StreamingTimeAligner::StolenLane::tryPop()
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        while (!chunks.empty() && chunks.front().remainingEmpty())
+        {
+            chunks.pop_front();
+        }
+        if (chunks.empty())
+        {
+            return std::nullopt;
+        }
+        TimestampedSingleChunk stolen = std::move(chunks.front());
+        chunks.pop_front();
+        const size_t n = stolen.remainingCount();
+        singles = singles >= n ? singles - n : 0;
+        cvNotFull.notify_one();
+        return stolen;
+    }
+
+    void StreamingTimeAligner::StolenLane::reinsertFront(TimestampedSingleChunk &&chunk)
+    {
+        if (chunk.remainingEmpty())
+        {
+            return;
+        }
+        const size_t n = chunk.remainingCount();
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            chunks.push_front(std::move(chunk));
+            singles += n;
+        }
+        cvNotEmpty.notify_one();
+    }
+
+    void StreamingTimeAligner::StolenLane::pushBack(TimestampedSingleChunk &&chunk, size_t cap,
+                                                    const std::atomic<bool> &stop)
+    {
+        if (chunk.remainingEmpty())
+        {
+            return;
+        }
+        const size_t n = chunk.remainingCount();
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            cvNotFull.wait(lock, [&]
+                           { return chunks.size() < cap || stop.load(std::memory_order_acquire); });
+            chunks.push_back(std::move(chunk));
+            singles += n;
+        }
+        cvNotEmpty.notify_one();
+    }
+
+    bool StreamingTimeAligner::StolenLane::empty() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return chunks.empty();
+    }
+
+    size_t StreamingTimeAligner::StolenLane::size() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return chunks.size();
+    }
+
+    size_t StreamingTimeAligner::StolenLane::countReadySingles(uint64_t boundary) const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        size_t n = 0;
+        for (const auto &chunk : chunks)
+        {
+            if (chunk.minTime_pico > boundary)
+            {
+                break;
+            }
+            n += chunk.remainingCount();
+        }
+        return n;
+    }
 
     StreamingTimeAligner::StreamingTimeAligner(const TimeAlignerConfig &config, size_t nodeCount)
         : m_config(config), m_nodeCount(nodeCount)
@@ -792,17 +1344,18 @@ namespace openpni::distributed::streaming
         }
 
         SharedMemoryPool *poolPtr = m_memoryPool.get();
+        m_stolenLanes.reserve(nodeCount);
         for (size_t i = 0; i < nodeCount; ++i)
         {
+            m_stolenLanes.push_back(std::make_unique<StolenLane>());
             m_nodeBuffers.push_back(
                 std::make_unique<NodeRingBuffer>(i, config.maxChunksPerNode, poolPtr));
-            // 数据到达即唤醒处理线程；是否真的开工由处理线程的触发判定决定，
+            // 数据到达即唤醒处理线程与 steal 工人；是否真的开工由处理线程的触发判定决定，
             // 这样所有策略集中在一处。
             m_nodeBuffers.back()->setPushObserver(
                 [this]()
                 {
-                    m_wakeSeq.fetch_add(1, std::memory_order_release);
-                    m_wakeCv.notify_one();
+                    wakeStealAndCoord();
                 });
         }
 
@@ -811,7 +1364,8 @@ namespace openpni::distributed::streaming
         std::vector<uint32_t> crystalNumOfEachChannel(
             config.channelNum, config.crystalsPerChannel);
 
-        m_useMultiGpu = multi_gpu::shouldUseCoincidenceMultiGpu(config);
+        const bool skipGpu = config.extractOnly || config.stealOnly;
+        m_useMultiGpu = !skipGpu && multi_gpu::shouldUseCoincidenceMultiGpu(config);
         if (m_useMultiGpu)
         {
             try
@@ -843,6 +1397,8 @@ namespace openpni::distributed::streaming
         LOG(INFO) << "[StreamingTimeAligner] Initialized with " << nodeCount
                   << " nodes, " << config.channelNum << " channels, multiGpu="
                   << (m_useMultiGpu ? "true" : "false")
+                  << (config.extractOnly ? ", extractOnly" : "")
+                  << (config.stealOnly ? ", stealOnly" : "")
                   << (m_useMultiGpu && m_multiGpuEngine
                           ? (", ring=" + std::to_string(m_multiGpuEngine->ringSize()) +
                              ", pipelineDepth=" +
@@ -885,6 +1441,7 @@ namespace openpni::distributed::streaming
 
         initializeOutput();
         m_writeStop.store(false, std::memory_order_release);
+        m_stealStop.store(false, std::memory_order_release);
         if (m_useMultiGpu && m_multiGpuEngine)
         {
             m_writerThread = std::thread([this]()
@@ -892,6 +1449,7 @@ namespace openpni::distributed::streaming
             m_drainThread = std::thread([this]()
                                         { drainLoop(); });
         }
+        startStealWorkers();
         m_processorThread = std::thread([this]()
                                         { processingLoop(); });
         LOG(INFO) << "[StreamingTimeAligner] Started";
@@ -916,9 +1474,14 @@ namespace openpni::distributed::streaming
             buf->close();
         }
 
-        // 让处理线程从 wait_for 里立刻醒来，进入收尾流程。
-        m_wakeSeq.fetch_add(1, std::memory_order_release);
-        m_wakeCv.notify_all();
+        // 先停 steal：把环里剩余 chunk 抽进 deque。协调线程此时仍在跑，避免 deque
+        // 满时 steal 与 stop 互相等待。
+        m_stealStop.store(true, std::memory_order_release);
+        wakeStealAndCoord();
+        joinStealWorkers();
+
+        // 让处理线程从 wait_for 里立刻醒来，抽空 deque 后 flush。
+        wakeStealAndCoord();
 
         if (m_processorThread.joinable())
         {
@@ -963,6 +1526,7 @@ namespace openpni::distributed::streaming
             opts.totalCrystals = totalCrystals;
             opts.io.maxFileSizeBytes = m_config.listmodeMaxFileSizeBytes;
             opts.io.enableOverrideExistingFile = m_config.listmodeOverwriteExisting;
+            opts.io.ioQueueSize = std::max(1u, m_config.listmodeIoQueueSize);
             // maxFileSizeBytes == 0 时文件名与历史行为完全一致："{outputDir}/prompt.lmf"
             m_promptOpened = m_promptWriter.Open(
                 m_config.outputDir, "prompt", "lmf", opts,
@@ -978,6 +1542,7 @@ namespace openpni::distributed::streaming
             opts.totalCrystals = totalCrystals;
             opts.io.maxFileSizeBytes = m_config.listmodeMaxFileSizeBytes;
             opts.io.enableOverrideExistingFile = m_config.listmodeOverwriteExisting;
+            opts.io.ioQueueSize = std::max(1u, m_config.listmodeIoQueueSize);
             // maxFileSizeBytes == 0 时文件名与历史行为完全一致："{outputDir}/delay.lmf"
             m_delayOpened = m_delayWriter.Open(
                 m_config.outputDir, "delay", "lmf", opts,
@@ -993,6 +1558,14 @@ namespace openpni::distributed::streaming
         std::lock_guard<std::mutex> lock(m_outputMutex);
         m_promptWriter.Stop();
         m_delayWriter.Stop();
+        const auto failed =
+            (m_promptWriter.GetStatus() & openpni::io::IOStatus_DiskSpaceNotEnough) != 0 ||
+            (m_delayWriter.GetStatus() & openpni::io::IOStatus_DiskSpaceNotEnough) != 0;
+        if (failed)
+        {
+            LOG(ERROR) << "[StreamingTimeAligner] listmode flush/fsync reported disk/IO failure";
+            m_processFailed.store(true, std::memory_order_release);
+        }
         m_promptOpened = false;
         m_delayOpened = false;
     }
@@ -1045,14 +1618,213 @@ namespace openpni::distributed::streaming
         return 0;
     }
 
-    size_t StreamingTimeAligner::countPendingBefore(uint64_t boundary) const
+    size_t StreamingTimeAligner::countReadyBefore(uint64_t boundary) const
     {
         size_t n = 0;
+        for (const auto &lane : m_stolenLanes)
+        {
+            n += lane->countReadySingles(boundary);
+        }
         for (const auto &buf : m_nodeBuffers)
         {
-            n += buf->countSinglesBefore(boundary);
+            n += buf->countReadySingles(boundary);
         }
         return n;
+    }
+
+    bool StreamingTimeAligner::hasStolenChunks() const
+    {
+        for (const auto &lane : m_stolenLanes)
+        {
+            if (!lane->empty())
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void StreamingTimeAligner::wakeStealAndCoord()
+    {
+        m_wakeSeq.fetch_add(1, std::memory_order_release);
+        m_wakeCv.notify_all();
+        m_stealCv.notify_all();
+        for (auto &lane : m_stolenLanes)
+        {
+            if (lane)
+            {
+                lane->cvNotFull.notify_all();
+                lane->cvNotEmpty.notify_all();
+            }
+        }
+    }
+
+    void StreamingTimeAligner::publishWatermark(uint64_t watermark)
+    {
+        uint64_t prev = m_publishedWatermark.load(std::memory_order_relaxed);
+        while (watermark > prev &&
+               !m_publishedWatermark.compare_exchange_weak(
+                   prev, watermark, std::memory_order_release, std::memory_order_relaxed))
+        {
+        }
+        if (watermark > prev)
+        {
+            m_stealCv.notify_all();
+        }
+    }
+
+    bool StreamingTimeAligner::waitStolenReady(uint64_t watermark)
+    {
+        while (true)
+        {
+            bool anyReady = false;
+            bool waitingOnSteal = false;
+            const bool stealAlive = m_stealAlive.load(std::memory_order_acquire) > 0;
+            for (size_t i = 0; i < m_stolenLanes.size(); ++i)
+            {
+                uint64_t stolenMin = 0;
+                const bool stolenOk =
+                    m_stolenLanes[i]->peekFront(&stolenMin, nullptr, nullptr) &&
+                    stolenMin <= watermark;
+                if (stolenOk)
+                {
+                    anyReady = true;
+                    continue;
+                }
+                const bool inFlight =
+                    m_stolenLanes[i]->inFlight.load(std::memory_order_acquire);
+                uint64_t ringMin = 0;
+                const bool ringHas =
+                    m_nodeBuffers[i]->peekFront(&ringMin, nullptr, nullptr) &&
+                    ringMin <= watermark;
+                if (inFlight || (ringHas && stealAlive))
+                {
+                    waitingOnSteal = true;
+                }
+            }
+            if (waitingOnSteal)
+            {
+                const uint64_t seq = m_wakeSeq.load(std::memory_order_acquire);
+                std::unique_lock<std::mutex> lock(m_wakeMutex);
+                m_wakeCv.wait_for(
+                    lock, std::chrono::milliseconds(1),
+                    [this, seq]()
+                    {
+                        return m_wakeSeq.load(std::memory_order_acquire) != seq ||
+                               m_stealStop.load(std::memory_order_acquire) ||
+                               !m_running.load(std::memory_order_acquire);
+                    });
+                continue;
+            }
+            return anyReady;
+        }
+    }
+
+    void StreamingTimeAligner::startStealWorkers()
+    {
+        m_stealAlive.store(0, std::memory_order_release);
+        for (size_t i = 0; i < m_stolenLanes.size(); ++i)
+        {
+            m_stolenLanes[i]->thread = std::thread([this, i]()
+                                                   { stealLoop(i); });
+        }
+    }
+
+    void StreamingTimeAligner::joinStealWorkers()
+    {
+        for (auto &lane : m_stolenLanes)
+        {
+            if (lane->thread.joinable())
+            {
+                lane->thread.join();
+            }
+        }
+    }
+
+    void StreamingTimeAligner::stealLoop(size_t nodeIdx)
+    {
+        m_stealAlive.fetch_add(1, std::memory_order_acq_rel);
+        auto *buf = m_nodeBuffers[nodeIdx].get();
+        auto &lane = *m_stolenLanes[nodeIdx];
+        const size_t cap = std::max<size_t>(1, m_config.stolenDequeCap);
+
+        while (true)
+        {
+            const bool stopping = m_stealStop.load(std::memory_order_acquire);
+            const size_t queued = lane.size();
+            if (!stopping && queued >= cap)
+            {
+                std::unique_lock<std::mutex> lock(lane.mutex);
+                lane.cvNotFull.wait_for(
+                    lock, std::chrono::milliseconds(1),
+                    [&lane, cap, this]()
+                    {
+                        return lane.chunks.size() < cap ||
+                               m_stealStop.load(std::memory_order_acquire);
+                    });
+                continue;
+            }
+            if (buf->empty())
+            {
+                if (stopping)
+                {
+                    break;
+                }
+                std::unique_lock<std::mutex> lock(m_stealMutex);
+                m_stealCv.wait_for(
+                    lock, std::chrono::milliseconds(1),
+                    [this, buf]()
+                    {
+                        return m_stealStop.load(std::memory_order_acquire) ||
+                               !buf->empty();
+                    });
+                continue;
+            }
+
+            const size_t room = stopping
+                                    ? std::max<size_t>(1, buf->size() + cap)
+                                    : (queued < cap ? cap - queued : 0);
+            if (room == 0)
+            {
+                continue;
+            }
+
+            const auto stealBegin = std::chrono::steady_clock::now();
+            lane.inFlight.store(true, std::memory_order_release);
+            auto stolen = buf->stealWholeFronts(room);
+            if (stolen.empty())
+            {
+                lane.inFlight.store(false, std::memory_order_release);
+                wakeStealAndCoord();
+                continue;
+            }
+
+            if (m_config.stealOnly)
+            {
+                for (auto &chunk : stolen)
+                {
+                    m_stats.totalSinglesReceived += chunk.remainingCount();
+                    m_stats.totalSinglesProcessed += chunk.remainingCount();
+                    buf->dropStolenChunk(std::move(chunk));
+                }
+                lane.inFlight.store(false, std::memory_order_release);
+                m_stats.stealNs.fetch_add(nsSince(stealBegin), std::memory_order_relaxed);
+                wakeStealAndCoord();
+                continue;
+            }
+
+            for (auto &chunk : stolen)
+            {
+                lane.pushBack(std::move(chunk), cap, m_stealStop);
+            }
+            lane.inFlight.store(false, std::memory_order_release);
+            m_stats.stealNs.fetch_add(nsSince(stealBegin), std::memory_order_relaxed);
+            wakeStealAndCoord();
+        }
+
+        lane.inFlight.store(false, std::memory_order_release);
+        m_stealAlive.fetch_sub(1, std::memory_order_acq_rel);
+        wakeStealAndCoord();
     }
 
     bool StreamingTimeAligner::anyNodeAboveHighWater() const
@@ -1071,162 +1843,6 @@ namespace openpni::distributed::streaming
             }
         }
         return m_memoryPool && m_memoryPool->getUsageRatio() >= ratio;
-    }
-
-    uint64_t StreamingTimeAligner::clampSegmentBoundary(uint64_t watermark, size_t pending,
-                                                        size_t *outCount)
-    {
-        // 不变式 3：carry 与新数据合计受 maxSegmentSingles 约束，故预算先扣掉 carry。
-        // 这一步是显存上界真正生效的关键——只按新数据切分会让内核收到
-        // maxSegmentSingles + carry 条，悄悄突破用户设定的上限。
-        size_t budget = std::numeric_limits<size_t>::max();
-        if (m_config.maxSegmentSingles != 0)
-        {
-            const size_t carryCount = m_carrySingles.size();
-            if (m_config.maxSegmentSingles > carryCount)
-            {
-                budget = m_config.maxSegmentSingles - carryCount;
-            }
-            else
-            {
-                budget = 1;
-                LOG_EVERY_N(WARNING, 64)
-                    << "[StreamingTimeAligner] carry (" << carryCount
-                    << ") 已占满 maxSegmentSingles (" << m_config.maxSegmentSingles
-                    << ")，请调大 maxSegmentSingles 或调小 minSegmentOverlapFactor";
-            }
-        }
-
-        // 不变式 2：段跨度不得小于硬下界。
-        const uint64_t minSpan = std::max<uint64_t>(1, m_config.minSegmentSpan_100fs());
-        const uint64_t minBound = m_lastWatermark > UINT64_MAX - minSpan
-                                      ? UINT64_MAX
-                                      : m_lastWatermark + minSpan;
-
-        // 常见稳态：待处理量不超预算，直接取水位线，零次探测。
-        if (pending <= budget)
-        {
-            if (outCount)
-            {
-                *outCount = pending;
-            }
-            return watermark;
-        }
-
-        // 搜索下界要取「上次边界」与「缓冲中最早事件」的较大者。时间戳是绝对 PET 时间
-        // （量级 1e17），首轮 m_lastWatermark 还是 0，只按它播种会让插值落在数据起点之前，
-        // 二分要耗掉很多轮才爬到有数据的区间——低轮询频率下就表现为水位线迟迟不前进。
-        uint64_t earliest = UINT64_MAX;
-        for (const auto &buf : m_nodeBuffers)
-        {
-            earliest = std::min(earliest, buf->getFrontMinTime());
-        }
-
-        uint64_t lo = m_lastWatermark;
-        if (earliest != UINT64_MAX && earliest > lo)
-        {
-            lo = earliest;
-        }
-        uint64_t hi = watermark;
-        if (lo >= hi)
-        {
-            if (outCount)
-            {
-                *outCount = pending;
-            }
-            return watermark;
-        }
-
-        // 硬下界同样要以「有数据的起点」为基准，否则 m_lastWatermark 远落后于数据时
-        // （首轮为 0）会切出一串空段，只是在空转。
-        const uint64_t floorBound =
-            earliest != UINT64_MAX
-                ? std::min(watermark, std::max(minBound, earliest + minSpan))
-                : std::min(minBound, watermark);
-
-        const uint64_t searchLo = lo;
-        uint64_t best = 0;
-        size_t bestCount = 0;
-
-        uint64_t probe = lo + static_cast<uint64_t>(
-                                  static_cast<long double>(hi - lo) *
-                                  (static_cast<long double>(budget) /
-                                   static_cast<long double>(pending)));
-        probe = std::clamp(probe, lo, hi);
-
-        constexpr int kMaxProbes = 12;
-        for (int iter = 0; iter < kMaxProbes; ++iter)
-        {
-            const size_t count = countPendingBefore(probe);
-            if (count <= budget)
-            {
-                if (probe >= best)
-                {
-                    best = probe;
-                    bestCount = count;
-                }
-                if (probe == hi)
-                {
-                    break;
-                }
-                lo = probe + 1;
-            }
-            else
-            {
-                if (probe == 0)
-                {
-                    break;
-                }
-                hi = probe - 1;
-            }
-
-            if (lo > hi)
-            {
-                break;
-            }
-            probe = lo + (hi - lo) / 2;
-        }
-
-        // 向下吸附到整 chunk 边界，避开抽取时的 erase memmove。
-        // 边界只会变小，因此不会破坏预算约束。
-        if (best > floorBound)
-        {
-            uint64_t snap = UINT64_MAX;
-            for (const auto &buf : m_nodeBuffers)
-            {
-                size_t chunkCount = 0;
-                snap = std::min(snap, buf->chunkBoundaryWithin(best, budget, &chunkCount));
-            }
-            // 损失不超过一半跨度才值得吸附。
-            if (snap != UINT64_MAX && snap > floorBound &&
-                (snap - searchLo) * 2 >= (best - searchLo))
-            {
-                best = snap;
-                bestCount = countPendingBefore(best);
-            }
-        }
-
-        // 应用硬下界：宁可本段超预算，也不让段跨度塌到重叠窗以下——
-        // 否则 carry 占比失控，且抽取边界会失去单调性。
-        if (best < floorBound)
-        {
-            best = floorBound;
-            bestCount = countPendingBefore(best);
-            if (bestCount > budget)
-            {
-                m_stats.oversizedSegments.fetch_add(1, std::memory_order_relaxed);
-                LOG_EVERY_N(WARNING, 64)
-                    << "[StreamingTimeAligner] 一个重叠窗内的数据量 (" << bestCount
-                    << ") 已超过显存预算 (" << budget
-                    << ")，本段放宽预算以保证正确性；请调大 maxSegmentSingles";
-            }
-        }
-
-        if (outCount)
-        {
-            *outCount = bestCount;
-        }
-        return best;
     }
 
     void StreamingTimeAligner::processingLoop()
@@ -1251,7 +1867,12 @@ namespace openpni::distributed::streaming
                     return true;
                 }
             }
-            return false;
+            return hasStolenChunks();
+        };
+
+        auto stealStillRunning = [this]()
+        {
+            return m_stealAlive.load(std::memory_order_acquire) > 0;
         };
 
         // 上一段被预算钳掉了尾巴（或缓冲仍在高水位）时置位：说明水位线之内还有数据可
@@ -1259,9 +1880,9 @@ namespace openpni::distributed::streaming
         // maxSegmentSingles 条，积压永远追不上。
         bool moreReadyNow = false;
 
-        while (m_running.load() || hasBufferedSingles())
+        while (m_running.load() || hasBufferedSingles() || stealStillRunning())
         {
-            // 事件驱动：有节点 push 就提前醒来，否则最多等 processingIntervalMs。
+            // 事件驱动：有节点 push / steal 入队就提前醒来，否则最多等 processingIntervalMs。
             if (!moreReadyNow)
             {
                 std::unique_lock<std::mutex> lock(m_wakeMutex);
@@ -1277,10 +1898,19 @@ namespace openpni::distributed::streaming
             moreReadyNow = false;
 
             const auto startTime = std::chrono::high_resolution_clock::now();
-            const auto extractBegin = std::chrono::steady_clock::now();
+            const auto watermarkBegin = std::chrono::steady_clock::now();
 
             const uint64_t watermark = calculateWatermark();
+            if (watermark > 0)
+            {
+                publishWatermark(watermark);
+            }
             const bool pressure = anyNodeAboveHighWater();
+
+            auto stopIdleToFlush = [&]()
+            {
+                return !m_running.load() && !stealStillRunning();
+            };
 
             if (watermark == 0 || watermark <= m_lastWatermark)
             {
@@ -1299,8 +1929,8 @@ namespace openpni::distributed::streaming
                                      << "正在对上游背压（某节点数据滞后）";
                     }
                 }
-                m_stats.extractNs.fetch_add(nsSince(extractBegin), std::memory_order_relaxed);
-                if (!m_running.load())
+                m_stats.watermarkNs.fetch_add(nsSince(watermarkBegin), std::memory_order_relaxed);
+                if (stopIdleToFlush())
                 {
                     break;
                 }
@@ -1311,15 +1941,15 @@ namespace openpni::distributed::streaming
             if (watermark - m_lastWatermark < m_config.minSegmentSpan_100fs())
             {
                 m_stats.heldByMinDuration.fetch_add(1, std::memory_order_relaxed);
-                m_stats.extractNs.fetch_add(nsSince(extractBegin), std::memory_order_relaxed);
-                if (!m_running.load())
+                m_stats.watermarkNs.fetch_add(nsSince(watermarkBegin), std::memory_order_relaxed);
+                if (stopIdleToFlush())
                 {
                     break; // 余量交给 flushRemaining 收尾
                 }
                 continue;
             }
 
-            const size_t pending = countPendingBefore(watermark);
+            const size_t pending = countReadyBefore(watermark);
             const bool stopping = !m_running.load();
             const bool deadline =
                 m_config.maxProcessLatencyMs > 0 &&
@@ -1331,66 +1961,49 @@ namespace openpni::distributed::streaming
             if (pending > 0 && !enough && !pressure && !deadline && !stopping)
             {
                 // 攒批：数据量不足且无压力、未到期，等下一轮。
-                m_stats.extractNs.fetch_add(nsSince(extractBegin), std::memory_order_relaxed);
+                m_stats.watermarkNs.fetch_add(nsSince(watermarkBegin), std::memory_order_relaxed);
                 continue;
             }
 
-            size_t segmentCount = 0;
-            const uint64_t boundary =
-                clampSegmentBoundary(watermark, pending, &segmentCount);
+            m_stats.watermarkNs.fetch_add(nsSince(watermarkBegin), std::memory_order_relaxed);
 
-            if (boundary <= m_lastWatermark)
+            if (pending > 0)
             {
-                // 不变式 2 保证不会走到这里；真发生了就不能强推边界（会跳过数据）。
-                LOG_EVERY_N(ERROR, 64)
-                    << "[StreamingTimeAligner] 抽取边界未前进 (" << boundary
-                    << " <= " << m_lastWatermark << ")，跳过本轮";
-                m_stats.extractNs.fetch_add(nsSince(extractBegin), std::memory_order_relaxed);
-                continue;
-            }
-
-            if (segmentCount == 0)
-            {
-                // 边界区间内没有任何 single：直接推进边界，不会漏掉数据。
-                if (!m_carrySingles.empty())
+                if (enough)
                 {
-                    updateCarrySingles(std::span<const Single>(m_carrySingles), boundary);
+                    m_stats.triggerByWatermark.fetch_add(1, std::memory_order_relaxed);
                 }
-                m_lastWatermark = boundary;
-                m_stats.currentTimeBoundary_pico = boundary;
-                m_stats.extractNs.fetch_add(nsSince(extractBegin), std::memory_order_relaxed);
-                moreReadyNow = boundary < watermark;
-                continue;
+                else if (pressure)
+                {
+                    m_stats.triggerByPressure.fetch_add(1, std::memory_order_relaxed);
+                }
+                else
+                {
+                    m_stats.triggerByDeadline.fetch_add(1, std::memory_order_relaxed);
+                }
+                if (m_watermarkDegraded)
+                {
+                    m_stats.degradedSegments.fetch_add(1, std::memory_order_relaxed);
+                }
             }
 
-            if (enough)
-            {
-                m_stats.triggerByWatermark.fetch_add(1, std::memory_order_relaxed);
-            }
-            else if (pressure)
-            {
-                m_stats.triggerByPressure.fetch_add(1, std::memory_order_relaxed);
-            }
-            else
-            {
-                m_stats.triggerByDeadline.fetch_add(1, std::memory_order_relaxed);
-            }
-            if (m_watermarkDegraded)
-            {
-                m_stats.degradedSegments.fetch_add(1, std::memory_order_relaxed);
-            }
-
-            m_stats.extractNs.fetch_add(nsSince(extractBegin), std::memory_order_relaxed);
-
-            if (!processSegment(boundary, segmentCount))
+            const uint64_t recBefore = m_stats.totalSinglesReceived.load(std::memory_order_relaxed);
+            if (!processSegment(watermark))
             {
                 break;
             }
 
-            m_stats.chunksProcessed++;
+            const bool extracted =
+                m_stats.totalSinglesReceived.load(std::memory_order_relaxed) > recBefore;
             m_stats.currentTimeBoundary_pico = m_lastWatermark;
-            lastProcessTime = std::chrono::steady_clock::now();
             moreReadyNow = m_lastWatermark < watermark;
+            if (!extracted)
+            {
+                continue;
+            }
+
+            m_stats.chunksProcessed++;
+            lastProcessTime = std::chrono::steady_clock::now();
 
             size_t backlog = 0;
             for (const auto &buf : m_nodeBuffers)
@@ -1443,37 +2056,50 @@ namespace openpni::distributed::streaming
         }
 
         m_stageMerged.ResetPointer(want);
-        if (m_nodeBuffers.size() > 1)
-        {
-            m_stageRaw.ResetPointer(want);
-        }
         m_stageCapacity = want;
     }
 
     void StreamingTimeAligner::initInputSlots()
     {
-        if (!m_useMultiGpu || !m_multiGpuEngine)
+        size_t n = 0;
+        if (m_config.extractOnly && !m_config.stealOnly)
+        {
+            // 不建 GPU 工人；抽取墙走 pageable m_extractHost，不占 pinned 槽。
+            n = 0;
+            const size_t cap = m_config.maxSegmentSingles == 0
+                                   ? size_t{262144}
+                                   : std::max<size_t>(2, m_config.maxSegmentSingles);
+            if (m_extractHost.size() < cap + 64)
+            {
+                m_extractHost.resize(cap + 64);
+            }
+        }
+        else if (m_useMultiGpu && m_multiGpuEngine)
+        {
+            n = std::max<size_t>(1, m_multiGpuEngine->ringSize());
+        }
+        else
         {
             return;
         }
 
-        const size_t n = std::max<size_t>(1, m_multiGpuEngine->ringSize());
+        const size_t nSlots = n;
         m_inputSlotCapacity = m_config.maxSegmentSingles == 0
                                   ? size_t{262144}
                                   : std::max<size_t>(2, m_config.maxSegmentSingles);
         m_inputSlots.clear();
-        m_inputSlots.reserve(n);
+        m_inputSlots.reserve(nSlots);
         {
             std::lock_guard<std::mutex> lock(m_slotMutex);
             m_freeSlots.clear();
-            for (size_t i = 0; i < n; ++i)
+            for (size_t i = 0; i < nSlots; ++i)
             {
                 m_inputSlots.emplace_back();
                 m_inputSlots.back().buffer.ResetPointer(m_inputSlotCapacity);
                 m_freeSlots.push_back(i);
             }
         }
-        m_writeQueueCap = n;
+        m_writeQueueCap = std::max(nSlots, m_config.listmodeWriteQueueCap);
         {
             std::lock_guard<std::mutex> lock(m_submittedMutex);
             m_submittedSlots.clear();
@@ -1482,50 +2108,6 @@ namespace openpni::distributed::streaming
             std::lock_guard<std::mutex> lock(m_writeMutex);
             m_writeQueue.clear();
         }
-    }
-
-    size_t StreamingTimeAligner::extractAndMergeInto(Single *dest, size_t destCap,
-                                                     uint64_t boundary, bool *truncated)
-    {
-        if (dest == nullptr || destCap == 0)
-        {
-            if (truncated)
-            {
-                *truncated = true;
-            }
-            return 0;
-        }
-
-        if (m_nodeBuffers.size() == 1)
-        {
-            return m_nodeBuffers[0]->extractSinglesBeforeInto(
-                boundary, dest, destCap, truncated);
-        }
-
-        Single *raw = m_stageRaw.Data();
-        if (raw == nullptr)
-        {
-            if (truncated)
-            {
-                *truncated = true;
-            }
-            return 0;
-        }
-
-        m_mergeRuns.clear();
-        size_t offset = 0;
-        for (auto &buf : m_nodeBuffers)
-        {
-            const size_t n = buf->extractSinglesBeforeInto(
-                boundary, raw + offset, destCap - offset, truncated);
-            if (n > 0)
-            {
-                m_mergeRuns.emplace_back(offset, offset + n);
-            }
-            offset += n;
-        }
-        mergeSortedRuns(raw, m_mergeRuns, dest);
-        return offset;
     }
 
     size_t StreamingTimeAligner::acquireInputSlot()
@@ -1594,7 +2176,9 @@ namespace openpni::distributed::streaming
     bool StreamingTimeAligner::submitCopiedSpan(std::span<const Single> sorted,
                                                 uint64_t carryCutoff, uint64_t carryBound)
     {
+        const auto slotBegin = std::chrono::steady_clock::now();
         const size_t slotIdx = acquireInputSlot();
+        m_stats.slotWaitNs.fetch_add(nsSince(slotBegin), std::memory_order_relaxed);
         if (slotIdx == std::numeric_limits<size_t>::max())
         {
             return false;
@@ -1608,118 +2192,511 @@ namespace openpni::distributed::streaming
         return submitOwnedSlot(slotIdx, sorted.size(), carryCutoff, carryBound);
     }
 
-    bool StreamingTimeAligner::processSegment(uint64_t boundary, size_t expectedCount)
+    bool StreamingTimeAligner::processSegment(uint64_t watermark)
     {
-        const auto extractBegin = std::chrono::steady_clock::now();
-
-        const size_t carryCount = m_carrySingles.size();
-        const size_t totalEst = carryCount + expectedCount;
-        const bool useSlot =
-            m_useMultiGpu && m_multiGpuEngine &&
-            m_inputSlotCapacity > 0 && totalEst <= m_inputSlotCapacity;
-
-        if (useSlot)
+        if (m_config.stealOnly)
         {
-            const size_t slotIdx = acquireInputSlot();
-            if (slotIdx == std::numeric_limits<size_t>::max())
-            {
-                return false;
-            }
-
-            Single *merged = m_inputSlots[slotIdx].buffer.Data();
-            if (m_nodeBuffers.size() > 1)
-            {
-                ensureStagingCapacity(std::max(expectedCount, m_inputSlotCapacity));
-            }
-            if (carryCount > 0)
-            {
-                std::copy(m_carrySingles.begin(), m_carrySingles.end(), merged);
-            }
-
-            bool truncated = false;
-            const size_t newRoom =
-                m_inputSlotCapacity > carryCount ? m_inputSlotCapacity - carryCount : 0;
-            const size_t newCount =
-                extractAndMergeInto(merged + carryCount, newRoom, boundary, &truncated);
-
-            if (truncated)
-            {
-                LOG(ERROR) << "[StreamingTimeAligner] 暂存区不足以容纳边界内的全部 singles"
-                           << "（预估 " << expectedCount << "），"
-                           << "请增大 networkLatencyMargin_pico 或检查数据乱序程度";
-                m_processFailed.store(true, std::memory_order_release);
-                releaseInputSlot(slotIdx);
-                m_slotCv.notify_all();
-                return false;
-            }
-
-            m_stats.extractNs.fetch_add(nsSince(extractBegin), std::memory_order_relaxed);
-
-            if (newCount == 0)
-            {
-                if (carryCount > 0)
-                {
-                    updateCarrySingles(std::span<const Single>(merged, carryCount), boundary);
-                }
-                m_lastWatermark = boundary;
-                releaseInputSlot(slotIdx);
-                return true;
-            }
-
-            m_stats.totalSinglesReceived += newCount;
-            const uint64_t carryCutoff = carryCount == 0 ? 0 : m_lastWatermark;
-            m_stats.carrySinglesTotal.fetch_add(carryCount, std::memory_order_relaxed);
-            if (!submitOwnedSlot(slotIdx, carryCount + newCount, carryCutoff, boundary))
-            {
-                return false;
-            }
-            m_stats.totalSinglesProcessed += newCount;
+            m_lastWatermark = watermark;
+            m_stats.currentTimeBoundary_pico = watermark;
             return true;
         }
 
-        ensureStagingCapacity(carryCount + expectedCount);
+        waitStolenReady(watermark);
+        const auto extractBegin = std::chrono::steady_clock::now();
 
-        Single *merged = m_stageMerged.Data();
-        const size_t newRoom = m_stageCapacity - carryCount;
+        const size_t nNodes = m_nodeBuffers.size();
+        const size_t carryCount = m_carrySingles.size();
 
-        // carry 恒是本批的时间前缀：carry ⊆ (prevBound - overlap, prevBound]，而新抽出的
-        // 数据恒 > prevBound（<= prevBound 的都已在上一段取走）。因此只需归并各节点段，
-        // 再把 carry 原样放到最前面即可得到全局时序有序的批。
-        if (carryCount > 0)
+        size_t budget = std::numeric_limits<size_t>::max();
+        if (m_config.maxSegmentSingles != 0)
         {
-            std::copy(m_carrySingles.begin(), m_carrySingles.end(), merged);
+            if (m_config.maxSegmentSingles > carryCount)
+            {
+                budget = m_config.maxSegmentSingles - carryCount;
+            }
+            else
+            {
+                budget = 1;
+                LOG_EVERY_N(WARNING, 64)
+                    << "[StreamingTimeAligner] carry (" << carryCount
+                    << ") 已占满 maxSegmentSingles (" << m_config.maxSegmentSingles
+                    << ")，请调大 maxSegmentSingles 或调小 minSegmentOverlapFactor";
+            }
         }
 
-        bool truncated = false;
-        const size_t newCount =
-            extractAndMergeInto(merged + carryCount, newRoom, boundary, &truncated);
-
-        if (truncated)
+        const uint64_t minSpan = std::max<uint64_t>(1, m_config.minSegmentSpan_100fs());
+        const uint64_t minBoundFromLast = m_lastWatermark > UINT64_MAX - minSpan
+                                              ? UINT64_MAX
+                                              : m_lastWatermark + minSpan;
+        uint64_t earliest = UINT64_MAX;
+        auto peekEarliest = [&](auto &&peekFn)
         {
-            // 抽取量超出了按水位线预估的条数，只可能是安全裕量没能覆盖乱序到达。
-            // 继续下去会让部分数据错过配对，这里必须显式失败而不是静默降级。
-            LOG(ERROR) << "[StreamingTimeAligner] 暂存区不足以容纳边界内的全部 singles"
-                       << "（预估 " << expectedCount << "），"
-                       << "请增大 networkLatencyMargin_pico 或检查数据乱序程度";
-            m_processFailed.store(true, std::memory_order_release);
-            return false;
+            uint64_t mn = 0;
+            if (peekFn(&mn, nullptr, nullptr) && mn <= watermark)
+            {
+                earliest = std::min(earliest, mn);
+            }
+        };
+        for (auto &lane : m_stolenLanes)
+        {
+            peekEarliest([&](uint64_t *mn, uint64_t *, size_t *)
+                         { return lane->peekFront(mn, nullptr, nullptr); });
         }
+        if (earliest == UINT64_MAX)
+        {
+            for (const auto &buf : m_nodeBuffers)
+            {
+                peekEarliest([&](uint64_t *mn, uint64_t *, size_t *)
+                             { return buf->peekFront(mn, nullptr, nullptr); });
+            }
+        }
+        const uint64_t floorBound =
+            earliest != UINT64_MAX
+                ? std::min(watermark,
+                           std::max(minBoundFromLast,
+                                    earliest > UINT64_MAX - minSpan
+                                        ? UINT64_MAX
+                                        : earliest + minSpan))
+                : std::min(minBoundFromLast, watermark);
+
+        struct KeptBatch
+        {
+            TimestampedSingleChunk chunk;
+            size_t takeN = 0;
+            uint16_t node = 0;
+            bool poolOwned = true;
+        };
+        struct PeekMeta
+        {
+            bool ok = false;
+            uint64_t minT = UINT64_MAX;
+            uint64_t maxT = 0;
+            size_t n = 0;
+        };
+
+        std::vector<KeptBatch> kept;
+        size_t taken = 0;
+        uint64_t endTime = m_lastWatermark;
+        bool exceededBudget = false;
+
+        auto currentRoom = [&]() -> size_t
+        {
+            if (endTime < floorBound)
+            {
+                return std::numeric_limits<size_t>::max();
+            }
+            return taken < budget ? budget - taken : 0;
+        };
+
+        while (true)
+        {
+            const size_t roomNow = currentRoom();
+            if (roomNow == 0)
+            {
+                break;
+            }
+            const uint64_t extractCap = watermark;
+            // 每个节点要么 deque 上已有 <=W 的队头，要么环/在途确认没有。禁止在
+            // 某节点仍把更早事件藏在环里时，先抽另一节点的后续块。
+            if (!waitStolenReady(extractCap))
+            {
+                break;
+            }
+
+            std::vector<PeekMeta> peeks(nNodes);
+            size_t pick = nNodes;
+            uint64_t pickMin = UINT64_MAX;
+            for (size_t i = 0; i < nNodes; ++i)
+            {
+                uint64_t mn = 0;
+                uint64_t mx = 0;
+                size_t nn = 0;
+                if (!m_stolenLanes[i]->peekFront(&mn, &mx, &nn))
+                {
+                    continue;
+                }
+                peeks[i] = PeekMeta{true, mn, mx, nn};
+                if (mn <= extractCap && mn < pickMin)
+                {
+                    pick = i;
+                    pickMin = mn;
+                }
+            }
+            if (pick == nNodes)
+            {
+                break;
+            }
+
+            uint64_t otherMin = UINT64_MAX;
+            for (size_t i = 0; i < nNodes; ++i)
+            {
+                if (i == pick || !peeks[i].ok || peeks[i].minT > extractCap)
+                {
+                    continue;
+                }
+                otherMin = std::min(otherMin, peeks[i].minT);
+            }
+
+            const PeekMeta &p = peeks[pick];
+            const bool whollyBeforeOthers = p.maxT <= extractCap && p.maxT <= otherMin;
+            const size_t roomBudget = taken < budget ? budget - taken : 0;
+            const size_t segCap = m_config.maxSegmentSingles == 0
+                                      ? std::numeric_limits<size_t>::max()
+                                      : m_config.maxSegmentSingles;
+            // 低于 floorBound 时允许整块拿走不超过 maxSegment 的 chunk；禁止 SIZE_MAX 吞 5M 块。
+            const size_t wholeLimit = endTime < floorBound
+                                          ? std::max(roomBudget, segCap)
+                                          : roomBudget;
+            const bool takeWhole = whollyBeforeOthers && p.n <= wholeLimit && p.n <= roomNow;
+
+            if (takeWhole)
+            {
+                const uint64_t wholeCap = otherMin == UINT64_MAX ? extractCap
+                                                                : std::min(extractCap, otherMin);
+                const size_t batchRoom = wholeLimit;
+                auto batch = m_stolenLanes[pick]->popCompleteBefore(wholeCap, batchRoom);
+                if (batch.empty())
+                {
+                    auto chunk = m_stolenLanes[pick]->popWholeFront(extractCap);
+                    if (!chunk)
+                    {
+                        break;
+                    }
+                    batch.push_back(std::move(*chunk));
+                }
+                bool tookAny = false;
+                for (auto &chunk : batch)
+                {
+                    const size_t n = chunk.remainingCount();
+                    if (n == 0)
+                    {
+                        m_nodeBuffers[pick]->dropStolenChunk(std::move(chunk));
+                        continue;
+                    }
+                    taken += n;
+                    endTime = std::max(endTime, chunk.maxTime_pico);
+                    if (taken > budget)
+                    {
+                        exceededBudget = true;
+                    }
+                    const bool owned = chunk.poolOwned;
+                    kept.push_back(KeptBatch{
+                        std::move(chunk), n, static_cast<uint16_t>(pick), owned});
+                    tookAny = true;
+                }
+                if (!tookAny)
+                {
+                    continue;
+                }
+                continue;
+            }
+
+            std::vector<size_t> stealSet;
+            if (whollyBeforeOthers)
+            {
+                stealSet.push_back(pick);
+            }
+            else
+            {
+                for (size_t i = 0; i < nNodes; ++i)
+                {
+                    if (peeks[i].ok && peeks[i].minT <= extractCap)
+                    {
+                        stealSet.push_back(i);
+                    }
+                }
+            }
+
+            std::vector<TimestampedSingleChunk> layer(nNodes);
+            std::vector<char> has(nNodes, 0);
+            for (size_t idx : stealSet)
+            {
+                auto chunk = m_stolenLanes[idx]->popWholeFront(extractCap);
+                if (!chunk)
+                {
+                    continue;
+                }
+                if (chunk->remainingEmpty())
+                {
+                    m_nodeBuffers[idx]->dropStolenChunk(std::move(*chunk));
+                    continue;
+                }
+                layer[idx] = std::move(*chunk);
+                has[idx] = 1;
+            }
+
+            std::vector<size_t> limit(nNodes, 0);
+            std::vector<size_t> off(nNodes, 0);
+            for (size_t i = 0; i < nNodes; ++i)
+            {
+                if (!has[i])
+                {
+                    continue;
+                }
+                off[i] = layer[i].remainingBegin();
+                auto &s = layer[i].singles;
+                if (layer[i].maxTime_pico <= extractCap)
+                {
+                    limit[i] = layer[i].remainingCount();
+                }
+                else
+                {
+                    auto it = std::upper_bound(
+                        s.begin() + static_cast<std::ptrdiff_t>(off[i]), s.end(), extractCap,
+                        [](uint64_t bound, const Single &e)
+                        { return bound < e.timevalue_100fs; });
+                    limit[i] = static_cast<size_t>(
+                        std::distance(s.begin() + static_cast<std::ptrdiff_t>(off[i]), it));
+                }
+            }
+
+            std::vector<size_t> takeOf(nNodes, 0);
+            size_t got = 0;
+            uint64_t lastT = endTime;
+            planLayerTakeN(layer, has, off, limit, nNodes, taken, budget, floorBound,
+                           &lastT, &takeOf, &got);
+
+            if (got == 0)
+            {
+                for (size_t i = 0; i < nNodes; ++i)
+                {
+                    if (has[i])
+                    {
+                        m_stolenLanes[i]->reinsertFront(std::move(layer[i]));
+                    }
+                }
+                break;
+            }
+
+            if (taken + got > budget && lastT < floorBound)
+            {
+                exceededBudget = true;
+            }
+            taken += got;
+            endTime = lastT;
+
+            for (size_t i = 0; i < nNodes; ++i)
+            {
+                if (!has[i])
+                {
+                    continue;
+                }
+                const size_t takeN = takeOf[i];
+                auto &ch = layer[i];
+                if (takeN == 0)
+                {
+                    m_stolenLanes[i]->reinsertFront(std::move(ch));
+                    continue;
+                }
+                const bool owned = ch.poolOwned;
+                kept.push_back(KeptBatch{
+                    std::move(ch), takeN, static_cast<uint16_t>(i), owned});
+            }
+
+            if (endTime >= floorBound && taken >= budget)
+            {
+                break;
+            }
+        }
+
+        if (exceededBudget)
+        {
+            m_stats.oversizedSegments.fetch_add(1, std::memory_order_relaxed);
+            LOG_EVERY_N(WARNING, 64)
+                << "[StreamingTimeAligner] 一个重叠窗内的数据量已超过显存预算 ("
+                << budget << ")，本段放宽预算以保证正确性；请调大 maxSegmentSingles";
+        }
+
+        bool moreAtOrBefore = false;
+        for (const auto &b : kept)
+        {
+            if (b.takeN < b.chunk.remainingCount())
+            {
+                moreAtOrBefore = true;
+                break;
+            }
+        }
+        if (!moreAtOrBefore)
+        {
+            for (size_t i = 0; i < nNodes; ++i)
+            {
+                if (m_stolenLanes[i]->inFlight.load(std::memory_order_acquire))
+                {
+                    moreAtOrBefore = true;
+                    break;
+                }
+                uint64_t mn = 0;
+                if (m_stolenLanes[i]->peekFront(&mn, nullptr, nullptr) && mn <= watermark)
+                {
+                    moreAtOrBefore = true;
+                    break;
+                }
+                if (m_nodeBuffers[i]->peekFront(&mn, nullptr, nullptr) && mn <= watermark)
+                {
+                    moreAtOrBefore = true;
+                    break;
+                }
+            }
+        }
+        // 节点未到齐或本段被预算截断时，只能推到实际抽到的 endTime。
+        // taken==0 且仍有残留时不得把 lastWatermark 跳到全水位。
+        const uint64_t carryBound = !moreAtOrBefore
+                                        ? watermark
+                                        : (taken == 0 ? m_lastWatermark : endTime);
+
+        auto releaseKept = [&](bool commit)
+        {
+            for (auto &b : kept)
+            {
+                if (commit)
+                {
+                    b.chunk.consumePrefix(b.takeN);
+                }
+                if (!b.chunk.remainingEmpty())
+                {
+                    m_stolenLanes[b.node]->reinsertFront(std::move(b.chunk));
+                }
+                else if (b.poolOwned)
+                {
+                    m_nodeBuffers[b.node]->dropStolenChunk(std::move(b.chunk));
+                }
+            }
+            kept.clear();
+        };
 
         m_stats.extractNs.fetch_add(nsSince(extractBegin), std::memory_order_relaxed);
 
-        if (newCount == 0)
+        if (taken == 0)
         {
-            if (carryCount > 0)
+            if (!m_carrySingles.empty())
             {
-                updateCarrySingles(std::span<const Single>(merged, carryCount), boundary);
+                const auto carryBegin = std::chrono::steady_clock::now();
+                updateCarrySingles(std::span<const Single>(m_carrySingles), carryBound);
+                m_stats.extractNs.fetch_add(nsSince(carryBegin), std::memory_order_relaxed);
             }
-            m_lastWatermark = boundary;
+            m_lastWatermark = carryBound;
+            m_stats.currentTimeBoundary_pico = m_lastWatermark;
             return true;
         }
 
-        m_stats.totalSinglesReceived += newCount;
-        return processSinglesRange(std::span<Single>(merged, carryCount + newCount),
-                                   boundary);
+        const size_t total = carryCount + taken;
+        const bool preferSlot = m_inputSlotCapacity > 0 &&
+                                total <= m_inputSlotCapacity + 64 &&
+                                (m_useMultiGpu && m_multiGpuEngine);
+
+        auto mergeInto = [&](Single *dest)
+        {
+            if (carryCount > 0)
+            {
+                std::copy(m_carrySingles.begin(), m_carrySingles.end(), dest);
+            }
+            std::vector<std::vector<std::pair<const Single *, const Single *>>> byNode(nNodes);
+            for (const auto &b : kept)
+            {
+                const size_t n = std::min(b.takeN, b.chunk.remainingCount());
+                if (n == 0)
+                {
+                    continue;
+                }
+                const Single *p = b.chunk.singles.data() + b.chunk.remainingBegin();
+                byNode[b.node].emplace_back(p, p + n);
+            }
+            std::vector<std::pair<const Single *, const Single *>> runs;
+            std::vector<std::vector<Single>> collapsed;
+            runs.reserve(nNodes);
+            for (size_t i = 0; i < nNodes; ++i)
+            {
+                auto &vs = byNode[i];
+                if (vs.empty())
+                {
+                    continue;
+                }
+                if (vs.size() == 1)
+                {
+                    runs.push_back(vs[0]);
+                    continue;
+                }
+                // 同节点多块时间相接，先收成一条 run，再两路 std::merge。
+                size_t runN = 0;
+                for (const auto &v : vs)
+                {
+                    runN += static_cast<size_t>(v.second - v.first);
+                }
+                collapsed.emplace_back();
+                auto &buf = collapsed.back();
+                buf.resize(runN);
+                Single *w = buf.data();
+                for (const auto &v : vs)
+                {
+                    w = std::copy(v.first, v.second, w);
+                }
+                runs.emplace_back(buf.data(), buf.data() + buf.size());
+            }
+            mergeSortedViews(runs, dest + carryCount);
+        };
+
+        auto runMerge = [&](Single *dest)
+        {
+            const auto mergeBegin = std::chrono::steady_clock::now();
+            mergeInto(dest);
+            const uint64_t mergeElapsed = nsSince(mergeBegin);
+            m_stats.mergeNs.fetch_add(mergeElapsed, std::memory_order_relaxed);
+            m_stats.extractNs.fetch_add(mergeElapsed, std::memory_order_relaxed);
+            releaseKept(true);
+        };
+
+        if (m_config.extractOnly)
+        {
+            if (m_extractHost.size() < total)
+            {
+                m_extractHost.resize(total);
+            }
+            runMerge(m_extractHost.data());
+            m_stats.totalSinglesReceived += taken;
+            m_stats.carrySinglesTotal.fetch_add(carryCount, std::memory_order_relaxed);
+            const auto carryBegin = std::chrono::steady_clock::now();
+            updateCarrySingles(std::span<const Single>(m_extractHost.data(), total),
+                               carryBound);
+            m_stats.extractNs.fetch_add(nsSince(carryBegin), std::memory_order_relaxed);
+            m_lastWatermark = carryBound;
+            m_stats.totalSinglesProcessed += taken;
+            return true;
+        }
+
+        if (preferSlot)
+        {
+            const auto slotBegin = std::chrono::steady_clock::now();
+            const size_t slotIdx = acquireInputSlot();
+            m_stats.slotWaitNs.fetch_add(nsSince(slotBegin), std::memory_order_relaxed);
+            if (slotIdx == std::numeric_limits<size_t>::max())
+            {
+                releaseKept(false);
+                return false;
+            }
+
+            if (total > m_inputSlotCapacity)
+            {
+                m_inputSlots[slotIdx].buffer.ResetPointer(total);
+            }
+            runMerge(m_inputSlots[slotIdx].buffer.Data());
+
+            m_stats.totalSinglesReceived += taken;
+            const uint64_t carryCutoff = carryCount == 0 ? 0 : m_lastWatermark;
+            m_stats.carrySinglesTotal.fetch_add(carryCount, std::memory_order_relaxed);
+            if (!submitOwnedSlot(slotIdx, total, carryCutoff, carryBound))
+            {
+                return false;
+            }
+            m_stats.totalSinglesProcessed += taken;
+            return true;
+        }
+
+        ensureStagingCapacity(total);
+        Single *merged = m_stageMerged.Data();
+        runMerge(merged);
+
+        m_stats.totalSinglesReceived += taken;
+        return processSinglesRange(std::span<Single>(merged, total), carryBound);
     }
 
     bool StreamingTimeAligner::processSinglesRange(std::span<Single> sorted,
@@ -1755,10 +2732,13 @@ namespace openpni::distributed::streaming
                 return true;
             }
 
-            processCoincidence(std::span<const Single>(sorted), carryCutoff);
-            if (m_processFailed.load(std::memory_order_acquire))
+            if (!m_config.extractOnly && !m_config.stealOnly)
             {
-                return false;
+                processCoincidence(std::span<const Single>(sorted), carryCutoff);
+                if (m_processFailed.load(std::memory_order_acquire))
+                {
+                    return false;
+                }
             }
             m_stats.totalSinglesProcessed += total - carryCount;
 
@@ -1833,6 +2813,17 @@ namespace openpni::distributed::streaming
                 }
             }
 
+            // 内核在大约 5e5–1e6 条时会 CUDA 非法访问。GPU 提交不得超过硬预算。
+            if (m_useMultiGpu && m_multiGpuEngine && n > hardCap)
+            {
+                n = nBudget;
+                n = extendSameTime(n);
+                if (n > hardCap + 64)
+                {
+                    n = hardCap;
+                }
+            }
+
             scratch.clear();
             scratch.reserve(carryCount + n);
             scratch.insert(scratch.end(), m_carrySingles.begin(), m_carrySingles.end());
@@ -1853,13 +2844,18 @@ namespace openpni::distributed::streaming
                     return false;
                 }
             }
-            else
+            else if (!m_config.extractOnly && !m_config.stealOnly)
             {
                 processCoincidence(std::span<const Single>(scratch), carryCutoff);
                 if (m_processFailed.load(std::memory_order_acquire))
                 {
                     return false;
                 }
+                updateCarrySingles(std::span<const Single>(scratch), carryBound);
+                m_lastWatermark = carryBound;
+            }
+            else
+            {
                 updateCarrySingles(std::span<const Single>(scratch), carryBound);
                 m_lastWatermark = carryBound;
             }
@@ -1966,24 +2962,45 @@ namespace openpni::distributed::streaming
             return;
         }
 
-        std::span<Listmode const> hostBuf;
         if (alreadyOnHost)
         {
-            hostBuf = coins;
-        }
-        else
-        {
-            m_coinHostBuffer.resize(coins.size());
-            openpni::detail::copy_from_device_to_host(m_coinHostBuffer.data(), coins);
-            hostBuf = std::span<Listmode const>(m_coinHostBuffer);
+            std::vector<Listmode> host(coins.begin(), coins.end());
+            saveCoincidenceResult(output, std::move(host));
+            return;
         }
 
-        // 估算本次写入字节数，用于分卷阈值判断（仅在 listmodeMaxFileSizeBytes > 0 时生效）
+        m_coinHostBuffer.resize(coins.size());
+        openpni::detail::copy_from_device_to_host(m_coinHostBuffer.data(), coins);
+        saveCoincidenceResult(output, std::move(m_coinHostBuffer));
+    }
+
+    void StreamingTimeAligner::saveCoincidenceResult(
+        openpni::distributed::coreio::RollingFileWriter<
+            openpni::distributed::coreio::ListmodeFileWriter,
+            openpni::distributed::coreio::ListmodeWriterOptions> &output,
+        std::vector<Listmode> &&coins)
+    {
+        if (coins.empty())
+        {
+            return;
+        }
+
         constexpr size_t ESTIMATED_LISTMODE_BYTES = 16;
-        const uint64_t sizeEstimate = hostBuf.size() * ESTIMATED_LISTMODE_BYTES;
+        const uint64_t sizeEstimate = coins.size() * ESTIMATED_LISTMODE_BYTES;
 
         std::lock_guard<std::mutex> lock(m_outputMutex);
-        output.AppendSegment(sizeEstimate, hostBuf, 0, 0);
+        if ((output.GetStatus() & openpni::io::IOStatus_DiskSpaceNotEnough) != 0)
+        {
+            LOG(ERROR) << "[StreamingTimeAligner] listmode output already failed; refusing further writes";
+            m_processFailed.store(true, std::memory_order_release);
+            return;
+        }
+        const bool ok = output.AppendSegment(sizeEstimate, std::move(coins), 0, 0);
+        if (!ok || (output.GetStatus() & openpni::io::IOStatus_DiskSpaceNotEnough) != 0)
+        {
+            LOG(ERROR) << "[StreamingTimeAligner] listmode AppendSegment failed";
+            m_processFailed.store(true, std::memory_order_release);
+        }
     }
 
     void StreamingTimeAligner::enqueueWrite(std::vector<Listmode> &&prompt,
@@ -2097,6 +3114,7 @@ namespace openpni::distributed::streaming
 
     void StreamingTimeAligner::writerLoop()
     {
+        constexpr size_t kMergeTargetPairs = 262144;
         while (true)
         {
             ListmodeWriteItem item;
@@ -2113,17 +3131,33 @@ namespace openpni::distributed::streaming
                 }
                 item = std::move(m_writeQueue.front());
                 m_writeQueue.pop_front();
+                while (!m_writeQueue.empty())
+                {
+                    auto &next = m_writeQueue.front();
+                    if (item.prompt.size() + next.prompt.size() > kMergeTargetPairs ||
+                        item.delay.size() + next.delay.size() > kMergeTargetPairs)
+                    {
+                        break;
+                    }
+                    item.prompt.insert(item.prompt.end(),
+                                       std::make_move_iterator(next.prompt.begin()),
+                                       std::make_move_iterator(next.prompt.end()));
+                    item.delay.insert(item.delay.end(),
+                                      std::make_move_iterator(next.delay.begin()),
+                                      std::make_move_iterator(next.delay.end()));
+                    m_writeQueue.pop_front();
+                }
             }
             m_writeCv.notify_one();
 
             const auto sinkBegin = std::chrono::steady_clock::now();
             if (!item.prompt.empty() && m_promptOpened)
             {
-                saveCoincidenceResult(m_promptWriter, item.prompt, true);
+                saveCoincidenceResult(m_promptWriter, std::move(item.prompt));
             }
             if (!item.delay.empty() && m_delayOpened)
             {
-                saveCoincidenceResult(m_delayWriter, item.delay, true);
+                saveCoincidenceResult(m_delayWriter, std::move(item.delay));
             }
             m_stats.sinkNs.fetch_add(nsSince(sinkBegin), std::memory_order_relaxed);
         }
@@ -2136,13 +3170,35 @@ namespace openpni::distributed::streaming
         const auto extractBegin = std::chrono::steady_clock::now();
         std::vector<Single> remaining;
 
+        // join steal 之后水位内数据应已在 deque；环只收安全边际内残留。
+
+        for (size_t i = 0; i < m_stolenLanes.size(); ++i)
+        {
+            while (auto chunk = m_stolenLanes[i]->tryPop())
+            {
+                const size_t n = chunk->remainingCount();
+                if (n > 0)
+                {
+                    const Single *p = chunk->remainingData();
+                    remaining.insert(remaining.end(), p, p + n);
+                }
+                if (chunk->poolOwned)
+                {
+                    m_nodeBuffers[i]->dropStolenChunk(std::move(*chunk));
+                }
+            }
+        }
+
         for (auto &buf : m_nodeBuffers)
         {
             while (auto chunk = buf->tryPop())
             {
-                remaining.insert(remaining.end(),
-                                 std::make_move_iterator(chunk->singles.begin()),
-                                 std::make_move_iterator(chunk->singles.end()));
+                const size_t n = chunk->remainingCount();
+                if (n > 0)
+                {
+                    const Single *p = chunk->remainingData();
+                    remaining.insert(remaining.end(), p, p + n);
+                }
             }
         }
 

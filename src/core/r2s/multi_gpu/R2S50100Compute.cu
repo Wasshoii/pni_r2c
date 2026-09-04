@@ -104,9 +104,6 @@ void R2S50100Compute::compute(const Data *data, Result *out)
             temp.size() * sizeof(Single),
             cudaMemcpyDeviceToDevice),
         "Failed to D2D copy singles off generator temp buffer");
-    openpni::detail::cuda_throw(
-        cudaStreamSynchronize(openpni::default_stream()),
-        "Failed to sync after singles D2D copy");
 }
 
 } // namespace openpni::distributed::r2s::multi_gpu

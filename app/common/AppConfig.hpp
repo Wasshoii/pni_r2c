@@ -169,7 +169,8 @@ namespace openpni::distributed::app
         std::string outputDir = "Data/result/Bdm2/pniCoin";
         uint16_t channelNum = 48;
         uint32_t crystalsPerChannel = 169 * 4;
-        uint64_t networkLatencyMarginPico = 5'000'000'000ULL;
+        // 额外 PET 水位裕量（皮秒）。默认 0，不是 RDMA 等包；getTotalSafetyMargin 仍加符合窗。
+        uint64_t networkLatencyMarginPico = 0;
         // 无事件时的最长空转等待；有数据推入会提前唤醒处理线程
         uint32_t processingIntervalMs = 200;
         size_t maxChunksPerNode = 100;

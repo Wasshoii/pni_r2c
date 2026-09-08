@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <iterator>
 #include <limits>
 #include <optional>
@@ -126,6 +127,50 @@ namespace openpni::distributed::streaming
                   << "  Allocations:  " << m_totalAllocations;
     }
 
+    SingleVectorPool::SingleVectorPool(size_t maxHeld)
+        : m_maxHeld(std::max<size_t>(1, maxHeld))
+    {
+    }
+
+    std::vector<Single> SingleVectorPool::acquire(size_t n)
+    {
+        std::vector<Single> out;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (!m_free.empty())
+            {
+                size_t pick = m_free.size() - 1;
+                for (size_t i = 0; i < m_free.size(); ++i)
+                {
+                    if (m_free[i].capacity() >= n)
+                    {
+                        pick = i;
+                        break;
+                    }
+                }
+                out = std::move(m_free[pick]);
+                m_free[pick] = std::move(m_free.back());
+                m_free.pop_back();
+            }
+        }
+        out.resize(n);
+        return out;
+    }
+
+    void SingleVectorPool::recycle(std::vector<Single> &&v)
+    {
+        v.clear();
+        if (v.capacity() == 0)
+        {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_free.size() < m_maxHeld)
+        {
+            m_free.push_back(std::move(v));
+        }
+    }
+
     void TimestampedSingleChunk::updateTimeRange()
     {
         if (remainingEmpty())
@@ -200,9 +245,27 @@ namespace openpni::distributed::streaming
         return minTime_pico < other.minTime_pico;
     }
 
-    NodeRingBuffer::NodeRingBuffer(uint16_t nodeId, size_t maxChunks, SharedMemoryPool *memoryPool)
-        : m_nodeId(nodeId), m_maxChunks(maxChunks), m_memoryPool(memoryPool)
+    NodeRingBuffer::NodeRingBuffer(uint16_t nodeId, size_t maxChunks, SharedMemoryPool *memoryPool,
+                                   SingleVectorPool *vectorPool)
+        : m_nodeId(nodeId), m_maxChunks(maxChunks), m_memoryPool(memoryPool), m_vectorPool(vectorPool)
     {
+    }
+
+    NodeRingBuffer::~NodeRingBuffer()
+    {
+        for (auto &chunk : m_buffer)
+        {
+            recycleSingles(std::move(chunk.singles));
+        }
+        m_buffer.clear();
+    }
+
+    void NodeRingBuffer::recycleSingles(std::vector<Single> &&v)
+    {
+        if (m_vectorPool)
+        {
+            m_vectorPool->recycle(std::move(v));
+        }
     }
 
     bool NodeRingBuffer::push(TimestampedSingleChunk &&chunk, uint32_t timeoutMs)
@@ -216,6 +279,7 @@ namespace openpni::distributed::streaming
                 LOG(WARNING) << "[NodeRingBuffer] Node " << m_nodeId
                              << " failed to allocate memory for chunk "
                              << chunk.chunkId;
+                recycleSingles(std::move(chunk.singles));
                 return false;
             }
         }
@@ -239,6 +303,7 @@ namespace openpni::distributed::streaming
                 }
                 LOG(WARNING) << "[NodeRingBuffer] Node " << m_nodeId
                              << " push timeout for chunk " << chunk.chunkId;
+                recycleSingles(std::move(chunk.singles));
                 return false;
             }
         }
@@ -249,6 +314,7 @@ namespace openpni::distributed::streaming
             {
                 m_memoryPool->release(chunkMemory);
             }
+            recycleSingles(std::move(chunk.singles));
             return false;
         }
 
@@ -267,16 +333,17 @@ namespace openpni::distributed::streaming
         m_bufferMemoryBytes += chunkMemory;
         m_lastPushTime = std::chrono::steady_clock::now();
 
-        if (m_buffer.empty() || chunk.minTime_pico >= m_buffer.back().minTime_pico)
+        // RDMA / next() 已保每节点到达序。按到达序追加；minTime 回退只记数，不重排。
+        if (!m_buffer.empty() && chunk.minTime_pico < m_buffer.back().minTime_pico)
         {
-            m_buffer.push_back(std::move(chunk));
-        }
-        else
-        {
-            auto it = std::lower_bound(m_buffer.begin(), m_buffer.end(), chunk);
-            m_buffer.insert(it, std::move(chunk));
             m_reorderedCount++;
+            LOG(WARNING) << "[NodeRingBuffer] Node " << m_nodeId
+                         << " time regression chunk " << chunk.chunkId
+                         << " minTime=" << chunk.minTime_pico
+                         << " prevMinTime=" << m_buffer.back().minTime_pico
+                         << " (append-only, not reordered)";
         }
+        m_buffer.push_back(std::move(chunk));
 
         m_cvNotEmpty.notify_one();
 
@@ -628,7 +695,7 @@ namespace openpni::distributed::streaming
     void NodeRingBuffer::dropStolenChunk(TimestampedSingleChunk &&chunk)
     {
         const size_t mem = chunk.memorySize();
-        chunk.singles = {};
+        recycleSingles(std::move(chunk.singles));
         if (m_memoryPool && mem > 0)
         {
             m_memoryPool->release(mem);
@@ -907,7 +974,8 @@ namespace openpni::distributed::streaming
     {
         const uint64_t coinWindow_ps = static_cast<uint64_t>(coinProtocol.timeWindow_ps);
         const uint64_t delayWindow_ps = static_cast<uint64_t>(coinProtocol.delayTime_ps);
-        // Watermark 与 singles 时间戳同为 100fs；ps 配置值需 ×10
+        // Watermark 与 singles 时间戳同为 100fs；ps 配置值需 ×10。
+        // networkLatencyMargin_pico 默认 0（不是 RDMA 等包）；符合窗始终保留。
         return networkLatencyMargin_pico * 10
                + std::max(coinWindow_ps, delayWindow_ps) * 10;
     }
@@ -964,19 +1032,6 @@ namespace openpni::distributed::streaming
                     std::chrono::steady_clock::now() - begin)
                     .count());
         }
-
-        bool earlier(const Single &a, const Single &b)
-        {
-            return a.timevalue_100fs < b.timevalue_100fs;
-        }
-
-        struct EarlierByTime
-        {
-            bool operator()(const Single &a, const Single &b) const noexcept
-            {
-                return a.timevalue_100fs < b.timevalue_100fs;
-            }
-        };
 
         size_t countLeTime(const Single *b, size_t n, uint64_t t)
         {
@@ -1118,56 +1173,172 @@ namespace openpni::distributed::streaming
             *lastT = tStop;
         }
 
-        // 把若干条各自有序的段归并成一条全局有序序列。段数等于节点数（通常 2），
-        // 每元素 k 次比较，比对整批 std::sort 的 O(n log n) 便宜得多。
-        void mergeSortedViews(const std::vector<std::pair<const Single *, const Single *>> &runs,
-                              Single *dst)
+        // 把若干条各自有序的段归并成一条全局有序序列。同节点多块不再先 memcpy 收成
+        // 一条 run：跨 chunk 游标 + galloping memcpy，dest 只写一次。
+        struct RunCursor
         {
-            if (runs.empty())
+            const std::pair<const Single *, const Single *> *runs = nullptr;
+            size_t n = 0;
+            size_t i = 0;
+            const Single *p = nullptr;
+
+            static RunCursor from(const std::vector<std::pair<const Single *, const Single *>> &v)
+            {
+                RunCursor c;
+                c.runs = v.data();
+                c.n = v.size();
+                if (c.n > 0)
+                {
+                    c.p = c.runs[0].first;
+                }
+                c.skipEmpty();
+                return c;
+            }
+
+            bool empty() const noexcept { return i >= n; }
+            uint64_t t() const noexcept { return p->timevalue_100fs; }
+            const Single *runEnd() const noexcept { return runs[i].second; }
+
+            void skipEmpty()
+            {
+                while (i < n && (p == nullptr || p >= runs[i].second))
+                {
+                    ++i;
+                    p = (i < n) ? runs[i].first : nullptr;
+                }
+            }
+
+            void consume(size_t k)
+            {
+                p += k;
+                skipEmpty();
+            }
+
+            size_t copyRest(Single *dst)
+            {
+                size_t out = 0;
+                while (!empty())
+                {
+                    const size_t nCopy = static_cast<size_t>(runEnd() - p);
+                    std::memcpy(dst + out, p, nCopy * sizeof(Single));
+                    out += nCopy;
+                    consume(nCopy);
+                }
+                return out;
+            }
+        };
+
+        void mergeTwoCursors(RunCursor a, RunCursor b, Single *dst)
+        {
+            Single *w = dst;
+            while (!a.empty() && !b.empty())
+            {
+                if (a.t() <= b.t())
+                {
+                    auto it = std::upper_bound(
+                        a.p, a.runEnd(), b.t(),
+                        [](uint64_t bound, const Single &s)
+                        { return bound < s.timevalue_100fs; });
+                    const size_t n = static_cast<size_t>(it - a.p);
+                    const size_t take = n == 0 ? 1 : n;
+                    std::memcpy(w, a.p, take * sizeof(Single));
+                    w += take;
+                    a.consume(take);
+                }
+                else
+                {
+                    auto it = std::lower_bound(
+                        b.p, b.runEnd(), a.t(),
+                        [](const Single &s, uint64_t bound)
+                        { return s.timevalue_100fs < bound; });
+                    const size_t n = static_cast<size_t>(it - b.p);
+                    const size_t take = n == 0 ? 1 : n;
+                    std::memcpy(w, b.p, take * sizeof(Single));
+                    w += take;
+                    b.consume(take);
+                }
+            }
+            w += a.copyRest(w);
+            b.copyRest(w);
+        }
+
+        void mergeRunLists(std::vector<std::vector<std::pair<const Single *, const Single *>>> &byNode,
+                           Single *dst)
+        {
+            std::vector<RunCursor> live;
+            live.reserve(byNode.size());
+            for (auto &runs : byNode)
+            {
+                if (runs.empty())
+                {
+                    continue;
+                }
+                live.push_back(RunCursor::from(runs));
+                if (live.back().empty())
+                {
+                    live.pop_back();
+                }
+            }
+            if (live.empty())
             {
                 return;
             }
-            if (runs.size() == 1)
+            if (live.size() == 1)
             {
-                std::copy(runs[0].first, runs[0].second, dst);
+                live[0].copyRest(dst);
                 return;
             }
-            if (runs.size() == 2)
+            if (live.size() == 2)
             {
-                std::merge(runs[0].first, runs[0].second,
-                           runs[1].first, runs[1].second, dst, EarlierByTime{});
+                mergeTwoCursors(live[0], live[1], dst);
                 return;
             }
 
-            std::vector<const Single *> cursor(runs.size());
-            for (size_t i = 0; i < runs.size(); ++i)
-            {
-                cursor[i] = runs[i].first;
-            }
-
-            size_t out = 0;
+            Single *w = dst;
             while (true)
             {
-                size_t pick = runs.size();
-                uint64_t pickTime = 0;
-                for (size_t i = 0; i < runs.size(); ++i)
+                size_t pick = live.size();
+                size_t second = live.size();
+                uint64_t pickT = 0;
+                uint64_t secondT = 0;
+                for (size_t i = 0; i < live.size(); ++i)
                 {
-                    if (cursor[i] >= runs[i].second)
+                    if (live[i].empty())
                     {
                         continue;
                     }
-                    const uint64_t t = cursor[i]->timevalue_100fs;
-                    if (pick == runs.size() || t < pickTime)
+                    const uint64_t t = live[i].t();
+                    if (pick == live.size() || t < pickT)
                     {
+                        second = pick;
+                        secondT = pickT;
                         pick = i;
-                        pickTime = t;
+                        pickT = t;
+                    }
+                    else if (second == live.size() || t < secondT)
+                    {
+                        second = i;
+                        secondT = t;
                     }
                 }
-                if (pick == runs.size())
+                if (pick == live.size())
                 {
-                    break;
+                    return;
                 }
-                dst[out++] = *cursor[pick]++;
+                if (second == live.size())
+                {
+                    live[pick].copyRest(w);
+                    return;
+                }
+                auto it = std::upper_bound(
+                    live[pick].p, live[pick].runEnd(), secondT,
+                    [](uint64_t bound, const Single &s)
+                    { return bound < s.timevalue_100fs; });
+                const size_t n = static_cast<size_t>(it - live[pick].p);
+                const size_t take = n == 0 ? 1 : n;
+                std::memcpy(w, live[pick].p, take * sizeof(Single));
+                w += take;
+                live[pick].consume(take);
             }
         }
     } // namespace
@@ -1349,7 +1520,8 @@ namespace openpni::distributed::streaming
         {
             m_stolenLanes.push_back(std::make_unique<StolenLane>());
             m_nodeBuffers.push_back(
-                std::make_unique<NodeRingBuffer>(i, config.maxChunksPerNode, poolPtr));
+                std::make_unique<NodeRingBuffer>(i, config.maxChunksPerNode, poolPtr,
+                                                 &m_ingestVectors));
             // 数据到达即唤醒处理线程与 steal 工人；是否真的开工由处理线程的触发判定决定，
             // 这样所有策略集中在一处。
             m_nodeBuffers.back()->setPushObserver(
@@ -1398,6 +1570,7 @@ namespace openpni::distributed::streaming
                   << " nodes, " << config.channelNum << " channels, multiGpu="
                   << (m_useMultiGpu ? "true" : "false")
                   << (config.extractOnly ? ", extractOnly" : "")
+                  << (config.extractMergePinned ? ", mergePinned" : "")
                   << (config.stealOnly ? ", stealOnly" : "")
                   << (m_useMultiGpu && m_multiGpuEngine
                           ? (", ring=" + std::to_string(m_multiGpuEngine->ringSize()) +
@@ -1488,6 +1661,14 @@ namespace openpni::distributed::streaming
             m_processorThread.join();
         }
 
+        for (size_t i = 0; i < m_stolenLanes.size(); ++i)
+        {
+            while (auto leftover = m_stolenLanes[i]->tryPop())
+            {
+                m_nodeBuffers[i]->dropStolenChunk(std::move(*leftover));
+            }
+        }
+
         if (m_useMultiGpu && m_multiGpuEngine)
         {
             m_multiGpuEngine->signalNoMoreData();
@@ -1513,6 +1694,16 @@ namespace openpni::distributed::streaming
             return m_memoryPool->getStatus();
         }
         return SharedMemoryPool::MemoryStatus{0, 0, 0.0};
+    }
+
+    std::vector<Single> StreamingTimeAligner::acquireIngestBuffer(size_t n)
+    {
+        return m_ingestVectors.acquire(n);
+    }
+
+    void StreamingTimeAligner::recycleIngestBuffer(std::vector<Single> &&v)
+    {
+        m_ingestVectors.recycle(std::move(v));
     }
 
     void StreamingTimeAligner::initializeOutput()
@@ -1706,8 +1897,8 @@ namespace openpni::distributed::streaming
             {
                 const uint64_t seq = m_wakeSeq.load(std::memory_order_acquire);
                 std::unique_lock<std::mutex> lock(m_wakeMutex);
-                m_wakeCv.wait_for(
-                    lock, std::chrono::milliseconds(1),
+                m_wakeCv.wait(
+                    lock,
                     [this, seq]()
                     {
                         return m_wakeSeq.load(std::memory_order_acquire) != seq ||
@@ -1771,8 +1962,8 @@ namespace openpni::distributed::streaming
                     break;
                 }
                 std::unique_lock<std::mutex> lock(m_stealMutex);
-                m_stealCv.wait_for(
-                    lock, std::chrono::milliseconds(1),
+                m_stealCv.wait(
+                    lock,
                     [this, buf]()
                     {
                         return m_stealStop.load(std::memory_order_acquire) ||
@@ -2064,12 +2255,15 @@ namespace openpni::distributed::streaming
         size_t n = 0;
         if (m_config.extractOnly && !m_config.stealOnly)
         {
-            // 不建 GPU 工人；抽取墙走 pageable m_extractHost，不占 pinned 槽。
             n = 0;
             const size_t cap = m_config.maxSegmentSingles == 0
                                    ? size_t{262144}
                                    : std::max<size_t>(2, m_config.maxSegmentSingles);
-            if (m_extractHost.size() < cap + 64)
+            if (m_config.extractMergePinned)
+            {
+                ensureStagingCapacity(cap + 64);
+            }
+            else if (m_extractHost.size() < cap + 64)
             {
                 m_extractHost.resize(cap + 64);
             }
@@ -2137,7 +2331,8 @@ namespace openpni::distributed::streaming
     }
 
     bool StreamingTimeAligner::submitOwnedSlot(size_t slotIdx, size_t count,
-                                               uint64_t carryCutoff, uint64_t carryBound)
+                                               uint64_t carryCutoff, uint64_t carryBound,
+                                               bool refreshCarry)
     {
         Single *data = m_inputSlots[slotIdx].buffer.Data();
         if (data == nullptr || count == 0)
@@ -2146,9 +2341,12 @@ namespace openpni::distributed::streaming
             return count == 0;
         }
         const std::span<const Single> batch(data, count);
-        const auto carryBegin = std::chrono::steady_clock::now();
-        updateCarrySingles(batch, carryBound);
-        m_stats.extractNs.fetch_add(nsSince(carryBegin), std::memory_order_relaxed);
+        if (refreshCarry)
+        {
+            const auto carryBegin = std::chrono::steady_clock::now();
+            updateCarrySingles(batch, carryBound);
+            m_stats.extractNs.fetch_add(nsSince(carryBegin), std::memory_order_relaxed);
+        }
         m_lastWatermark = carryBound;
 
         try
@@ -2586,11 +2784,13 @@ namespace openpni::distributed::streaming
 
         auto mergeInto = [&](Single *dest)
         {
+            // 内核能量筛选后会再 d_sortSinglesByTime，主机不必做全局 2-way merge。
+            // dest = carry 前缀 + 各节点有序 run 的 memcpy concat，只写一次。
             if (carryCount > 0)
             {
-                std::copy(m_carrySingles.begin(), m_carrySingles.end(), dest);
+                std::memcpy(dest, m_carrySingles.data(), carryCount * sizeof(Single));
             }
-            std::vector<std::vector<std::pair<const Single *, const Single *>>> byNode(nNodes);
+            Single *w = dest + carryCount;
             for (const auto &b : kept)
             {
                 const size_t n = std::min(b.takeN, b.chunk.remainingCount());
@@ -2599,40 +2799,62 @@ namespace openpni::distributed::streaming
                     continue;
                 }
                 const Single *p = b.chunk.singles.data() + b.chunk.remainingBegin();
-                byNode[b.node].emplace_back(p, p + n);
+                std::memcpy(w, p, n * sizeof(Single));
+                w += n;
             }
-            std::vector<std::pair<const Single *, const Single *>> runs;
-            std::vector<std::vector<Single>> collapsed;
-            runs.reserve(nNodes);
-            for (size_t i = 0; i < nNodes; ++i)
+        };
+
+        auto commitCarryFromSources = [&]()
+        {
+            const uint64_t overlap = overlapLength_100fs();
+            const uint64_t lo = carryBound > overlap ? carryBound - overlap : 0;
+            const uint64_t hi = carryBound;
+            std::vector<std::vector<std::pair<const Single *, const Single *>>> pieces;
+            auto addWindow = [&](const Single *b, size_t n)
             {
-                auto &vs = byNode[i];
-                if (vs.empty())
+                if (b == nullptr || n == 0)
+                {
+                    return;
+                }
+                const Single *first = std::lower_bound(
+                    b, b + n, lo,
+                    [](const Single &s, uint64_t bound)
+                    { return s.timevalue_100fs < bound; });
+                const Single *last = std::upper_bound(
+                    first, b + n, hi,
+                    [](uint64_t bound, const Single &s)
+                    { return bound < s.timevalue_100fs; });
+                if (first < last)
+                {
+                    pieces.emplace_back();
+                    pieces.back().emplace_back(first, last);
+                }
+            };
+            addWindow(m_carrySingles.data(), m_carrySingles.size());
+            for (const auto &b : kept)
+            {
+                const size_t n = std::min(b.takeN, b.chunk.remainingCount());
+                if (n == 0)
                 {
                     continue;
                 }
-                if (vs.size() == 1)
-                {
-                    runs.push_back(vs[0]);
-                    continue;
-                }
-                // 同节点多块时间相接，先收成一条 run，再两路 std::merge。
-                size_t runN = 0;
-                for (const auto &v : vs)
-                {
-                    runN += static_cast<size_t>(v.second - v.first);
-                }
-                collapsed.emplace_back();
-                auto &buf = collapsed.back();
-                buf.resize(runN);
-                Single *w = buf.data();
-                for (const auto &v : vs)
-                {
-                    w = std::copy(v.first, v.second, w);
-                }
-                runs.emplace_back(buf.data(), buf.data() + buf.size());
+                addWindow(b.chunk.singles.data() + b.chunk.remainingBegin(), n);
             }
-            mergeSortedViews(runs, dest + carryCount);
+            size_t nCarry = 0;
+            for (const auto &p : pieces)
+            {
+                for (const auto &r : p)
+                {
+                    nCarry += static_cast<size_t>(r.second - r.first);
+                }
+            }
+            std::vector<Single> next;
+            if (nCarry > 0)
+            {
+                next.resize(nCarry);
+                mergeRunLists(pieces, next.data());
+            }
+            m_carrySingles = std::move(next);
         };
 
         auto runMerge = [&](Single *dest)
@@ -2642,29 +2864,39 @@ namespace openpni::distributed::streaming
             const uint64_t mergeElapsed = nsSince(mergeBegin);
             m_stats.mergeNs.fetch_add(mergeElapsed, std::memory_order_relaxed);
             m_stats.extractNs.fetch_add(mergeElapsed, std::memory_order_relaxed);
+            const auto carryBegin = std::chrono::steady_clock::now();
+            commitCarryFromSources();
+            m_stats.extractNs.fetch_add(nsSince(carryBegin), std::memory_order_relaxed);
+            m_lastWatermark = carryBound;
             releaseKept(true);
         };
 
         if (m_config.extractOnly)
         {
-            if (m_extractHost.size() < total)
+            Single *dest = nullptr;
+            if (m_config.extractMergePinned)
             {
-                m_extractHost.resize(total);
+                ensureStagingCapacity(total);
+                dest = m_stageMerged.Data();
             }
-            runMerge(m_extractHost.data());
+            else
+            {
+                if (m_extractHost.size() < total)
+                {
+                    m_extractHost.resize(total);
+                }
+                dest = m_extractHost.data();
+            }
+            runMerge(dest);
             m_stats.totalSinglesReceived += taken;
             m_stats.carrySinglesTotal.fetch_add(carryCount, std::memory_order_relaxed);
-            const auto carryBegin = std::chrono::steady_clock::now();
-            updateCarrySingles(std::span<const Single>(m_extractHost.data(), total),
-                               carryBound);
-            m_stats.extractNs.fetch_add(nsSince(carryBegin), std::memory_order_relaxed);
-            m_lastWatermark = carryBound;
             m_stats.totalSinglesProcessed += taken;
             return true;
         }
 
         if (preferSlot)
         {
+            const uint64_t prevWatermark = m_lastWatermark;
             const auto slotBegin = std::chrono::steady_clock::now();
             const size_t slotIdx = acquireInputSlot();
             m_stats.slotWaitNs.fetch_add(nsSince(slotBegin), std::memory_order_relaxed);
@@ -2681,9 +2913,9 @@ namespace openpni::distributed::streaming
             runMerge(m_inputSlots[slotIdx].buffer.Data());
 
             m_stats.totalSinglesReceived += taken;
-            const uint64_t carryCutoff = carryCount == 0 ? 0 : m_lastWatermark;
+            const uint64_t carryCutoff = carryCount == 0 ? 0 : prevWatermark;
             m_stats.carrySinglesTotal.fetch_add(carryCount, std::memory_order_relaxed);
-            if (!submitOwnedSlot(slotIdx, total, carryCutoff, carryBound))
+            if (!submitOwnedSlot(slotIdx, total, carryCutoff, carryBound, false))
             {
                 return false;
             }
@@ -2693,10 +2925,22 @@ namespace openpni::distributed::streaming
 
         ensureStagingCapacity(total);
         Single *merged = m_stageMerged.Data();
+        const uint64_t prevWatermark = m_lastWatermark;
         runMerge(merged);
 
         m_stats.totalSinglesReceived += taken;
-        return processSinglesRange(std::span<Single>(merged, total), carryBound);
+        m_stats.carrySinglesTotal.fetch_add(carryCount, std::memory_order_relaxed);
+        const uint64_t carryCutoff = carryCount == 0 ? 0 : prevWatermark;
+        if (!m_config.extractOnly && !m_config.stealOnly)
+        {
+            processCoincidence(std::span<const Single>(merged, total), carryCutoff);
+            if (m_processFailed.load(std::memory_order_acquire))
+            {
+                return false;
+            }
+        }
+        m_stats.totalSinglesProcessed += taken;
+        return true;
     }
 
     bool StreamingTimeAligner::processSinglesRange(std::span<Single> sorted,
@@ -3217,7 +3461,9 @@ namespace openpni::distributed::streaming
 
         // 停机收尾：段时长硬下界在这里不适用，否则尾部数据永远处理不掉。
         // 各节点的段被简单串接，需要整体排序后才能拼在 carry 之后。
-        std::sort(remaining.begin(), remaining.end(), earlier);
+        std::sort(remaining.begin(), remaining.end(),
+                  [](const Single &a, const Single &b)
+                  { return a.timevalue_100fs < b.timevalue_100fs; });
 
         std::vector<Single> batch;
         batch.reserve(m_carrySingles.size() + remaining.size());

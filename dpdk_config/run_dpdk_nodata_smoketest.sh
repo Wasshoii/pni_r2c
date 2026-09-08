@@ -219,7 +219,7 @@ cat > "${MASTER_CFG}" <<EOF
     "outputDir": "Data/result/Bdm2/pniCoin/exp_nodata_dpdk",
     "channelNum": 48,
     "crystalsPerChannel": 676,
-    "networkLatencyMarginPico": 5000000000,
+    "networkLatencyMarginPico": 0,
     "processingIntervalMs": 200,
     "maxChunksPerNode": 100,
     "maxTotalMemoryBytes": 2147483648,

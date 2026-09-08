@@ -50,6 +50,7 @@ struct TimestampedSingleChunk {
 线程安全的环形缓冲区，每个节点一个。
 
 **特性：**
+- 每节点按到达序追加（RDMA `seq` / R2S `next()` 已保序）；`minTime` 回退只计数打日志，不重排
 - 支持单生产者多消费者模式
 - 阻塞式 push/pop 操作
 - 非阻塞式 tryPop 操作
@@ -60,7 +61,7 @@ struct TimestampedSingleChunk {
 核心时间对齐器，负责收集各节点数据并进行精确时间对齐。
 
 **工作流程：**
-1. 计算全局安全时间边界 = min(所有节点最小待处理时间) - 安全边距
+1. 计算全局安全时间边界 = min(所有节点已到达 `maxEventTime`) − 符合窗（及可选 `networkLatencyMargin`）
 2. 从各节点缓冲区提取 [上次边界, 当前安全边界] 范围内的数据
 3. 合并排序后进行符合计算
 4. 更新时间边界，重复
@@ -84,7 +85,8 @@ struct TimestampedSingleChunk {
 `maxSegmentSingles - carry`。每节点一条常驻 steal 线程把环里的**整块** swap 进有界 stolen
 deque（默认 8 个 chunk），**不按水位切前缀**。段边界、条数预算、半块 `upper_bound` 只在
 协调线程上做。协调线程从 N 个 deque 按全局时间前缀切预算；半块只推进 chunk 的 `consumed`
-游标，merge 只读 `[consumed, consumed+takeN)`，锁外 `std::merge` 写入 pinned 输入槽。
+游标，merge 只读 `[consumed, consumed+takeN)`，锁外 **memcpy concat** 写入 pinned 输入槽
+（不在主机做全局 2-way merge；内核会再按时间排序）。
 不要按节点各抽 `budget/N`：会破坏跨节点符合。
 硬下界仍优先于预算（超预算记 `oversizedSegments`）。Steal 相对 merge 超前：merge/GPU 在处理
 段 i 时，steal 已在把后续 chunk 搬进 deque。停机顺序：steal join → 协调线程抽空 deque 并
@@ -130,8 +132,11 @@ carry 占比与边界单调性：段跨度小于重叠窗时 carry 占比趋近 
    锁外归并进 pinned 槽（`extractNs` = 切点/归并/carry；其中归并另记 `mergeNs`，steal
    工人记 `stealNs`）、`updateCarrySingles`（仍用主机数据、在 `submit` 之前），然后把有主 pinned 槽交给 `submitSingles`。等输入槽记 `slotWaitNs`。
    槽活到对应的 `nextResult()`。`extractOnly` 仍走 steal→merge→carry→推进水位，但不
-   `submitSingles`、不建 GPU 工人；归并写入 pageable `m_extractHost`，避免 pinned 写带宽
-   污染抽取墙。未到齐时不得把 `lastWatermark` 跳到全水位。
+   `submitSingles`、不建 GPU 工人；默认归并写入 pageable `m_extractHost`。`--merge-pinned`
+   改走 pinned `m_stageMerged`，用来测生产写出墙。热路径对主机全局有序不再做 2-way
+   `std::merge`：carry 前缀 + 各节点有序 run **memcpy concat** 只写 dest 一次（内核能量
+   筛选后会再 `d_sortSinglesByTime`）。Carry 仍按 `[W-overlap, W]` 从各有序源二分切出再
+   小归并。未到齐时不得把 `lastWatermark` 跳到全水位。
 3. **GPU 工人**：`SPSCProcessor` 谁空谁接下一段（负载均衡）。时间顺序只由 submit 序和 `next()`
    序保证，不把 GPU i 绑死在第 i 段。
 4. **收回线程**：按提交序 `nextResult()`，把 prompt/delay listmode 拷进有界写队列后立刻释放
@@ -183,20 +188,21 @@ Worker 侧唯一发送入口（`sendSingles` / `acquireTxSlot` 路径）。
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `alignmentWindow_pico` | 200ms | 对齐窗口大小 |
-| `safetyMargin_pico` | 10ms | 安全边距，补偿网络延迟 |
+| `networkLatencyMargin_pico` | 0 | 额外 PET 水位裕量（皮秒）。**不是**墙钟等包 / RDMA 乱序等待。有序到达后再扣只增加持有量；排查块内时间回退时可再打开 |
 | `maxChunksPerNode` | 100 | 每节点最大缓冲块数 |
 | `processingIntervalMs` | 200ms | 无 push 事件时的最长空转等待（不是处理周期） |
 | `maxSegmentSingles` | 262144 | 单段 singles 上限，**含 carry**。按显存与内核上限设置，0=不限制（不推荐） |
 | `minSegmentSingles` | 65536 | 攒批软下界，压力或超时可突破。0=不攒批 |
 | `minSegmentOverlapFactor` | 4 | 段跨度硬下界，单位是重叠窗个数。压力与超时都不能突破 |
 | `bufferHighWaterRatio` | 0.80 | 任一节点缓冲或内存池占用超过此比例即立刻触发 |
-| `maxProcessLatencyMs` | 50ms | 延迟兜底触发，0=关闭 |
+| `maxProcessLatencyMs` | 50ms | 延迟兜底**触发**切段（仍不得越过水位），0=关闭。不是网络等待 |
 | `listmodeWriteQueueCap` | 32 | 写队列深度，与 GPU `ring_size` 脱钩。队列满只背压，不丢已算出的 pair |
 | `listmodeIoQueueSize` | 8 | Listmode/Unimode 两层 IO 环深度 |
 | `nodeStallWarnMs` | 1000ms | 「高水位但水位线不前进」的告警限流间隔 |
 | `allowStalledNodeBypass` | false | 开启后静默超时的节点会被剔出水位线计算（对齐降级） |
 | `nodeStallTimeoutMs` | 5000ms | 仅在 `allowStalledNodeBypass=true` 时生效 |
+
+`getTotalSafetyMargin()` = `networkLatencyMargin_pico` + `max(timeWindow, delayTime)`（均转为 100fs）。符合窗始终保留，与网络裕量拆开。
 
 `ProcessingStatistics` 相应新增：`triggerByWatermark / triggerByPressure / triggerByDeadline
 / heldByMinDuration / watermarkStallEvents / degradedSegments / oversizedSegments /

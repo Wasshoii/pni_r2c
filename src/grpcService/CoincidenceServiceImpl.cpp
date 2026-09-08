@@ -153,7 +153,7 @@ namespace openpni::distributed::streaming
                 nodeId, chunkId, computerClockMs, durationMs, std::vector<Single>{}, errorMessage);
         }
 
-        std::vector<Single> host(singlesCount);
+        std::vector<Single> host = m_aligner.acquireIngestBuffer(singlesCount);
         unpackBinaryToSingles(singlesPacked, singlesCount, host.data());
         return pushTimestampedChunk(
             nodeId, chunkId, computerClockMs, durationMs, std::move(host), errorMessage);

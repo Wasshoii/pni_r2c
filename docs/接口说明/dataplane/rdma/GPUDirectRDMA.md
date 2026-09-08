@@ -42,12 +42,12 @@ flowchart LR
   next["next 仍按 submit 序"]
   d2d["D2D 进该卡 device TX 槽"]
   wr["单线程 post_send seq++"]
-  align["NodeRingBuffer 按 minTime 插入"]
+  align["NodeRingBuffer 按到达序追加"]
   wm["watermark = min节点maxTime"]
   submit --> gpus --> next --> d2d --> wr --> align --> wm
 ```
 
-有序性与档 1 相同：符合水位线能吸收缓冲内的大致乱序（按 `minTime_pico` 插入），**覆盖不了整段 raw 颠倒发送**。晚段先到会把该节点 `maxEventTime` 推到未来，水位线可能越过尚未到达的较早段，符合配对会丢。直写 GPU 槽 **不改变** 这条序。
+有序性与档 1 相同：`NodeRingBuffer` 按到达序追加（RDMA `seq` 已保序）；**覆盖不了整段 raw 颠倒发送**。晚段先到会把该节点 `maxEventTime` 推到未来，水位线可能越过尚未到达的较早段，符合配对会丢。直写 GPU 槽 **不改变** 这条序。水位线与 RX 槽保持双缓冲，见 [数据面通路现状与评价.md](../design/数据面通路现状与评价.md) §3.5。
 
 ## 潜在风险
 

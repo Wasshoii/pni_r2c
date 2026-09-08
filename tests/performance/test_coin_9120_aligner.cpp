@@ -61,6 +61,7 @@ namespace
         size_t pipelineDepth = 0;
         bool writeLmf = true;
         bool extractOnly = false;
+        bool extractMergePinned = false;
         bool stealOnly = false;
         bool helpOnly = false;
     };
@@ -88,6 +89,7 @@ namespace
             << "  --write-lmf              Write prompt/delay LMF (default; counted as sink wall)\n"
             << "  --no-write-lmf           Skip LMF write (kernel-only overlap measurement)\n"
             << "  --extract-only           Steal+merge+carry, skip GPU (implies --no-write-lmf)\n"
+            << "  --merge-pinned           extract-only: merge into pinned host (production write path)\n"
             << "  --steal-only             Steal into deques then drop, no merge (implies --no-write-lmf)\n"
             << "  --help                   Show this help\n";
     }
@@ -189,6 +191,13 @@ namespace
             }
             if (arg == "--extract-only")
             {
+                opts.extractOnly = true;
+                opts.writeLmf = false;
+                continue;
+            }
+            if (arg == "--merge-pinned")
+            {
+                opts.extractMergePinned = true;
                 opts.extractOnly = true;
                 opts.writeLmf = false;
                 continue;
@@ -444,6 +453,7 @@ int main(int argc, char **argv)
         "/tmp/r2c_coin_9120_perf", coinProtocol);
     alignerConfig.enableMultiGpu = !opts.extractOnly && !opts.stealOnly;
     alignerConfig.extractOnly = opts.extractOnly;
+    alignerConfig.extractMergePinned = opts.extractMergePinned;
     alignerConfig.stealOnly = opts.stealOnly;
     alignerConfig.savePrompt = opts.writeLmf;
     alignerConfig.saveDelay = opts.writeLmf;
@@ -482,6 +492,7 @@ int main(int argc, char **argv)
               << "CUDA devices        : " << gpuCount << '\n'
               << "enableMultiGpu      : " << (alignerConfig.enableMultiGpu ? "true" : "false") << '\n'
               << "extract-only        : " << (opts.extractOnly ? "true" : "false") << '\n'
+              << "merge-pinned        : " << (opts.extractMergePinned ? "true" : "false") << '\n'
               << "steal-only          : " << (opts.stealOnly ? "true" : "false") << '\n'
               << "write LMF           : " << (opts.writeLmf ? "true" : "false") << '\n'
               << "coinPipelineDepth   : " << alignerConfig.coinPipelineDepth
@@ -642,6 +653,8 @@ int main(int argc, char **argv)
               << "Input bytes            : " << inputBytes << '\n'
               << "Input traffic          : " << static_cast<double>(inputGib) << " Gib\n"
               << "Combined throughput    : " << gibCombined << " Gib/s\n"
+              << "60 Gib/s target        : "
+              << (gibCombined >= 60.0 ? "met" : "below") << '\n'
               << "Coin-kernel throughput : " << gibKernel << " Gib/s\n"
               << "Batch rate             : " << batchPerS << " batch/s\n"
               << "Singles rate           : " << singlesPerS << " singles/s\n"

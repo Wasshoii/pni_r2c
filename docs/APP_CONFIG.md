@@ -147,6 +147,6 @@
 ### acquisitionControl
 - **本阶段忽略**。若 `enabled=true` 会 warn 并强制关闭。采集主控不再是 coin 的默认职责。
 
-旧 `coinMaster` / `aligner` 段仍可解析，便于过渡。
+旧 `coinMaster` / `aligner` 段仍可解析，便于过渡。`aligner.networkLatencyMarginPico` 默认 0（皮秒）：不是 RDMA 等包，只是可选的额外 PET 水位裕量；`getTotalSafetyMargin` 仍加上符合窗 `max(timeWindow, delayTime)`。
 
 备注：环境变量仍可作为覆盖手段（如 PNI_R2C_RAW_OUTPUT_ROOTS/PNI_R2C_RAW_SHARD_STRATEGY），但建议以 JSON 为主配置来源。

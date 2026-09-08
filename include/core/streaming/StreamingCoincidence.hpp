@@ -71,6 +71,21 @@ namespace openpni::distributed::streaming
         std::condition_variable m_cvAvailable;
     };
 
+    // ingest / drop 热路径复用 vector 容量，避免每槽 new 262k×16B。
+    class SingleVectorPool
+    {
+    public:
+        explicit SingleVectorPool(size_t maxHeld = 64);
+
+        std::vector<Single> acquire(size_t n);
+        void recycle(std::vector<Single> &&v);
+
+    private:
+        size_t m_maxHeld;
+        mutable std::mutex m_mutex;
+        std::vector<std::vector<Single>> m_free;
+    };
+
     struct TimestampedSingleChunk
     {
         uint16_t nodeId = 0;
@@ -115,7 +130,9 @@ namespace openpni::distributed::streaming
     {
     public:
         explicit NodeRingBuffer(uint16_t nodeId, size_t maxChunks = 100,
-                                SharedMemoryPool *memoryPool = nullptr);
+                                SharedMemoryPool *memoryPool = nullptr,
+                                SingleVectorPool *vectorPool = nullptr);
+        ~NodeRingBuffer();
 
         bool push(TimestampedSingleChunk &&chunk, uint32_t timeoutMs = 0);
 
@@ -153,6 +170,7 @@ namespace openpni::distributed::streaming
         uint64_t getMaxEventTime() const;
 
         size_t getOutOfOrderCount() const;
+        // minTime 相对队尾回退次数。热路径按到达序追加，回退不重排。
         size_t getReorderedCount() const;
 
         bool empty() const;
@@ -174,9 +192,11 @@ namespace openpni::distributed::streaming
         void setPushObserver(std::function<void()> observer);
 
     private:
+        void recycleSingles(std::vector<Single> &&v);
         uint16_t m_nodeId;
         size_t m_maxChunks;
         SharedMemoryPool *m_memoryPool;
+        SingleVectorPool *m_vectorPool = nullptr;
         mutable std::mutex m_mutex;
         std::condition_variable m_cvNotEmpty;
         std::condition_variable m_cvNotFull;
@@ -195,8 +215,10 @@ namespace openpni::distributed::streaming
 
     struct TimeAlignerConfig
     {
-        // 网络延迟安全边际，单位皮秒（与 CoincidenceProtocol 一致）；getTotalSafetyMargin 内转为 100fs
-        uint64_t networkLatencyMargin_pico = 5'000'000'000;
+        // 额外 PET 水位裕量（皮秒；getTotalSafetyMargin 内 ×10 转为 100fs）。
+        // 默认 0：不是墙钟等包。RDMA 每节点有序到达后，再扣若干毫秒只增加持有量。
+        // 水位仍会减去符合窗 max(timeWindow, delayTime)。排查块内时间回退时可再打开。
+        uint64_t networkLatencyMargin_pico = 0;
 
         openpni::CoincidenceProtocol coinProtocol; // Coincidence 协议配置，包含时间窗口、能量窗口等参数
         uint16_t channelNum = 0;                   // 总通道数
@@ -263,6 +285,9 @@ namespace openpni::distributed::streaming
         size_t stolenDequeCap = 8;
         // 只抽不核：协调线程仍 steal→merge→carry→推进水位，不建 GPU 工人、不 submit。
         bool extractOnly = false;
+        // extract-only 时归并写入 pinned（cudaHostAlloc）而不是 pageable vector，
+        // 用来测生产 merge→H2D 槽的写出墙。对 extractOnly=false 无效果。
+        bool extractMergePinned = false;
         // 诊断：steal 进 deque 后直接丢弃，不 merge。用来拆锁/swap 墙和 memcpy 墙。
         bool stealOnly = false;
 
@@ -332,6 +357,9 @@ namespace openpni::distributed::streaming
 
         SharedMemoryPool::MemoryStatus getMemoryStatus() const;
 
+        std::vector<Single> acquireIngestBuffer(size_t n);
+        void recycleIngestBuffer(std::vector<Single> &&v);
+
     private:
         // 处理循环的一轮决策结果。
         struct SegmentDecision
@@ -388,7 +416,7 @@ namespace openpni::distributed::streaming
         size_t acquireInputSlot();
         void releaseInputSlot(size_t idx);
         bool submitOwnedSlot(size_t slotIdx, size_t count, uint64_t carryCutoff,
-                             uint64_t carryBound);
+                             uint64_t carryBound, bool refreshCarry = true);
         bool submitCopiedSpan(std::span<const Single> sorted, uint64_t carryCutoff,
                               uint64_t carryBound);
         void enqueueWrite(std::vector<Listmode> &&prompt, std::vector<Listmode> &&delay);
@@ -417,6 +445,7 @@ namespace openpni::distributed::streaming
         TimeAlignerConfig m_config;
         size_t m_nodeCount;
 
+        SingleVectorPool m_ingestVectors;
         std::vector<std::unique_ptr<NodeRingBuffer>> m_nodeBuffers;
         std::vector<std::unique_ptr<StolenLane>> m_stolenLanes;
         std::atomic<uint64_t> m_publishedWatermark{0};

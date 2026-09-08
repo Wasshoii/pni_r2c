@@ -37,7 +37,7 @@ flowchart TB
 | 本地 TX 暂存环 | worker | **2** × `slotStride`（默认 4 MiB，约 8 MiB） | `connect()` 时 `setupTxArena()` | 填 packed singles 的源；RoCE 下整块 `ibv_reg_mr`。**不用 hugepage**，避免与同机 DPDK 抢 hugetlb |
 | 远端接收环 | coin，每 worker 一份 | **64** × 4 MiB + notify + `consumerSeq` | OpenDataPlane `ensureSession` | WRITE 目的地，不是 worker 填数据的地方 |
 
-TX 用 [HugepageArena](HugepageArena.md) 分配普通 mmap（`preferHugePages=false`）后 `ibv_reg_mr`。CoincidenceClient 再对整块 `cudaHostRegister`，device span 用消费线程专用 non-blocking stream `cudaMemcpyAsync` 直写已注册槽。credit 镜像是另开的 4 KiB MR，供 coin 把 `consumerSeq` WRITE 回来。
+TX 用 [HugepageArena](HugepageArena.md) 分配普通 mmap（`preferHugePages=false`）后 `ibv_reg_mr`。CoincidenceClient 再对整块 `cudaHostRegister`（RoCE 下失败则握手失败）。device span 用消费线程按 GPU 缓存的 non-blocking stream `cudaMemcpyAsync` 直写已注册槽。credit 镜像是另开的 4 KiB MR，供 coin 把 `consumerSeq` WRITE 回来。
 
 ```
 Coin SlotRing:
@@ -62,11 +62,11 @@ RoCE 热路径（`app_acq_r2s_node`）：
 2. `fillRoceTxAndCommit` 按 `maxSinglesPerSlot(stride)` 切片（同一 `chunkId`）：
    - 若 PAUSE 则在此等待。
    - `acquireTxSlot`：在 `m_txBusy` 里找空槽；没有则 poll 本端 send CQ 回收已完成 WRITE，忙等后再短睡。
-   - 源为 **device** 时（50100 热路径）用每节点专用 `cudaStreamNonBlocking` `cudaMemcpyAsync` 进 `lease.payload` + event，管线深 `min(4, txSlotCount)`：等槽 N 的 event 后 remap 并 `commitTxSlot`，同时槽 N+1 的 D2H 已在飞。该 copy stream **不**挡住同卡下一段 kernel。源为 host 时 `memcpy`。失败路径 `abortTxSlot` 前 `cudaStreamSynchronize`。
+   - 源为 **device** 时（50100 热路径）按 GPU 缓存 `cudaStreamNonBlocking`（切卡不拆掉其它卡的 stream）`cudaMemcpyAsync` 进 `lease.payload` + event，管线深等于 `txSlotCount`（默认 2；上机可试 4）：等槽 N 的 event 后 remap 并 `commitTxSlot`，同时槽 N+1 的 D2H 已在飞。该 copy stream **不**挡住同卡下一段 kernel。源为 host 时 `memcpy`。失败路径 `abortTxSlot` 前同步**本段 GPU** 的 copy stream。
    - 当场 `commitTxSlot`：等 credit，写 `seq = producerSeq+1`，`WRITE_WITH_IMM` 到远端 `(producerSeq % slotCount)`。
    - TX 槽保持 busy，直到本端 send CQ 完成才回收（与下一槽 D2H ping-pong）。
 
-因此：**热路径 span 是 device；D2H 在消费线程专用 copy stream 上直写 TX。** 先预分配 2 个 TX 槽，同一条有序线程上 `seq++` 后立即发出。不经过 pending 队列。默认仍 **2×4 MiB、非大页**。结果环深度 ≥2 时，卡上算槽 B，消费线程对槽 A 做 D2H。
+因此：**热路径 span 是 device；D2H 在消费线程按 GPU 常驻 copy stream 上直写 TX。** 先预分配 2 个 TX 槽，同一条有序线程上 `seq++` 后立即发出。不经过 pending 队列。默认仍 **2×4 MiB、非大页**。结果环深度 ≥2 时，卡上算槽 B，消费线程对槽 A 做 D2H。
 
 **禁止 GPU worker 自己 `acquireTxSlot`。** 多卡完成序 ≠ 段序，会打乱 QP `seq` 与符合水位线。当前接线满足：填槽只发生在 R2S `consumerLoop`。
 
@@ -77,7 +77,7 @@ InProcess：调用线程里 `sendPackedSingles`，一次 `memcpy` 进同进程 S
 | 线程 | 职责 |
 |------|------|
 | 主线程 | `RegisterNode` / `OpenDataPlane` / `WaitForStart`，然后起 heartbeat |
-| R2S `consumerLoop` | 有序 `next()` + 专用 copy stream D2H 填 TX + `commitTxSlot`。可被 PAUSE、无空 TX 槽、远端 credit 挡住 |
+| R2S `consumerLoop` | 有序 `next()` + 按 GPU 选用常驻 copy stream D2H 填 TX + `commitTxSlot`。可被 PAUSE、无空 TX 槽、远端 credit 挡住 |
 | `heartbeatLoop` | gRPC Heartbeat；PAUSE/STOP 经响应下发 |
 
 默认 2 个 TX 槽：一槽在飞 WRITE，一槽在填，使 copy-stream D2H 与 NIC DMA 重叠，且不在 credit=0 时囤已拷数据。`maxPendingChunks` JSON 仍解析，热路径忽略。
@@ -97,7 +97,7 @@ InProcess：调用线程里 `sendPackedSingles`，一次 `memcpy` 进同进程 S
 - 每 session 的 `m_nextExpectedNotifySeq` 从 1 起。IMM 只作唤醒：`seqToImm(expected) == imm`；权威序号是 64-bit expected / 槽头。只 ingest 下一期望槽，然后 `++expected`。
 - ingest 失败（如 aligner 满）时记下 `pendingReady`，下次 `pollOnce` **先按 expected 重试该槽**，不依赖第二次 IMM。RoCE Recv CQ 一次取 1 条，避免 ingest 失败时把后续 IMM 从 CQ 抽走。成功前不推进 credit。
 - 多槽逻辑块靠同一 `chunkId` + SOF/EOF/PARTIAL。`CoincidenceServiceImpl::ingestRdmaSlot` 在 poller 线程里组装：单槽（或 SOF+EOF）unpack 进 TimeAligner；跨槽 memcpy 进 `m_partialByNode`，EOF 时 move 再 `push`。
-- ingest 成功后 `consumerSeq++`。RoCE 再把这 8 字节 WRITE 到 worker 的 `creditMirror`。sender 据此反压，避免覆盖尚未 ingest 的远端槽。
+- ingest 成功后 `consumerSeq++`。RoCE 再把这 8 字节 WRITE 到 worker 的 `creditMirror`（每 8 次或 SQ 接近 `maxSendWr` 才 signaled）。sender 据此反压，避免覆盖尚未 ingest 的远端槽。
 - 节点之间没有跨 QP 的槽序。跨节点对齐靠 TimeAligner 的时间水位，不靠 RDMA `seq`。
 
 `SlotChunkView.singlesPacked` 指向环内内存，**仅在 ingest 回调返回前有效**。

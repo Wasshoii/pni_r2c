@@ -229,6 +229,9 @@ void RdmaConnection::destroy()
     }
     m_dev = nullptr;
     m_sendOutstanding = 0;
+    m_sendSqOccupancy = 0;
+    m_unsignaledSinceSignal = 0;
+    m_signaledBatchSizes.clear();
     m_postedRecvs = 0;
     m_maxSendWr = 0;
     m_maxRecvWr = 0;
@@ -380,9 +383,19 @@ bool RdmaConnection::postWriteCommon(const void *localAddr, uint32_t length, uin
     {
         return false;
     }
-    if (m_sendOutstanding >= m_maxSendWr - 1)
+    // Unsignaled WRs occupy the SQ but do not generate CQEs. Force a signal before
+    // the queue fills, otherwise drainSendCompletions cannot make progress.
+    if (!signaled && m_maxSendWr > 0 && m_sendSqOccupancy >= m_maxSendWr - 8)
     {
-        if (!drainSendCompletions())
+        signaled = true;
+    }
+    if (m_sendSqOccupancy >= m_maxSendWr - 1)
+    {
+        if (m_sendOutstanding <= 0)
+        {
+            signaled = true;
+        }
+        else if (!drainSendCompletions())
         {
             return false;
         }
@@ -412,9 +425,16 @@ bool RdmaConnection::postWriteCommon(const void *localAddr, uint32_t length, uin
         LOG(ERROR) << "ibv_post_send RDMA_WRITE failed";
         return false;
     }
+    ++m_sendSqOccupancy;
     if (signaled)
     {
+        m_signaledBatchSizes.push_back(m_unsignaledSinceSignal + 1);
+        m_unsignaledSinceSignal = 0;
         ++m_sendOutstanding;
+    }
+    else
+    {
+        ++m_unsignaledSinceSignal;
     }
     return true;
 }
@@ -477,9 +497,25 @@ int RdmaConnection::pollCq(RdmaWorkCompletion *out, int maxCompletions)
         out[i].isRecv = (wcs[i].opcode == IBV_WC_RECV ||
                          wcs[i].opcode == IBV_WC_RECV_RDMA_WITH_IMM);
         out[i].hasImm = (wcs[i].wc_flags & IBV_WC_WITH_IMM) != 0;
-        if (!out[i].isRecv && m_sendOutstanding > 0)
+        if (!out[i].isRecv)
         {
-            --m_sendOutstanding;
+            if (m_sendOutstanding > 0)
+            {
+                --m_sendOutstanding;
+            }
+            if (!m_signaledBatchSizes.empty())
+            {
+                m_sendSqOccupancy -= m_signaledBatchSizes.front();
+                m_signaledBatchSizes.pop_front();
+                if (m_sendSqOccupancy < 0)
+                {
+                    m_sendSqOccupancy = 0;
+                }
+            }
+            else if (m_sendSqOccupancy > 0)
+            {
+                --m_sendSqOccupancy;
+            }
         }
         if (out[i].isRecv && m_postedRecvs > 0)
         {

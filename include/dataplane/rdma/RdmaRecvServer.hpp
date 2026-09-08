@@ -100,6 +100,7 @@ private:
     uint64_t m_inprocessHandle = 0;
     uint64_t m_nextExpectedNotifySeq = 1;
     bool m_pendingReady = false;
+    int m_creditWritesSinceSignal = 0;
     std::atomic<bool> m_ready{false};
 };
 
@@ -150,6 +151,7 @@ private:
     std::unordered_map<uint32_t, std::shared_ptr<RdmaNodeRecvSession>> m_sessions;
     std::thread m_poller;
     std::atomic<bool> m_running{false};
+    bool m_pollerSessionsDirty = true;
 };
 
 } // namespace openpni::distributed::dataplane::rdma

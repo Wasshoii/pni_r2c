@@ -38,7 +38,7 @@ int pollCq(RdmaWorkCompletion *out, int maxCompletions);
 ```
 
 - QP 状态：Init → RTR → RTS（`connectTo` 或分步 `transitionTo*`）。
-- 热路径发送用 `WRITE_WITH_IMM`；imm 携带 `seq` 的 32-bit wrap。
+- 热路径发送用 `WRITE_WITH_IMM`；imm 携带 `seq` 的 32-bit wrap。payload WRITE 全部 signaled（TX 槽靠 CQ 回收）。credit WRITE 可由上层选择 unsignaled；`RdmaConnection` 跟踪全部 SQ 占用，接近 `maxSendWr` 时强制 signaled，避免 unsignaled 塞满发送队列。
 - `RdmaWorkCompletion`：`wrId`、`immData`、`status`、`isRecv`、`hasImm`。
 
 本页不描述 verbs 寄存器。失败时函数返回 false，由 sender/recv 记录日志。

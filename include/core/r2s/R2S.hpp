@@ -489,6 +489,8 @@ namespace openpni::distributed::r2s
     private:
         bool prepareChannelsToProcess();
 
+        bool buildLocalChannelMaps();
+
         bool prepareGenerators();
 
         bool prepareOutput();

@@ -224,10 +224,22 @@ bool RdmaNodeRecvSession::postCreditWrite()
     {
         return false;
     }
+    constexpr int kCreditSignalEvery = 8;
+    ++m_creditWritesSinceSignal;
+    bool signaled = m_creditWritesSinceSignal >= kCreditSignalEvery;
+    if (m_conn->maxSendWr() > 0 &&
+        m_conn->sendSqOccupancy() >= m_conn->maxSendWr() - 8)
+    {
+        signaled = true;
+    }
+    if (signaled)
+    {
+        m_creditWritesSinceSignal = 0;
+    }
     return m_conn->postWrite(
         seq, static_cast<uint32_t>(sizeof(uint64_t)), m_mr->lkey,
         m_remoteEp.creditMirrorAddr, m_remoteEp.creditMirrorRkey,
-        /*wrId=*/0x10000ull, /*signaled=*/true);
+        /*wrId=*/0x10000ull, signaled);
 }
 
 bool RdmaNodeRecvSession::releaseSlot(uint32_t slotIndex)
@@ -520,6 +532,7 @@ std::shared_ptr<RdmaNodeRecvSession> RdmaRecvServer::ensureSession(uint32_t node
     }
 
     m_sessions.emplace(nodeId, session);
+    m_pollerSessionsDirty = true;
     return session;
 }
 
@@ -572,20 +585,26 @@ void RdmaRecvServer::stop()
         session->close();
     }
     m_sessions.clear();
+    m_pollerSessionsDirty = true;
 }
 
 void RdmaRecvServer::pollLoop()
 {
+    std::vector<std::shared_ptr<RdmaNodeRecvSession>> sessions;
     while (m_running.load(std::memory_order_acquire))
     {
-        std::vector<std::shared_ptr<RdmaNodeRecvSession>> sessions;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            sessions.reserve(m_sessions.size());
-            for (auto &[id, session] : m_sessions)
+            if (m_pollerSessionsDirty)
             {
-                (void)id;
-                sessions.push_back(session);
+                sessions.clear();
+                sessions.reserve(m_sessions.size());
+                for (auto &[id, session] : m_sessions)
+                {
+                    (void)id;
+                    sessions.push_back(session);
+                }
+                m_pollerSessionsDirty = false;
             }
         }
         int total = 0;

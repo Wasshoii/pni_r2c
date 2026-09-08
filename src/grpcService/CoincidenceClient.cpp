@@ -251,10 +251,13 @@ namespace openpni::distributed::streaming
             m_rdmaSender->setTxCudaRegistered(registered);
             if (!registered)
             {
-                LOG(WARNING) << "cudaHostRegister TX arena failed; device D2H into slots "
-                                "may use pageable staging node="
-                             << m_config.nodeId;
+                LOG(ERROR) << "cudaHostRegister TX arena failed; RoCE device D2H requires "
+                              "pinned TX node="
+                           << m_config.nodeId;
+                return false;
             }
+            LOG(INFO) << "txCudaRegistered=1 node=" << m_config.nodeId
+                      << " bytes=" << m_rdmaSender->txStagingBytes();
         }
         LOG(INFO) << "RDMA dataplane connected node=" << m_config.nodeId
                   << " kind=" << static_cast<uint32_t>(m_rdmaSender->kind())
@@ -263,31 +266,47 @@ namespace openpni::distributed::streaming
                   << " localQp=" << localEp.qpNum
                   << " remoteQp=" << coinEp.qpNum
                   << " slots=" << m_rdmaSender->slotCount()
-                  << " stride=" << m_rdmaSender->slotStride();
+                  << " stride=" << m_rdmaSender->slotStride()
+                  << " txCudaRegistered="
+                  << (m_rdmaSender->txCudaRegistered() ? 1 : 0);
         m_connected = true;
         return true;
     }
 
-    void CoincidenceClient::destroyTxD2hResources()
+    void CoincidenceClient::destroyTxD2hDeviceResources(TxD2hResources *res)
     {
-        if (m_txD2hDevice >= 0)
+        if (!res)
         {
-            static_cast<void>(cudaSetDevice(m_txD2hDevice));
+            return;
         }
-        for (void *ev : m_txD2hEvents)
+        if (res->device >= 0)
+        {
+            static_cast<void>(cudaSetDevice(res->device));
+        }
+        for (void *ev : res->events)
         {
             if (ev)
             {
                 static_cast<void>(cudaEventDestroy(static_cast<cudaEvent_t>(ev)));
             }
         }
-        m_txD2hEvents.clear();
-        if (m_txD2hStream)
+        res->events.clear();
+        if (res->stream)
         {
-            static_cast<void>(cudaStreamDestroy(static_cast<cudaStream_t>(m_txD2hStream)));
-            m_txD2hStream = nullptr;
+            static_cast<void>(cudaStreamDestroy(static_cast<cudaStream_t>(res->stream)));
+            res->stream = nullptr;
         }
-        m_txD2hDevice = -1;
+        res->device = -1;
+    }
+
+    void CoincidenceClient::destroyTxD2hResources()
+    {
+        for (auto &[device, res] : m_txD2hByDevice)
+        {
+            (void)device;
+            destroyTxD2hDeviceResources(&res);
+        }
+        m_txD2hByDevice.clear();
     }
 
     bool CoincidenceClient::ensureTxD2hStream(int device)
@@ -296,11 +315,24 @@ namespace openpni::distributed::streaming
         {
             return false;
         }
-        if (m_txD2hStream && m_txD2hDevice == device && !m_txD2hEvents.empty())
+        auto it = m_txD2hByDevice.find(device);
+        if (it != m_txD2hByDevice.end() && it->second.stream && !it->second.events.empty())
         {
+            const cudaError_t setErr = cudaSetDevice(device);
+            if (setErr != cudaSuccess)
+            {
+                LOG(ERROR) << "cudaSetDevice failed for TX D2H stream: "
+                           << cudaGetErrorString(setErr);
+                return false;
+            }
             return true;
         }
-        destroyTxD2hResources();
+        if (it != m_txD2hByDevice.end())
+        {
+            destroyTxD2hDeviceResources(&it->second);
+            m_txD2hByDevice.erase(it);
+        }
+
         const cudaError_t setErr = cudaSetDevice(device);
         if (setErr != cudaSuccess)
         {
@@ -315,9 +347,12 @@ namespace openpni::distributed::streaming
             LOG(ERROR) << "cudaStreamCreate failed for TX D2H: " << cudaGetErrorString(stErr);
             return false;
         }
+        TxD2hResources res;
+        res.device = device;
+        res.stream = stream;
         const uint32_t nEvents = std::max<uint32_t>(
             2, m_rdmaSender ? m_rdmaSender->txStagingSlotCount() : 2);
-        m_txD2hEvents.resize(nEvents, nullptr);
+        res.events.resize(nEvents, nullptr);
         for (uint32_t i = 0; i < nEvents; ++i)
         {
             cudaEvent_t ev = nullptr;
@@ -326,15 +361,14 @@ namespace openpni::distributed::streaming
             if (evErr != cudaSuccess || !ev)
             {
                 LOG(ERROR) << "cudaEventCreate failed for TX D2H: " << cudaGetErrorString(evErr);
-                m_txD2hStream = stream;
-                m_txD2hDevice = device;
-                destroyTxD2hResources();
+                destroyTxD2hDeviceResources(&res);
                 return false;
             }
-            m_txD2hEvents[i] = ev;
+            res.events[i] = ev;
         }
-        m_txD2hStream = stream;
-        m_txD2hDevice = device;
+        m_txD2hByDevice[device] = std::move(res);
+        const uint64_t creates = m_txD2hStreamCreates.fetch_add(1, std::memory_order_relaxed) + 1;
+        LOG(INFO) << "TX D2H stream created device=" << device << " creates=" << creates;
         return true;
     }
 
@@ -482,12 +516,25 @@ namespace openpni::distributed::streaming
             }
         }
 
-        const auto abortPending = [this](std::deque<PendingTxFill> *q)
+        cudaStream_t d2hStream = nullptr;
+        std::vector<void *> *d2hEvents = nullptr;
+        const bool useAsyncD2h =
+            srcDevice && srcDeviceId >= 0 && ensureTxD2hStream(srcDeviceId);
+        if (useAsyncD2h)
         {
-            if (m_txD2hStream)
+            auto it = m_txD2hByDevice.find(srcDeviceId);
+            if (it != m_txD2hByDevice.end() && it->second.stream && !it->second.events.empty())
             {
-                static_cast<void>(
-                    cudaStreamSynchronize(static_cast<cudaStream_t>(m_txD2hStream)));
+                d2hStream = static_cast<cudaStream_t>(it->second.stream);
+                d2hEvents = &it->second.events;
+            }
+        }
+
+        const auto abortPending = [this, d2hStream](std::deque<PendingTxFill> *q)
+        {
+            if (d2hStream)
+            {
+                static_cast<void>(cudaStreamSynchronize(d2hStream));
             }
             if (!q)
             {
@@ -518,7 +565,7 @@ namespace openpni::distributed::streaming
             return true;
         };
 
-        if (!srcDevice || srcDeviceId < 0 || !ensureTxD2hStream(srcDeviceId))
+        if (!d2hStream || !d2hEvents)
         {
             uint32_t offset = 0;
             bool first = true;
@@ -570,9 +617,10 @@ namespace openpni::distributed::streaming
             return true;
         }
 
-        auto *stream = static_cast<cudaStream_t>(m_txD2hStream);
+        auto *stream = d2hStream;
+        auto &events = *d2hEvents;
         const uint32_t slotCount = std::max<uint32_t>(1, m_rdmaSender->txStagingSlotCount());
-        const size_t depth = std::min<size_t>(4, static_cast<size_t>(slotCount));
+        const size_t depth = static_cast<size_t>(slotCount);
         std::deque<PendingTxFill> pending;
         uint32_t offset = 0;
         bool first = true;
@@ -592,8 +640,8 @@ namespace openpni::distributed::streaming
             uint32_t n = static_cast<uint32_t>(
                 std::min(maxPerSlot, static_cast<size_t>(total - offset)));
             const size_t capSingles = lease.payloadCapacity / kPackedSingleSize;
-            if (capSingles == 0 || lease.localIndex >= m_txD2hEvents.size() ||
-                !m_txD2hEvents[lease.localIndex])
+            if (capSingles == 0 || lease.localIndex >= events.size() ||
+                !events[lease.localIndex])
             {
                 m_rdmaSender->abortTxSlot(lease);
                 return false;
@@ -610,7 +658,7 @@ namespace openpni::distributed::streaming
                 m_rdmaSender->abortTxSlot(lease);
                 return false;
             }
-            auto *ev = static_cast<cudaEvent_t>(m_txD2hEvents[lease.localIndex]);
+            auto *ev = static_cast<cudaEvent_t>(events[lease.localIndex]);
             const cudaError_t recErr = cudaEventRecord(ev, stream);
             if (recErr != cudaSuccess)
             {
@@ -922,6 +970,11 @@ namespace openpni::distributed::streaming
     uint32_t CoincidenceClient::rdmaCreditRemaining() const
     {
         return m_rdmaSender ? m_rdmaSender->creditRemaining() : 0;
+    }
+
+    uint64_t CoincidenceClient::txD2hStreamCreateCount() const
+    {
+        return m_txD2hStreamCreates.load(std::memory_order_relaxed);
     }
 
     void CoincidenceClient::setTelemetryHook(std::function<WorkerTelemetry()> hook)

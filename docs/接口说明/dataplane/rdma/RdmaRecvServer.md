@@ -64,7 +64,7 @@ static std::shared_ptr<RdmaNodeRecvSession> findInProcessSession(uint64_t handle
 ```
 
 - `ensureSession`：OpenDataPlane 时按 node 创建会话。
-- `startPoller==true`（默认）时 `start()` 起 `pollLoop`。poller 持锁只拷贝 session 列表，ingest 不持该锁。
+- `startPoller==true`（默认）时 `start()` 起 `pollLoop`。session 列表只在 `ensureSession` / `stop` 时刷新；热路径用缓存的 `shared_ptr` 做 `pollOnce`，ingest 不持 `m_mutex`。
 - `findInProcessSession`：同进程 sender `connect` 用全局弱引用表查找 handle。
 
 ## 使用提示

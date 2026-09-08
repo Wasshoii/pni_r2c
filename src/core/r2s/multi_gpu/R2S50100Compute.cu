@@ -38,6 +38,8 @@ R2S50100Compute::R2S50100Compute(const R2S50100ComputeConfig &config)
                 " channel " + std::to_string(c));
         }
 
+        // Kernel indexes caliViews via channelMap[packet.channel]. Packet channels must
+        // already be remapped to this local 0..N-1 (R2SStreamProcessor::fillEffectiveView).
         gen->SetChannelIndex(static_cast<uint16_t>(c));
 
         if (!config.local_calib_files[static_cast<size_t>(c)].empty())

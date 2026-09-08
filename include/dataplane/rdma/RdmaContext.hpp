@@ -3,6 +3,7 @@
 #include "dataplane/rdma/RdmaTypes.hpp"
 
 #include <cstddef>
+#include <deque>
 #include <memory>
 #include <string>
 #include <vector>
@@ -98,6 +99,8 @@ public:
     uint32_t qpNum() const;
     uint32_t localPsn() const noexcept { return m_localPsn; }
     int sendOutstanding() const noexcept { return m_sendOutstanding; }
+    /** Posted send WRs still occupying the SQ (signaled + unsignaled). */
+    int sendSqOccupancy() const noexcept { return m_sendSqOccupancy; }
     int maxSendWr() const noexcept { return m_maxSendWr; }
     int maxRecvWr() const noexcept { return m_maxRecvWr; }
     int postedRecvs() const noexcept { return m_postedRecvs; }
@@ -112,6 +115,9 @@ private:
     ibv_qp *m_qp = nullptr;
     uint32_t m_localPsn = 0;
     int m_sendOutstanding = 0;
+    int m_sendSqOccupancy = 0;
+    int m_unsignaledSinceSignal = 0;
+    std::deque<int> m_signaledBatchSizes;
     int m_maxSendWr = 0;
     int m_maxRecvWr = 0;
     int m_postedRecvs = 0;

@@ -32,7 +32,7 @@ struct TxSlotLease {
 };
 ```
 
-- `txSlotCount`：本地已注册 TX 暂存槽（默认 **2** ping-pong；与远端 ring 槽数不是同一个数）。
+- `txSlotCount`：本地已注册 TX 暂存槽（默认 **2** ping-pong；与远端 ring 槽数不是同一个数）。CoincidenceClient 的 device D2H 管线深跟随该值；上机可试 4。
 - `preferHugePages`：worker 默认 **false**，不与 DPDK 争 hugetlb。
 - `requireRoce` 且对端/本地不是 RoCE 则 `connect` 失败。
 
@@ -52,7 +52,7 @@ void abortTxSlot(const TxSlotLease &lease);
 - `connect`：用 coin 端点完成 RC，或按 `inprocessHandle` 找到 [RdmaNodeRecvSession](RdmaRecvServer.md)。
 - `sendPackedSingles`：按远端 `slotStride` 切槽，填 [SlotHeader](SlotProtocol.md) 与 payload，等待 credit 后写出。RoCE 拷进已注册 TX 槽；InProcess 从源缓冲直接 memcpy 进接收环。
 - `acquireTxSlot` / `commitTxSlot`： CoincidenceClient 在有序消费线程上填槽后当场提交。`abortTxSlot` 在填槽失败时释放 lease。
-- `txStagingBase` / `txStagingBytes` / `txCudaRegistered`：供上层对 TX mmap `cudaHostRegister`。dataplane **不链接 CUDA**；`close()` 只清标志、不 `cudaHostUnregister`。CoincidenceClient 必须在 `close()` 前 unregister。
+- `txStagingBase` / `txStagingBytes` / `txCudaRegistered`：供上层对 TX mmap `cudaHostRegister`。dataplane **不链接 CUDA**；`close()` 只清标志、不 `cudaHostUnregister`。CoincidenceClient 必须在 `close()` 前 unregister。RoCE 下 CoincidenceClient 在 register 失败时不会进入 WaitForStart。
 
 ### 反压
 

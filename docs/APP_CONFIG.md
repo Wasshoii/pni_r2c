@@ -19,7 +19,7 @@
 - forceInProcess: 强制同进程 memcpy（仅本机测试）。
 - deviceName: RNIC 名，空则自动。
 - gidIndex: GID 索引，-1 自动。
-- txSlotCount: 本地 TX 槽数（0 用 RdmaWriteSender 默认 **2**）。TX 不用 hugepage。slotCount / slotBytes: 向 coin 请求的接收环尺寸（0 表示服务端默认，当前服务端忽略请求值）。
+- txSlotCount: 本地 TX 槽数（0 用 RdmaWriteSender 默认 **2**）。device D2H 管线深等于该槽数。上机可 A/B `2` vs `4`；若 `waitForCredit` 变长则改回 2。不要把默认改成几十槽。TX 不用 hugepage。slotCount / slotBytes: 向 coin 请求的接收环尺寸（0 表示服务端默认，当前服务端忽略请求值）。
 
 ### source
 - type: `synthetic` | `lsingle_replay` | `acquisition`（本阶段 acquisition 只留 StubRawIngress）。

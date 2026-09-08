@@ -587,7 +587,11 @@ namespace openpni::distributed::r2s
                 remappedChannel.resize(static_cast<size_t>(effectiveView.count));
                 for (uint64_t i = 0; i < effectiveView.count; ++i)
                 {
-                    remappedChannel[i] = globalToLocalChannel[effectiveView.channel[i]];
+                    const uint16_t ch = effectiveView.channel[i];
+                    remappedChannel[i] =
+                        (static_cast<size_t>(ch) < globalToLocalChannel.size())
+                            ? globalToLocalChannel[ch]
+                            : UINT16_MAX;
                 }
                 effectiveView.channel = remappedChannel.data();
             }
@@ -648,6 +652,12 @@ namespace openpni::distributed::r2s
             }
 
             if (!prepareChannelsToProcess())
+            {
+                m_hadError = true;
+                return false;
+            }
+
+            if (!buildLocalChannelMaps())
             {
                 m_hadError = true;
                 return false;
@@ -1098,19 +1108,8 @@ namespace openpni::distributed::r2s
                     singlesSpan = std::span<Single const>(
                         m_multiGpuHostSingles.data(), m_multiGpuHostSingles.size());
                 }
-                else if (needHostRemap)
-                {
-                    m_multiGpuHostSingles = materializeSinglesOnHost(singlesSpan);
-                    for (auto &s : m_multiGpuHostSingles)
-                    {
-                        if (s.channelIndex < m_localToGlobalChannel.size())
-                        {
-                            s.channelIndex = m_localToGlobalChannel[s.channelIndex];
-                        }
-                    }
-                    singlesSpan = std::span<Single const>(
-                        m_multiGpuHostSingles.data(), m_multiGpuHostSingles.size());
-                }
+                // Device-span hot path keeps local channelIndex (0..N-1). CoincidenceClient
+                // applies globalChannelOffset after D2H. Do not D2H solely to remap.
             }
         }
 
@@ -1248,6 +1247,38 @@ namespace openpni::distributed::r2s
         return true;
     }
 
+    bool R2SStreamProcessor::buildLocalChannelMaps()
+    {
+        m_globalToLocalChannel.clear();
+        m_localToGlobalChannel.clear();
+        if (m_channelsToProcess.empty())
+        {
+            return true;
+        }
+
+        const uint16_t maxGlobalCh = *std::max_element(
+            m_channelsToProcess.begin(), m_channelsToProcess.end());
+        m_globalToLocalChannel.assign(static_cast<size_t>(maxGlobalCh) + 1, UINT16_MAX);
+        m_localToGlobalChannel.resize(m_channelsToProcess.size());
+
+        uint16_t localIdx = 0;
+        for (auto channelIndex : m_channelsToProcess)
+        {
+            m_globalToLocalChannel[channelIndex] = localIdx;
+            m_localToGlobalChannel[localIdx] = channelIndex;
+            ++localIdx;
+        }
+
+        if (m_filterUnassignedChannels)
+        {
+            LOG(INFO) << "Built global↔local channel map for " << m_channelsToProcess.size()
+                      << " assigned channels (global [" << m_channelsToProcess.front()
+                      << " .. " << m_channelsToProcess.back() << "] → local [0 .. "
+                      << (m_channelsToProcess.size() - 1) << "])";
+        }
+        return true;
+    }
+
     bool R2SStreamProcessor::prepareGenerators()
     {
         if (m_config.forceFullCalibrationLoad && m_config.detectorType == DetectorType::BDM50100)
@@ -1269,17 +1300,17 @@ namespace openpni::distributed::r2s
 
         LOG(INFO) << "Loading " << m_channelsToProcess.size() << " channels' calibration data...";
 
-        // Build global <-> local channel mapping
-        const uint16_t maxGlobalCh = *std::max_element(m_channelsToProcess.begin(), m_channelsToProcess.end());
-        m_globalToLocalChannel.assign(static_cast<size_t>(maxGlobalCh) + 1, UINT16_MAX);
-        m_localToGlobalChannel.resize(m_channelsToProcess.size());
+        if (m_localToGlobalChannel.size() != m_channelsToProcess.size())
+        {
+            if (!buildLocalChannelMaps())
+            {
+                return false;
+            }
+        }
 
         uint16_t localIdx = 0;
         for (auto channelIndex : m_channelsToProcess)
         {
-            m_globalToLocalChannel[channelIndex] = localIdx;
-            m_localToGlobalChannel[localIdx] = channelIndex;
-
             try
             {
                 auto generator = createSingleGenerator(m_config, localIdx, channelIndex);

@@ -15,6 +15,7 @@
 #include <span>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace openpni::distributed::streaming
@@ -51,6 +52,8 @@ namespace openpni::distributed::streaming
         bool forceInProcess = false;
         std::string rdmaDeviceName;
         int gidIndex = -1;
+        /** Local TX slots (0 = RdmaWriteSender default 2). Device D2H pipeline depth
+         *  follows this count. On-machine A/B 2 vs 4; revert to 2 if waitForCredit grows. */
         uint32_t txSlotCount = 0;
         uint32_t requestedSlotCount = 0;
         uint32_t requestedSlotBytes = 0;
@@ -110,6 +113,7 @@ namespace openpni::distributed::streaming
         uint64_t rdmaInprocessHandle() const;
         uint64_t rdmaSlotsInFlight() const;
         uint32_t rdmaCreditRemaining() const;
+        uint64_t txD2hStreamCreateCount() const;
 
         bool waitForServerStartSignal(uint32_t timeoutMs = 0);
         bool waitUntilIdle();
@@ -139,6 +143,14 @@ namespace openpni::distributed::streaming
         bool useRoceTxFill() const;
         bool ensureTxD2hStream(int device);
         void destroyTxD2hResources();
+
+        struct TxD2hResources
+        {
+            void *stream = nullptr;
+            std::vector<void *> events;
+            int device = -1;
+        };
+        void destroyTxD2hDeviceResources(TxD2hResources *res);
         void heartbeatLoop();
         void applyProducerCommand(coincidence::ProducerCommand command);
         coincidence::SourceState currentSourceState() const;
@@ -168,9 +180,8 @@ namespace openpni::distributed::streaming
         std::mutex m_telemetryMutex;
         std::function<WorkerTelemetry()> m_telemetryHook;
 
-        void *m_txD2hStream = nullptr;
-        std::vector<void *> m_txD2hEvents;
-        int m_txD2hDevice = -1;
+        std::unordered_map<int, TxD2hResources> m_txD2hByDevice;
+        std::atomic<uint64_t> m_txD2hStreamCreates{0};
     };
 
 } // namespace openpni::distributed::streaming

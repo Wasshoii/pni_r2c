@@ -31,7 +31,7 @@ using SinglesSpanReadyCallback = std::function<bool(
     std::span<Single const> singles, uint64_t clock_ms, uint32_t duration_ms)>;
 ```
 
-- `onSinglesSpanReady` 已设置时，`processR2S` / `R2SStreamProcessor` **优先**调用它。50100 多 GPU 默认路径上 span 是 **device 指针**；回调必须用 copy stream `cudaMemcpyAsync` D2H 进 TX（例如 `CoincidenceClient::sendSingles`）或 `materializeSinglesOnHost`，不可对显存做 host `memcpy`。
+- `onSinglesSpanReady` 已设置时，`processR2S` / `R2SStreamProcessor` **优先**调用它。50100 多 GPU 默认路径上 span 是 **device 指针**；回调必须用该 GPU 的 copy stream `cudaMemcpyAsync` D2H 进 TX（例如 `CoincidenceClient::sendSingles`）或 `materializeSinglesOnHost`，不可对显存做 host `memcpy`。
 - `span` 仅在回调返回前有效。回调内若异步使用（入队、跨线程发送），必须先拷贝。
 - 返回 `false` 表示调用方要求停止后续处理。
 - 可与 `saveData2SingleFile` 同时开启：一边写 `.lsingle`，一边流式送出。
@@ -90,12 +90,12 @@ public:
 };
 ```
 
-- `initialize`：按 `channelIndices` 建 generator 或 50100 多 GPU 引擎，可选打开 `.lsingle` 输出。
+- `initialize`：按 `channelIndices` 建 **global↔local 通道表**，再创建 generator 或 50100 多 GPU 引擎，可选打开 `.lsingle` 输出。`channelIndices` 非空时，提交 GPU 前把 `packet.channel` 映到本地 `0..N-1`（与 `R2S50100Compute::SetChannelIndex` / libpni `channelMap` 一致）。未做 energy cut / 外部 sort 时，device span 上的 `Single.channelIndex` **保持本地编号**，由 `CoincidenceClient` 的 `globalChannelOffset` 在 D2H 后加回全局号。host 后处理路径会在 cut/sort 之后把 singles 映回全局号（例如 `test_r2s_rdma_send`）。
 - `processSegment`：转换本段 raw；结果经 span/vector 回调和/或写盘。
 - `reopenOutput`：目录批处理切换输出前缀。
 - `finalize`：刷写异步队列、释放 generator。
 
-BDM50100 且 `enableMultiGpu` 时内部使用 `R2S50100MultiGpuEngine`（`submitView` + `nextLease`）。默认无 energy cut / 无外部 sort / 无通道 remap 时，`onSinglesSpanReady` 拿到 **device** span，回调返回前 output lease 有效（覆盖整段切槽 D2H）。H2D 优先对输入做 `cudaHostRegister`；失败则 R2S 线程 pin-bounce（槽数 = 流水深度），拷完即可归还采集包槽。`computePipelineDepth>1` 时 submit 后延迟 `next`，`finalize()` 排空在飞段。采集桥在未 bounce 时把 `RawDataLease` 交进 `processSegment` 的 keep-alive，直到对应段 H2D 完成。多卡吞吐缩放前提见 [R2S50100MultiGpuEngine](multi_gpu/R2S50100MultiGpuEngine.md)。
+BDM50100 且 `enableMultiGpu` 时内部使用 `R2S50100MultiGpuEngine`（`submitView` + `nextLease`）。可见 GPU 数为 1 时同样走这条路径（每节点仍是整段任务并行，只是 worker 数为 1）。默认无 energy cut / 无外部 sort 时，`onSinglesSpanReady` 拿到 **device** span，回调返回前 output lease 有效（覆盖整段切槽 D2H）。H2D 优先对输入做 `cudaHostRegister`；失败则 R2S 线程 pin-bounce（槽数 = 流水深度），拷完即可归还采集包槽。`computePipelineDepth>1` 时 submit 后延迟 `next`，`finalize()` 排空在飞段。采集桥在未 bounce 时把 `RawDataLease` 交进 `processSegment` 的 keep-alive，直到对应段 H2D 完成。多卡吞吐缩放前提见 [R2S50100MultiGpuEngine](multi_gpu/R2S50100MultiGpuEngine.md)。
 
 ### RawDataLease / RawDataLeaseSpscRingQueue
 

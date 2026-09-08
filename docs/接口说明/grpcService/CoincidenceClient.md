@@ -36,7 +36,7 @@ struct CoincidenceClientConfig {
 
 - `requireRoce`：对端必须是 RoCE，不允许静默落到 InProcess。
 - `forceInProcess`：同进程 memcpy（CI / 单机编排测试）。
-- `txSlotCount`：本地 TX 暂存槽数，交给 `RdmaWriteSender::Config`（0 用 sender 默认 **2**）。
+- `txSlotCount`：本地 TX 暂存槽数，交给 `RdmaWriteSender::Config`（0 用 sender 默认 **2**）。device D2H 管线深等于该槽数；上机可 A/B `2` vs `4`，若 `waitForCredit` 变长则改回 2。不要把默认改成几十槽。
 - `requestedSlotCount` / `requestedSlotBytes`：OpenDataPlane 向 coin 请求的接收环尺寸（服务端可忽略）。
 - `maxPendingChunks`：JSON 兼容字段；热路径不再作为发送队列深度。
 - `remapLocalToGlobalChannels`：发送前把 `channelIndex` 加上 `globalChannelOffset`。
@@ -55,7 +55,7 @@ bool sendSingles(std::vector<Single> &&singles,
                  uint32_t duration_ms);
 ```
 
-- **RoCE**：调用线程（必须是有序 `next()` 的消费线程）按槽 `acquireTxSlot`。50100 热路径源为 **device**，用每节点专用 `cudaStreamNonBlocking` `cudaMemcpyAsync` + event（管线深 2～4）直写已 `cudaHostRegister` 的 TX payload，再 remap 并当场 `commitTxSlot`（等 credit + WRITE）。源为 host 时 memcpy。一块过大拆多槽，同一 `chunkId`。PAUSE 挡在填槽前。`OpenDataPlane` 成功后对 TX mmap `cudaHostRegister`；`stop()` 先销毁 D2H stream/event，再 `cudaHostUnregister`，再 `close()`。
+- **RoCE**：调用线程（必须是有序 `next()` 的消费线程）按槽 `acquireTxSlot`。50100 热路径源为 **device**，按 GPU 缓存 `cudaStreamNonBlocking`（切卡不销毁其它卡的 stream）`cudaMemcpyAsync` + event（管线深 = `txSlotCount`，默认 2）直写已 `cudaHostRegister` 的 TX payload，再 remap 并当场 `commitTxSlot`（等 credit + WRITE）。源为 host 时 memcpy。一块过大拆多槽，同一 `chunkId`。PAUSE 挡在填槽前。`OpenDataPlane` 成功后对 TX mmap `cudaHostRegister`；**RoCE 下注册失败则握手失败**，不进入 WaitForStart。InProcess 不要求 register。`stop()` 先销毁各 GPU 的 D2H stream/event，再 `cudaHostUnregister`，再 `close()`。
 - **InProcess**：调用线程里 `sendPackedSingles`（一次 memcpy 进接收环）。device span 先 D2H；`sendSinglesView` 对 host 直接发，调用期间 span 必须有效。
 
 ### sendSinglesView
@@ -90,6 +90,7 @@ uint32_t rdmaSlotCount() const;
 uint32_t txStagingSlotCount() const;
 uint64_t rdmaSlotsInFlight() const;
 uint32_t rdmaCreditRemaining() const;
+uint64_t txD2hStreamCreateCount() const;
 bool waitUntilIdle();
 bool notifyProducerComplete();
 ```
@@ -97,6 +98,7 @@ bool notifyProducerComplete();
 - `getPendingMessageCount()`：本地 TX busy 槽数。
 - `txStagingSlotCount()`：本地 TX 槽数（默认 2）。
 - `rdmaSlotsInFlight` / `rdmaCreditRemaining` 来自 sender 对远端 `consumerSeq` 的镜像，对应调试日志里的 `rdma` / credit。
+- `txD2hStreamCreateCount()`：每 GPU 首次建 copy stream 的次数；多卡交替不应每段递增。
 - `waitUntilIdle`：等到当前 `sendSingles` 返回（无在飞提交）。
 - `notifyProducerComplete`：先 `waitUntilIdle`，再发 gRPC 完成通知。
 

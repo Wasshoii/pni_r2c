@@ -4,6 +4,8 @@
 
 本系统实现了分布式 PET（正电子发射断层成像）数据处理的流式符合计算功能。核心设计思想是利用 PET 时钟板的精确时间戳（ps级）作为全局时间基准，通过滑动窗口机制实现高效的时间对齐和符合计算。
 
+本文描述 **单符合节点** 内的水位线、carry 与 GPU 流水线。多符合机按 PET 时间分片（ingest 串行、compute 流水）见 [TIME_SHARD_COINCIDENCE.md](TIME_SHARD_COINCIDENCE.md)。
+
 ## 架构设计
 
 ```

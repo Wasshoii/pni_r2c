@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <iterator>
 #include <limits>
@@ -702,6 +703,20 @@ namespace openpni::distributed::streaming
         }
     }
 
+    void NodeRingBuffer::detachStolenChunk(TimestampedSingleChunk &chunk)
+    {
+        if (!chunk.poolOwned)
+        {
+            return;
+        }
+        const size_t mem = chunk.memorySize();
+        if (m_memoryPool && mem > 0)
+        {
+            m_memoryPool->release(mem);
+        }
+        chunk.poolOwned = false;
+    }
+
     bool NodeRingBuffer::peekFront(uint64_t *minTime, uint64_t *maxTime, size_t *count) const
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -919,6 +934,15 @@ namespace openpni::distributed::streaming
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         return m_maxEventTimeReceived;
+    }
+
+    void NodeRingBuffer::advanceMaxEventTime(uint64_t t)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (t > m_maxEventTimeReceived)
+        {
+            m_maxEventTimeReceived = t;
+        }
     }
 
     size_t NodeRingBuffer::getOutOfOrderCount() const
@@ -1687,6 +1711,230 @@ namespace openpni::distributed::streaming
         LOG(INFO) << "[StreamingTimeAligner] Stopped";
     }
 
+    std::string StreamingTimeAligner::listmodeFilePrefix(const char *kind) const
+    {
+        if (m_config.epochId == 0 && m_config.epochT1_100fs == 0 && m_config.epochCut_100fs == 0)
+        {
+            return std::string(kind);
+        }
+        return std::string(kind) + "_epoch" + std::to_string(m_config.epochId) + "_coin" +
+               std::to_string(m_config.coinId) + "_" + std::to_string(m_config.epochT0_100fs) +
+               "_" + std::to_string(m_config.epochT1_100fs != 0 ? m_config.epochT1_100fs
+                                                               : m_config.epochCut_100fs);
+    }
+
+    bool StreamingTimeAligner::completeEpoch(uint64_t cutWatermark_100fs, uint64_t epochId)
+    {
+        if (!m_running.load(std::memory_order_acquire))
+        {
+            LOG(ERROR) << "[StreamingTimeAligner] completeEpoch: not running";
+            return false;
+        }
+        const uint64_t wm = calculateWatermark();
+        if (cutWatermark_100fs == 0 || cutWatermark_100fs > wm)
+        {
+            LOG(ERROR) << "[StreamingTimeAligner] completeEpoch: W=" << cutWatermark_100fs
+                       << " exceeds watermark=" << wm;
+            return false;
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_epochMutex);
+            if (m_epochDrained.load(std::memory_order_acquire) ||
+                m_epochRequested.load(std::memory_order_acquire))
+            {
+                LOG(ERROR) << "[StreamingTimeAligner] completeEpoch: already requested";
+                return false;
+            }
+            m_epochId = epochId;
+            m_config.epochId = epochId;
+            m_config.epochCut_100fs = cutWatermark_100fs;
+            m_config.epochT1_100fs = cutWatermark_100fs;
+            m_epochCut.store(cutWatermark_100fs, std::memory_order_release);
+            m_epochRequested.store(true, std::memory_order_release);
+        }
+        wakeStealAndCoord();
+        std::unique_lock<std::mutex> lock(m_epochMutex);
+        const bool ok = m_epochCv.wait_for(
+            lock, std::chrono::seconds(120),
+            [this]()
+            {
+                return m_epochDrained.load(std::memory_order_acquire) ||
+                       m_processFailed.load(std::memory_order_acquire) ||
+                       !m_running.load(std::memory_order_acquire);
+            });
+        if (!ok)
+        {
+            LOG(ERROR) << "[StreamingTimeAligner] completeEpoch timed out waiting to drain";
+            return false;
+        }
+        return m_epochDrained.load(std::memory_order_acquire) &&
+               !m_processFailed.load(std::memory_order_acquire);
+    }
+
+    void StreamingTimeAligner::collectHandoffTail(EpochHandoff *out)
+    {
+        const uint64_t W = out->cutWatermark_100fs;
+        auto splitAndKeep = [&](TimestampedSingleChunk &&chunk, uint16_t node)
+        {
+            if (chunk.nodeId == 0)
+            {
+                chunk.nodeId = node;
+            }
+            if (chunk.remainingEmpty())
+            {
+                if (chunk.poolOwned && node < m_nodeBuffers.size())
+                {
+                    m_nodeBuffers[node]->dropStolenChunk(std::move(chunk));
+                }
+                return;
+            }
+            const Single *begin = chunk.remainingData();
+            const size_t n = chunk.remainingCount();
+            size_t keepFrom = 0;
+            while (keepFrom < n && begin[keepFrom].timevalue_100fs <= W)
+            {
+                ++keepFrom;
+            }
+            if (keepFrom > 0)
+            {
+                chunk.consumePrefix(keepFrom);
+            }
+            if (chunk.remainingEmpty())
+            {
+                if (chunk.poolOwned && node < m_nodeBuffers.size())
+                {
+                    m_nodeBuffers[node]->dropStolenChunk(std::move(chunk));
+                }
+                return;
+            }
+            chunk.refreshTimeRangeFromSortedEnds();
+            if (node < m_nodeBuffers.size())
+            {
+                m_nodeBuffers[node]->detachStolenChunk(chunk);
+            }
+            else
+            {
+                chunk.poolOwned = false;
+            }
+            out->tail.push_back(std::move(chunk));
+        };
+
+        for (size_t i = 0; i < m_stolenLanes.size(); ++i)
+        {
+            while (auto chunk = m_stolenLanes[i]->tryPop())
+            {
+                splitAndKeep(std::move(*chunk), static_cast<uint16_t>(i));
+            }
+        }
+        for (size_t i = 0; i < m_nodeBuffers.size(); ++i)
+        {
+            while (auto chunk = m_nodeBuffers[i]->tryPop())
+            {
+                splitAndKeep(std::move(*chunk), static_cast<uint16_t>(i));
+            }
+        }
+    }
+
+    EpochHandoff StreamingTimeAligner::takeHandoff()
+    {
+        EpochHandoff out;
+        out.epochId = m_epochId;
+        out.cutWatermark_100fs = m_epochCut.load(std::memory_order_acquire);
+        out.overlap_100fs = overlapLength_100fs();
+        if (!m_epochDrained.load(std::memory_order_acquire) || out.cutWatermark_100fs == 0)
+        {
+            LOG(ERROR) << "[StreamingTimeAligner] takeHandoff: completeEpoch has not drained";
+            return out;
+        }
+
+        m_takingHandoff.store(true, std::memory_order_release);
+        wakeStealAndCoord();
+        for (int spin = 0; spin < 200; ++spin)
+        {
+            bool busy = false;
+            for (const auto &lane : m_stolenLanes)
+            {
+                if (lane && lane->inFlight.load(std::memory_order_acquire))
+                {
+                    busy = true;
+                    break;
+                }
+            }
+            if (!busy)
+            {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        out.carry = std::move(m_carrySingles);
+        m_carrySingles.clear();
+        collectHandoffTail(&out);
+
+        m_takingHandoff.store(false, std::memory_order_release);
+        m_stealCv.notify_all();
+        LOG(INFO) << "[StreamingTimeAligner] takeHandoff epoch=" << out.epochId
+                  << " W=" << out.cutWatermark_100fs << " carry=" << out.carry.size()
+                  << " tailChunks=" << out.tail.size();
+        return out;
+    }
+
+    bool StreamingTimeAligner::applyHandoff(EpochHandoff handoff)
+    {
+        if (handoff.cutWatermark_100fs == 0)
+        {
+            LOG(ERROR) << "[StreamingTimeAligner] applyHandoff: empty cut watermark";
+            return false;
+        }
+        m_lastWatermark = handoff.cutWatermark_100fs;
+        m_epochCut.store(0, std::memory_order_release);
+        m_epochRequested.store(false, std::memory_order_release);
+        m_epochDrained.store(false, std::memory_order_release);
+        m_epochId = handoff.epochId + 1;
+        m_config.epochId = handoff.epochId + 1;
+        m_config.epochT0_100fs = handoff.cutWatermark_100fs;
+        m_config.epochCut_100fs = 0;
+        m_carrySingles = std::move(handoff.carry);
+        m_stats.currentTimeBoundary_pico = m_lastWatermark;
+        m_stats.carrySinglesTotal.fetch_add(m_carrySingles.size(), std::memory_order_relaxed);
+
+        std::vector<uint8_t> hasTail(m_nodeBuffers.size(), 0);
+        for (auto &chunk : handoff.tail)
+        {
+            if (chunk.nodeId < hasTail.size())
+            {
+                hasTail[chunk.nodeId] = 1;
+            }
+        }
+        for (size_t i = 0; i < m_nodeBuffers.size(); ++i)
+        {
+            if (!hasTail[i])
+            {
+                m_nodeBuffers[i]->advanceMaxEventTime(std::numeric_limits<uint64_t>::max());
+            }
+        }
+
+        for (auto &chunk : handoff.tail)
+        {
+            chunk.poolOwned = false;
+            if (chunk.nodeId >= m_nodeBuffers.size())
+            {
+                LOG(ERROR) << "[StreamingTimeAligner] applyHandoff: bad nodeId "
+                           << chunk.nodeId;
+                return false;
+            }
+            if (!m_nodeBuffers[chunk.nodeId]->push(std::move(chunk), 60'000))
+            {
+                LOG(ERROR) << "[StreamingTimeAligner] applyHandoff: push tail failed";
+                return false;
+            }
+        }
+        wakeStealAndCoord();
+        LOG(INFO) << "[StreamingTimeAligner] applyHandoff W=" << handoff.cutWatermark_100fs
+                  << " carry=" << m_carrySingles.size();
+        return true;
+    }
+
     SharedMemoryPool::MemoryStatus StreamingTimeAligner::getMemoryStatus() const
     {
         if (m_memoryPool)
@@ -1710,6 +1958,8 @@ namespace openpni::distributed::streaming
     {
         fs::create_directories(m_config.outputDir);
         const uint32_t totalCrystals = m_config.channelNum * m_config.crystalsPerChannel;
+        const std::string promptPrefix = listmodeFilePrefix("prompt");
+        const std::string delayPrefix = listmodeFilePrefix("delay");
 
         if (m_config.savePrompt)
         {
@@ -1718,9 +1968,8 @@ namespace openpni::distributed::streaming
             opts.io.maxFileSizeBytes = m_config.listmodeMaxFileSizeBytes;
             opts.io.enableOverrideExistingFile = m_config.listmodeOverwriteExisting;
             opts.io.ioQueueSize = std::max(1u, m_config.listmodeIoQueueSize);
-            // maxFileSizeBytes == 0 时文件名与历史行为完全一致："{outputDir}/prompt.lmf"
             m_promptOpened = m_promptWriter.Open(
-                m_config.outputDir, "prompt", "lmf", opts,
+                m_config.outputDir, promptPrefix, "lmf", opts,
                 [](openpni::distributed::coreio::ListmodeFileWriter &w, const std::string &path)
                 {
                     w.Open(path);
@@ -1734,9 +1983,8 @@ namespace openpni::distributed::streaming
             opts.io.maxFileSizeBytes = m_config.listmodeMaxFileSizeBytes;
             opts.io.enableOverrideExistingFile = m_config.listmodeOverwriteExisting;
             opts.io.ioQueueSize = std::max(1u, m_config.listmodeIoQueueSize);
-            // maxFileSizeBytes == 0 时文件名与历史行为完全一致："{outputDir}/delay.lmf"
             m_delayOpened = m_delayWriter.Open(
-                m_config.outputDir, "delay", "lmf", opts,
+                m_config.outputDir, delayPrefix, "lmf", opts,
                 [](openpni::distributed::coreio::ListmodeFileWriter &w, const std::string &path)
                 {
                     w.Open(path);
@@ -1941,6 +2189,16 @@ namespace openpni::distributed::streaming
 
         while (true)
         {
+            while (m_takingHandoff.load(std::memory_order_acquire) &&
+                   !m_stealStop.load(std::memory_order_acquire))
+            {
+                std::unique_lock<std::mutex> lock(m_stealMutex);
+                m_stealCv.wait_for(lock, std::chrono::milliseconds(1), [this]()
+                                   {
+                                       return !m_takingHandoff.load(std::memory_order_acquire) ||
+                                              m_stealStop.load(std::memory_order_acquire);
+                                   });
+            }
             const bool stopping = m_stealStop.load(std::memory_order_acquire);
             const size_t queued = lane.size();
             if (!stopping && queued >= cap)
@@ -2082,7 +2340,8 @@ namespace openpni::distributed::streaming
                     [this, lastWakeSeq]()
                     {
                         return m_wakeSeq.load(std::memory_order_acquire) != lastWakeSeq ||
-                               !m_running.load();
+                               !m_running.load() ||
+                               m_epochRequested.load(std::memory_order_acquire);
                     });
                 lastWakeSeq = m_wakeSeq.load(std::memory_order_acquire);
             }
@@ -2091,10 +2350,17 @@ namespace openpni::distributed::streaming
             const auto startTime = std::chrono::high_resolution_clock::now();
             const auto watermarkBegin = std::chrono::steady_clock::now();
 
-            const uint64_t watermark = calculateWatermark();
+            const uint64_t watermarkNatural = calculateWatermark();
+            uint64_t watermark = watermarkNatural;
+            const bool epochReq = m_epochRequested.load(std::memory_order_acquire);
+            const uint64_t epochCut = m_epochCut.load(std::memory_order_acquire);
+            if (epochReq && epochCut > 0 && watermark > 0)
+            {
+                watermark = std::min(watermark, epochCut);
+            }
             if (watermark > 0)
             {
-                publishWatermark(watermark);
+                publishWatermark(watermarkNatural);
             }
             const bool pressure = anyNodeAboveHighWater();
 
@@ -2105,6 +2371,21 @@ namespace openpni::distributed::streaming
 
             if (watermark == 0 || watermark <= m_lastWatermark)
             {
+                if (epochReq && epochCut > 0 && countReadyBefore(epochCut) == 0)
+                {
+                    if (m_lastWatermark < epochCut)
+                    {
+                        m_lastWatermark = epochCut;
+                        m_stats.currentTimeBoundary_pico = m_lastWatermark;
+                    }
+                    m_stats.watermarkNs.fetch_add(nsSince(watermarkBegin), std::memory_order_relaxed);
+                    {
+                        std::lock_guard<std::mutex> elock(m_epochMutex);
+                        m_epochDrained.store(true, std::memory_order_release);
+                    }
+                    m_epochCv.notify_all();
+                    break;
+                }
                 // 缓冲已到高水位却推不动水位线，说明某节点滞后。此时不能越过水位线抽取
                 // （那会破坏跨节点对齐），只能继续对上游背压并告警。
                 if (pressure)
@@ -2128,8 +2409,8 @@ namespace openpni::distributed::streaming
                 continue;
             }
 
-            // 不变式 2：段跨度硬下界，压力与延迟兜底都不能突破。
-            if (watermark - m_lastWatermark < m_config.minSegmentSpan_100fs())
+            // 不变式 2：段跨度硬下界，压力与延迟兜底都不能突破。epoch 收尾与停机 flush 除外。
+            if (!epochReq && watermark - m_lastWatermark < m_config.minSegmentSpan_100fs())
             {
                 m_stats.heldByMinDuration.fetch_add(1, std::memory_order_relaxed);
                 m_stats.watermarkNs.fetch_add(nsSince(watermarkBegin), std::memory_order_relaxed);
@@ -2149,7 +2430,7 @@ namespace openpni::distributed::streaming
                         .count() >= static_cast<int64_t>(m_config.maxProcessLatencyMs);
             const bool enough = pending >= m_config.minSegmentSingles;
 
-            if (pending > 0 && !enough && !pressure && !deadline && !stopping)
+            if (pending > 0 && !enough && !pressure && !deadline && !stopping && !epochReq)
             {
                 // 攒批：数据量不足且无压力、未到期，等下一轮。
                 m_stats.watermarkNs.fetch_add(nsSince(watermarkBegin), std::memory_order_relaxed);
@@ -2188,6 +2469,20 @@ namespace openpni::distributed::streaming
                 m_stats.totalSinglesReceived.load(std::memory_order_relaxed) > recBefore;
             m_stats.currentTimeBoundary_pico = m_lastWatermark;
             moreReadyNow = m_lastWatermark < watermark;
+            if (epochReq && epochCut > 0 && countReadyBefore(epochCut) == 0)
+            {
+                if (m_lastWatermark < epochCut)
+                {
+                    m_lastWatermark = epochCut;
+                    m_stats.currentTimeBoundary_pico = m_lastWatermark;
+                }
+                {
+                    std::lock_guard<std::mutex> elock(m_epochMutex);
+                    m_epochDrained.store(true, std::memory_order_release);
+                }
+                m_epochCv.notify_all();
+                break;
+            }
             if (!extracted)
             {
                 continue;
@@ -2220,7 +2515,8 @@ namespace openpni::distributed::streaming
             }
         }
 
-        if (!m_processFailed.load(std::memory_order_acquire))
+        if (!m_processFailed.load(std::memory_order_acquire) &&
+            !m_epochDrained.load(std::memory_order_acquire))
         {
             flushRemaining();
         }
@@ -3239,7 +3535,8 @@ namespace openpni::distributed::streaming
             m_processFailed.store(true, std::memory_order_release);
             return;
         }
-        const bool ok = output.AppendSegment(sizeEstimate, std::move(coins), 0, 0);
+        const bool ok = output.AppendSegment(
+            sizeEstimate, std::move(coins), m_config.epochId, 0);
         if (!ok || (output.GetStatus() & openpni::io::IOStatus_DiskSpaceNotEnough) != 0)
         {
             LOG(ERROR) << "[StreamingTimeAligner] listmode AppendSegment failed";

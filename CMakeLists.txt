@@ -309,6 +309,31 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
       dl
   )
   r2c_target_link_cuda_s2c(test_coin_streaming_aligner)
+
+  add_executable(test_coin_time_shard
+    tests/correctness/test_coin_time_shard.cpp
+    $<TARGET_OBJECTS:r2c_core_streaming_objs>
+    $<TARGET_OBJECTS:r2c_proto_objs>
+  )
+  target_include_directories(test_coin_time_shard
+    PRIVATE
+      "${R2C_PROTO_GEN_ROOT}"
+      "${R2C_PROTO_GEN_DIR}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
+      "${CMAKE_CURRENT_SOURCE_DIR}/include"
+      "${CMAKE_CURRENT_SOURCE_DIR}/src"
+      "${CMAKE_CURRENT_SOURCE_DIR}"
+  )
+  target_compile_options(test_coin_time_shard PRIVATE -Wall -Wextra -O2 -pthread)
+  target_link_libraries(test_coin_time_shard
+    PRIVATE
+      PkgConfig::R2C_PNI
+      PkgConfig::R2C_GRPC
+      PkgConfig::R2C_IBVERBS
+      PkgConfig::R2C_GLOG
+      dl
+  )
+  r2c_target_link_cuda_s2c(test_coin_time_shard)
   endif()
 
   if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN)
@@ -472,6 +497,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
       add_library(r2c_grpc_service_coin_objs OBJECT
         src/grpcService/CoincidenceServiceImpl.cpp
         src/grpcService/CoincidenceClient.cpp
+        src/grpcService/EpochHandoffShip.cpp
       )
       target_include_directories(r2c_grpc_service_coin_objs
         PRIVATE
@@ -1524,6 +1550,7 @@ r2c_set_output_dir(tool_dpdk_tx_replayer tools)
 r2c_set_output_dir(test_timesync_algorithm test)
 r2c_set_output_dir(test_timesync_grpc test)
 r2c_set_output_dir(test_coin_streaming_aligner test)
+r2c_set_output_dir(test_coin_time_shard test)
 r2c_set_output_dir(test_coin_synthetic_singles test)
 r2c_set_output_dir(test_coin_multi_gpu test)
 r2c_set_output_dir(test_rdma_recv_stub test)
@@ -1566,6 +1593,7 @@ r2c_register_test(test_timesync_algorithm core correctness)
 r2c_register_test(test_timesync_grpc core correctness)
 
 r2c_register_test(test_coin_streaming_aligner pni integration manual correctness)
+r2c_register_test(test_coin_time_shard cuda integration correctness)
 r2c_register_test(test_coin_synthetic_singles pni correctness)
 r2c_register_test(test_coin_multi_gpu cuda integration correctness)
 r2c_register_test(test_rdma_recv_stub pni integration manual correctness)

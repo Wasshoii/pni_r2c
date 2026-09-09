@@ -157,6 +157,8 @@ namespace openpni::distributed::streaming
         void reinsertFront(TimestampedSingleChunk &&chunk);
         // 整块已消费完：释放 stealWholeFront 时仍记在池上的配额。
         void dropStolenChunk(TimestampedSingleChunk &&chunk);
+        // 交出 chunk 所有权（释放本环内存池配额），singles 留给交接方。
+        void detachStolenChunk(TimestampedSingleChunk &chunk);
         bool peekFront(uint64_t *minTime, uint64_t *maxTime, size_t *count) const;
         std::vector<TimestampedSingleChunk> extractCompleteBefore(uint64_t boundary);
         size_t countSinglesBefore(uint64_t boundary) const;
@@ -168,6 +170,7 @@ namespace openpni::distributed::streaming
 
         uint64_t getFrontMinTime() const;
         uint64_t getMaxEventTime() const;
+        void advanceMaxEventTime(uint64_t t);
 
         size_t getOutOfOrderCount() const;
         // minTime 相对队尾回退次数。热路径按到达序追加，回退不重排。
@@ -291,6 +294,13 @@ namespace openpni::distributed::streaming
         // 诊断：steal 进 deque 后直接丢弃，不 merge。用来拆锁/swap 墙和 memcpy 墙。
         bool stealOnly = false;
 
+        // 时间分片元数据（K=1 保持 0，输出仍为 prompt.lmf / delay.lmf）。
+        uint64_t epochId = 0;
+        uint32_t coinId = 0;
+        uint64_t epochT0_100fs = 0;
+        uint64_t epochT1_100fs = 0;
+        uint64_t epochCut_100fs = 0;
+
         uint64_t getTotalSafetyMargin() const;
         // 重叠窗长度（100fs）：coinWindow + delayTime，即 carry 需要覆盖的回溯长度。
         uint64_t overlapLength_100fs() const;
@@ -337,6 +347,16 @@ namespace openpni::distributed::streaming
         void reset();
     };
 
+    // 跨 epoch / 跨符合节点交接：overlap 作下一跳 carry，尾包为切点之后未处理数据。
+    struct EpochHandoff
+    {
+        uint64_t epochId = 0;
+        uint64_t cutWatermark_100fs = 0;
+        uint64_t overlap_100fs = 0;
+        std::vector<Single> carry;
+        std::vector<TimestampedSingleChunk> tail;
+    };
+
     class StreamingTimeAligner
     {
     public:
@@ -347,6 +367,20 @@ namespace openpni::distributed::streaming
 
         void start();
         void stop(bool waitForCompletion = true);
+
+        // 钉死 PET 切点 W（须 W <= 当前水位线）。处理完 <= W 后不 flush > W。
+        bool completeEpoch(uint64_t cutWatermark_100fs, uint64_t epochId = 0);
+        EpochHandoff takeHandoff();
+        bool applyHandoff(EpochHandoff handoff);
+        uint64_t publishedWatermark() const noexcept
+        {
+            return m_publishedWatermark.load(std::memory_order_acquire);
+        }
+        uint64_t lastExtractedWatermark() const noexcept { return m_lastWatermark; }
+        bool epochDrained() const noexcept
+        {
+            return m_epochDrained.load(std::memory_order_acquire);
+        }
 
         const ProcessingStatistics &getStatistics() const { return m_stats; }
         bool isRunning() const { return m_running.load(); }
@@ -441,6 +475,8 @@ namespace openpni::distributed::streaming
                 openpni::distributed::coreio::ListmodeWriterOptions> &output,
             std::vector<Listmode> &&coins);
         void flushRemaining();
+        void collectHandoffTail(EpochHandoff *out);
+        std::string listmodeFilePrefix(const char *kind) const;
 
         TimeAlignerConfig m_config;
         size_t m_nodeCount;
@@ -530,6 +566,14 @@ namespace openpni::distributed::streaming
         std::condition_variable m_wakeCv;
         std::atomic<uint64_t> m_wakeSeq{0};
 
+        std::mutex m_epochMutex;
+        std::condition_variable m_epochCv;
+        std::atomic<bool> m_epochRequested{false};
+        std::atomic<bool> m_epochDrained{false};
+        std::atomic<bool> m_takingHandoff{false};
+        std::atomic<uint64_t> m_epochCut{0};
+        uint64_t m_epochId = 0;
+
         std::unique_ptr<SharedMemoryPool> m_memoryPool;
 
         ProcessingStatistics m_stats;
@@ -542,5 +586,10 @@ namespace openpni::distributed::streaming
     TimeAlignerConfig createBDM50100_9120AlignerConfig(
         const std::string &outputDir,
         const openpni::CoincidenceProtocol &coinProtocol = {});
+
+    inline bool shipEpochHandoff(StreamingTimeAligner &src, StreamingTimeAligner &dst)
+    {
+        return dst.applyHandoff(src.takeHandoff());
+    }
 
 } // namespace openpni::distributed::streaming

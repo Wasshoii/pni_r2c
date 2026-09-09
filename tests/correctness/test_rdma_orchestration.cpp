@@ -12,6 +12,7 @@
 #include "dataplane/rdma/SlotProtocol.hpp"
 #include "grpcNode/coinNode.hpp"
 #include "grpcService/CoincidenceClient.hpp"
+#include "grpcService/EpochHandoffShip.hpp"
 #include "protos/coincidence.grpc.pb.h"
 
 #include <pni/core/CommonDataType.hpp>
@@ -785,6 +786,441 @@ namespace
         std::cout << "[PASS] streaming_synthetic_chunks sent=" << sent << "\n";
         return true;
     }
+
+    streaming::CoincidenceClientConfig makeDualDestClient(
+        uint32_t nodeId,
+        const std::string &addrA,
+        const std::string &addrB)
+    {
+        streaming::CoincidenceClientConfig cc;
+        cc.serverAddress = addrA;
+        cc.nodeId = nodeId;
+        cc.nodeAddress = "127.0.0.1";
+        cc.channelCount = 4;
+        cc.detectorType = "BDM2";
+        cc.forceInProcess = true;
+        cc.requireRoce = false;
+        cc.waitForStartTimeoutMs = 15000;
+        cc.heartbeatIntervalMs = 50;
+        cc.coinId = 0;
+        cc.activeCoinId = 0;
+        cc.destinations = {{0, addrA}, {1, addrB}};
+        return cc;
+    }
+
+    bool waitClientActiveCoin(streaming::CoincidenceClient &client, uint32_t want, int timeoutMs)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (client.activeCoinId() == want)
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return false;
+    }
+
+    bool startClientThread(streaming::CoincidenceClient &client)
+    {
+        std::thread t([&] { client.start(); });
+        t.join();
+        return client.isRunning();
+    }
+
+    bool testTimeShardColdSwitchInProcess()
+    {
+        const std::string addrA = "127.0.0.1:51071";
+        const std::string addrB = "127.0.0.1:51072";
+        grpcnode::CoinGrpcNode::InitOptions initA;
+        initA.alignerConfig = makeAligner("/tmp/r2c_orch_shard_cold_a");
+        initA.listenAddress = addrA;
+        initA.expectedNodeCount = 1;
+        initA.autoStartWhenAllRegistered = true;
+        initA.startLeadTimeMs = 0;
+        initA.forceInProcess = true;
+        initA.coinId = 0;
+        initA.enableTimeShard = true;
+        initA.nextCoinId = 1;
+        grpcnode::CoinGrpcNode::InitOptions initB = initA;
+        initB.alignerConfig = makeAligner("/tmp/r2c_orch_shard_cold_b");
+        initB.listenAddress = addrB;
+        initB.coinId = 1;
+        initB.enableTimeShard = false;
+        grpcnode::CoinGrpcNode coinA(initA);
+        grpcnode::CoinGrpcNode coinB(initB);
+        if (!coinA.start() || !coinB.start())
+        {
+            std::cerr << "cold dual coin start failed\n";
+            return false;
+        }
+
+        auto cc = makeDualDestClient(0, addrA, addrB);
+        streaming::CoincidenceClient client(cc);
+        if (!startClientThread(client))
+        {
+            std::cerr << "cold client start failed\n";
+            client.stop();
+            coinA.stop();
+            coinB.stop();
+            return false;
+        }
+
+        streaming::SyntheticSpec spec;
+        spec.nodeId = 0;
+        spec.peerNodeId = 0;
+        spec.promptPairs = 128;
+        spec.delayPairs = 0;
+        auto buf = streaming::generateSyntheticSingles(spec);
+        const bool okSend = client.sendSingles(buf, 0, 0);
+        const bool okDone = client.notifyProducerComplete();
+        for (int i = 0; i < 80 && !coinA.allProducersComplete(); ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        coinA.service().requestSetActiveCoin(1);
+        const bool switched = waitClientActiveCoin(client, 1, 5000);
+        client.stop();
+        coinA.stop();
+        coinB.stop();
+        if (!okSend || !okDone || !switched)
+        {
+            std::cerr << "cold switch failed send=" << okSend << " done=" << okDone
+                      << " switched=" << switched << "\n";
+            return false;
+        }
+        std::cout << "[PASS] time_shard_cold_switch (control plane only)\n";
+        return true;
+    }
+
+    bool testTimeShardHotSwitchInProcess()
+    {
+        const std::string addrA = "127.0.0.1:51073";
+        const std::string addrB = "127.0.0.1:51074";
+        grpcnode::CoinGrpcNode::InitOptions initA;
+        initA.alignerConfig = makeAligner("/tmp/r2c_orch_shard_hot_a", 2);
+        initA.alignerConfig.extractOnly = true;
+        initA.listenAddress = addrA;
+        initA.expectedNodeCount = 2;
+        initA.autoStartWhenAllRegistered = true;
+        initA.startLeadTimeMs = 0;
+        initA.forceInProcess = true;
+        initA.coinId = 0;
+        initA.enableTimeShard = true;
+        initA.nextCoinId = 1;
+        grpcnode::CoinGrpcNode::InitOptions initB = initA;
+        initB.alignerConfig = makeAligner("/tmp/r2c_orch_shard_hot_b", 2);
+        initB.alignerConfig.extractOnly = true;
+        initB.listenAddress = addrB;
+        initB.coinId = 1;
+        initB.enableTimeShard = false;
+        grpcnode::CoinGrpcNode coinA(initA);
+        grpcnode::CoinGrpcNode coinB(initB);
+        if (!coinA.start() || !coinB.start())
+        {
+            std::cerr << "hot dual coin start failed\n";
+            return false;
+        }
+
+        auto c0 = makeDualDestClient(0, addrA, addrB);
+        auto c1 = makeDualDestClient(1, addrA, addrB);
+        streaming::CoincidenceClient client0(c0);
+        streaming::CoincidenceClient client1(c1);
+        std::thread t0([&] { client0.start(); });
+        std::thread t1([&] { client1.start(); });
+        t0.join();
+        t1.join();
+        if (!client0.isRunning() || !client1.isRunning())
+        {
+            std::cerr << "hot client start failed\n";
+            client0.stop();
+            client1.stop();
+            coinA.stop();
+            coinB.stop();
+            return false;
+        }
+
+        streaming::SyntheticSpec s0;
+        s0.nodeId = 0;
+        s0.peerNodeId = 1;
+        s0.promptPairs = 256;
+        s0.delayPairs = 256;
+        streaming::SyntheticSpec s1 = s0;
+        s1.nodeId = 1;
+        const uint64_t total = streaming::syntheticEventCount(s0);
+        const uint64_t half = total / 2;
+        auto sendRange = [](streaming::CoincidenceClient &client,
+                            const streaming::SyntheticSpec &spec,
+                            uint64_t begin,
+                            uint64_t end) {
+            std::vector<streaming::Single> buf;
+            const size_t chunk = 32;
+            for (uint64_t off = begin; off < end; off += chunk)
+            {
+                const size_t n = static_cast<size_t>(std::min<uint64_t>(chunk, end - off));
+                streaming::fillSyntheticChunk(spec, off, n, &buf);
+                if (!client.sendSingles(buf, 0, 0))
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+        if (!sendRange(client0, s0, 0, half) || !sendRange(client1, s1, 0, half))
+        {
+            std::cerr << "hot first-half send failed\n";
+            client0.stop();
+            client1.stop();
+            coinA.stop();
+            coinB.stop();
+            return false;
+        }
+        bool reached = false;
+        for (int i = 0; i < 200; ++i)
+        {
+            if (coinA.aligner().publishedWatermark() > 0)
+            {
+                reached = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (!reached)
+        {
+            std::cerr << "hot watermark not ready W=" << coinA.aligner().publishedWatermark()
+                      << "\n";
+            client0.stop();
+            client1.stop();
+            coinA.stop();
+            coinB.stop();
+            return false;
+        }
+        const uint64_t wBefore = coinA.aligner().publishedWatermark();
+        coinA.service().markNextCoinPrepared(true);
+        if (!coinA.service().cutEpochAtWatermark())
+        {
+            std::cerr << "hot cutEpochAtWatermark failed W=" << wBefore << "\n";
+            client0.stop();
+            client1.stop();
+            coinA.stop();
+            coinB.stop();
+            return false;
+        }
+        if (!coinA.service().shipEpochTo(coinB.service()))
+        {
+            std::cerr << "hot shipEpochTo failed\n";
+            client0.stop();
+            client1.stop();
+            coinA.stop();
+            coinB.stop();
+            return false;
+        }
+        const bool switched =
+            waitClientActiveCoin(client0, 1, 5000) && waitClientActiveCoin(client1, 1, 5000);
+        if (!switched)
+        {
+            std::cerr << "hot SET_ACTIVE_COIN did not land\n";
+            client0.stop();
+            client1.stop();
+            coinA.stop();
+            coinB.stop();
+            return false;
+        }
+        if (!sendRange(client0, s0, half, total) || !sendRange(client1, s1, half, total))
+        {
+            std::cerr << "hot second-half send failed\n";
+            client0.stop();
+            client1.stop();
+            coinA.stop();
+            coinB.stop();
+            return false;
+        }
+        (void)client0.notifyProducerComplete();
+        (void)client1.notifyProducerComplete();
+        for (int i = 0; i < 80 && !coinA.allProducersComplete(); ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (coinB.aligner().isRunning())
+        {
+            coinB.aligner().stop(true);
+        }
+        const auto &stA = coinA.statistics();
+        const auto &stB = coinB.statistics();
+        const uint64_t prompt = stA.totalPromptPairs.load() + stB.totalPromptPairs.load();
+        const uint64_t delay = stA.totalDelayPairs.load() + stB.totalDelayPairs.load();
+        const uint64_t wAfter = coinA.service().timeLease().t1_100fs;
+        client0.stop();
+        client1.stop();
+        coinA.stop();
+        coinB.stop();
+        if (wAfter < wBefore)
+        {
+            std::cerr << "hot W not monotonic " << wBefore << "->" << wAfter << "\n";
+            return false;
+        }
+        if (prompt == 0 && delay == 0)
+        {
+            std::cout << "[WARN] hot coincidence products not checked (extract-only / no GPU)\n";
+        }
+        std::cout << "[PASS] time_shard_hot_switch prompt=" << prompt << " delay=" << delay
+                  << " W=" << wAfter << "\n";
+        return true;
+    }
+
+    bool testTimeLeaseFsmInProcess()
+    {
+        const std::string addr = "127.0.0.1:51075";
+        grpcnode::CoinGrpcNode::InitOptions init;
+        init.alignerConfig = makeAligner("/tmp/r2c_orch_lease");
+        init.listenAddress = addr;
+        init.expectedNodeCount = 1;
+        init.autoStartWhenAllRegistered = true;
+        init.startLeadTimeMs = 0;
+        init.forceInProcess = true;
+        init.coinId = 0;
+        init.enableTimeShard = true;
+        init.plannedLeaseSpan_100fs = 1;
+        init.minLease_100fs = 0;
+        grpcnode::CoinGrpcNode coin(init);
+        if (!coin.start())
+        {
+            std::cerr << "lease coin start failed\n";
+            return false;
+        }
+        streaming::CoincidenceClientConfig cc;
+        cc.serverAddress = addr;
+        cc.nodeId = 0;
+        cc.nodeAddress = "127.0.0.1";
+        cc.forceInProcess = true;
+        cc.waitForStartTimeoutMs = 15000;
+        streaming::CoincidenceClient client(cc);
+        if (!startClientThread(client))
+        {
+            std::cerr << "lease client start failed\n";
+            client.stop();
+            coin.stop();
+            return false;
+        }
+        streaming::SyntheticSpec spec;
+        spec.nodeId = 0;
+        spec.peerNodeId = 0;
+        spec.promptPairs = 256;
+        spec.delayPairs = 0;
+        auto buf = streaming::generateSyntheticSingles(spec);
+        if (!client.sendSingles(buf, 0, 0))
+        {
+            std::cerr << "lease send failed\n";
+            client.stop();
+            coin.stop();
+            return false;
+        }
+        bool gotW = false;
+        for (int i = 0; i < 200; ++i)
+        {
+            if (coin.aligner().publishedWatermark() > 0)
+            {
+                gotW = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        const bool noPrepare = !coin.service().maybePreemptLease();
+        const auto stay = coin.service().timeLease();
+        coin.service().markNextCoinPrepared(true);
+        const bool cut = coin.service().maybePreemptLease();
+        const auto after = coin.service().timeLease();
+        const bool second = coin.service().maybePreemptLease();
+        client.stop();
+        coin.stop();
+        if (!gotW || !noPrepare || stay.activeCoinId != 0 || stay.epochId != 0 || !cut ||
+            after.epochId != 1 || after.t1_100fs == 0 || second)
+        {
+            std::cerr << "lease fsm failed gotW=" << gotW << " noPrepare=" << noPrepare
+                      << " stayEpoch=" << stay.epochId << " cut=" << cut
+                      << " epoch=" << after.epochId << " W=" << after.t1_100fs
+                      << " second=" << second << "\n";
+            return false;
+        }
+        std::cout << "[PASS] time_lease_fsm W=" << after.t1_100fs << "\n";
+        return true;
+    }
+
+    bool singlesMatch(const streaming::Single &a, const streaming::Single &b)
+    {
+        return a.channelIndex == b.channelIndex && a.crystalIndex == b.crystalIndex &&
+               a.timevalue_100fs == b.timevalue_100fs && a.energy_ev == b.energy_ev;
+    }
+
+    bool testEpochShipDataplane(bool requireRoce)
+    {
+        if (requireRoce && !rdma::RdmaDevice::hasVerbsDevice())
+        {
+            std::cout << "[SKIP] epoch_ship_roce (no verbs device)\n";
+            return true;
+        }
+        streaming::EpochHandoff in;
+        in.epochId = 7;
+        in.cutWatermark_100fs = 123456;
+        in.overlap_100fs = 2000;
+        in.carry.resize(8);
+        for (uint32_t i = 0; i < in.carry.size(); ++i)
+        {
+            in.carry[i].channelIndex = static_cast<uint16_t>(i);
+            in.carry[i].crystalIndex = 1;
+            in.carry[i].timevalue_100fs = in.cutWatermark_100fs - 10 + i;
+            in.carry[i].energy_ev = 511.0f;
+        }
+        streaming::TimestampedSingleChunk tail;
+        tail.nodeId = 1;
+        tail.chunkId = 9;
+        tail.singles.resize(5);
+        for (uint32_t i = 0; i < tail.singles.size(); ++i)
+        {
+            tail.singles[i].channelIndex = 3;
+            tail.singles[i].crystalIndex = 2;
+            tail.singles[i].timevalue_100fs = in.cutWatermark_100fs + 1 + i;
+            tail.singles[i].energy_ev = 511.0f;
+        }
+        tail.updateTimeRange();
+        in.tail.push_back(std::move(tail));
+
+        streaming::EpochHandoff out;
+        if (!streaming::shipEpochHandoffViaDataplane(in, &out, requireRoce))
+        {
+            if (requireRoce)
+            {
+                std::cout << "[SKIP] epoch_ship_roce (handshake failed)\n";
+                return true;
+            }
+            std::cerr << "epoch ship dataplane failed\n";
+            return false;
+        }
+        if (out.epochId != in.epochId || out.cutWatermark_100fs != in.cutWatermark_100fs ||
+            out.carry.size() != in.carry.size() || out.tail.size() != 1)
+        {
+            std::cerr << "epoch ship meta mismatch\n";
+            return false;
+        }
+        for (size_t i = 0; i < in.carry.size(); ++i)
+        {
+            if (!singlesMatch(in.carry[i], out.carry[i]))
+            {
+                std::cerr << "epoch ship carry mismatch at " << i << "\n";
+                return false;
+            }
+        }
+        if (out.tail[0].nodeId != 1 || out.tail[0].singles.size() != 5 ||
+            !singlesMatch(in.tail[0].singles[0], out.tail[0].singles[0]))
+        {
+            std::cerr << "epoch ship tail mismatch\n";
+            return false;
+        }
+        std::cout << "[PASS] epoch_ship_" << (requireRoce ? "roce" : "inprocess")
+                  << " carry=" << out.carry.size() << " tail=" << out.tail.size() << "\n";
+        return true;
+    }
 } // namespace
 
 int main(int argc, char **argv)
@@ -809,6 +1245,16 @@ int main(int argc, char **argv)
     if (!testHeartbeatTelemetryAndPause())
         rc = 1;
     if (!testStreamingSyntheticChunksInProcess())
+        rc = 1;
+    if (!testTimeShardColdSwitchInProcess())
+        rc = 1;
+    if (!testTimeShardHotSwitchInProcess())
+        rc = 1;
+    if (!testTimeLeaseFsmInProcess())
+        rc = 1;
+    if (!testEpochShipDataplane(false))
+        rc = 1;
+    if (!testEpochShipDataplane(true))
         rc = 1;
     return rc;
 }

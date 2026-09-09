@@ -57,6 +57,15 @@ namespace openpni::distributed::streaming
         uint32_t txSlotCount = 0;
         uint32_t requestedSlotCount = 0;
         uint32_t requestedSlotBytes = 0;
+
+        uint32_t coinId = 0;
+        uint32_t activeCoinId = 0;
+        struct Destination
+        {
+            uint32_t coinId = 0;
+            std::string address;
+        };
+        std::vector<Destination> destinations;
     };
 
     struct WorkerTelemetry
@@ -114,6 +123,8 @@ namespace openpni::distributed::streaming
         uint64_t rdmaSlotsInFlight() const;
         uint32_t rdmaCreditRemaining() const;
         uint64_t txD2hStreamCreateCount() const;
+        uint32_t activeCoinId() const;
+        void setActiveCoinId(uint32_t coinId);
 
         bool waitForServerStartSignal(uint32_t timeoutMs = 0);
         bool waitUntilIdle();
@@ -127,6 +138,7 @@ namespace openpni::distributed::streaming
 
         bool registerNode();
         bool openRdmaDataPlane();
+        bool openOneDataPlane(const std::string &address, uint32_t coinId);
         bool waitIfPausedOrStopped();
         bool fillRoceTxAndCommit(
             std::span<const Single> singles,
@@ -152,7 +164,7 @@ namespace openpni::distributed::streaming
         };
         void destroyTxD2hDeviceResources(TxD2hResources *res);
         void heartbeatLoop();
-        void applyProducerCommand(coincidence::ProducerCommand command);
+        void applyProducerCommand(coincidence::ProducerCommand command, uint32_t activeCoinId);
         coincidence::SourceState currentSourceState() const;
         void fillHeartbeatTelemetry(coincidence::HeartbeatRequest *request);
 
@@ -161,6 +173,10 @@ namespace openpni::distributed::streaming
         std::shared_ptr<grpc::Channel> m_channel;
         std::unique_ptr<coincidence::CoincidenceService::Stub> m_stub;
         std::unique_ptr<openpni::distributed::dataplane::rdma::RdmaWriteSender> m_rdmaSender;
+        std::unordered_map<uint32_t, std::unique_ptr<openpni::distributed::dataplane::rdma::RdmaWriteSender>>
+            m_idleSenders;
+        std::atomic<uint32_t> m_activeCoinId{0};
+        std::mutex m_senderMutex;
 
         mutable std::mutex m_mutex;
         std::condition_variable m_cv;

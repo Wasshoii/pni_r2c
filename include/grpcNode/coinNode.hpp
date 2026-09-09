@@ -5,6 +5,7 @@
 #include <string>
 
 #include "core/streaming/StreamingCoincidence.hpp"
+#include "grpcService/CoincidenceServiceImpl.hpp"
 #include "protos/coincidence.pb.h"
 
 namespace openpni::distributed::grpcnode
@@ -30,6 +31,11 @@ namespace openpni::distributed::grpcnode
             uint32_t slotCount = 0;
             size_t slotBytes = 0;
             uint32_t heartbeatTimeoutMs = 3000;
+            uint32_t coinId = 0;
+            bool enableTimeShard = false;
+            uint64_t plannedLeaseSpan_100fs = 0;
+            uint64_t minLease_100fs = 0;
+            uint32_t nextCoinId = 1;
         };
 
         explicit CoinGrpcNode(InitOptions init);
@@ -65,6 +71,7 @@ namespace openpni::distributed::grpcnode
 
         streaming::StreamingTimeAligner &aligner();
         const streaming::StreamingTimeAligner &aligner() const;
+        streaming::CoincidenceServiceImpl &service();
 
         bool isServerRunning() const;
         bool isAlignerRunning() const;

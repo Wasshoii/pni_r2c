@@ -37,6 +37,11 @@ namespace openpni::distributed::grpcnode
             cfg.slotCount = init.slotCount;
             cfg.slotBytes = init.slotBytes;
             cfg.heartbeatTimeoutMs = init.heartbeatTimeoutMs;
+            cfg.coinId = init.coinId;
+            cfg.enableTimeShard = init.enableTimeShard;
+            cfg.plannedLeaseSpan_100fs = init.plannedLeaseSpan_100fs;
+            cfg.minLease_100fs = init.minLease_100fs;
+            cfg.nextCoinId = init.nextCoinId;
             return cfg;
         }
     } // namespace
@@ -132,6 +137,11 @@ namespace openpni::distributed::grpcnode
         streaming::StreamingTimeAligner &aligner()
         {
             return server_.getAligner();
+        }
+
+        streaming::CoincidenceServiceImpl &service()
+        {
+            return server_.getService();
         }
 
         const streaming::StreamingTimeAligner &aligner() const
@@ -248,6 +258,11 @@ namespace openpni::distributed::grpcnode
     streaming::StreamingTimeAligner &CoinGrpcNode::aligner()
     {
         return m_impl->aligner();
+    }
+
+    streaming::CoincidenceServiceImpl &CoinGrpcNode::service()
+    {
+        return m_impl->service();
     }
 
     const streaming::StreamingTimeAligner &CoinGrpcNode::aligner() const

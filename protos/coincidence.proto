@@ -70,6 +70,7 @@ enum ProducerCommand {
     CMD_PAUSE_PRODUCE = 2;
     CMD_STOP_PRODUCE = 3;
     CMD_DRAIN = 4;
+    CMD_SET_ACTIVE_COIN = 5;
     // Reserved; acquisition is not implemented this phase:
     // CMD_START_ACQ = 10;
     // CMD_STOP_ACQ = 11;
@@ -275,6 +276,7 @@ message HeartbeatResponse {
     uint64 echo_timestamp_ms = 3;
     ProducerCommand command = 4;
     bool start_signal_issued = 5;
+    uint32 active_coin_id = 6;
 }
 
 message NotifyProducerCompleteRequest {

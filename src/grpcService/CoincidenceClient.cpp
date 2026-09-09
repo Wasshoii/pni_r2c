@@ -101,7 +101,7 @@ namespace openpni::distributed::streaming
     } // namespace
 
     CoincidenceClient::CoincidenceClient(const CoincidenceClientConfig &config)
-        : m_config(config)
+        : m_config(config), m_activeCoinId(config.activeCoinId)
     {
         m_channel = grpc::CreateChannel(
             config.serverAddress,
@@ -180,11 +180,43 @@ namespace openpni::distributed::streaming
             m_rdmaSender->close();
             m_rdmaSender.reset();
         }
+        for (auto &kv : m_idleSenders)
+        {
+            if (kv.second)
+            {
+                kv.second->close();
+            }
+        }
+        m_idleSenders.clear();
 
         LOG(INFO) << "Stopped";
     }
 
     bool CoincidenceClient::openRdmaDataPlane()
+    {
+        if (m_config.destinations.empty())
+        {
+            if (!openOneDataPlane(m_config.serverAddress, m_config.coinId))
+            {
+                return false;
+            }
+            m_activeCoinId.store(m_config.coinId, std::memory_order_release);
+            m_connected = true;
+            return true;
+        }
+        for (const auto &d : m_config.destinations)
+        {
+            if (!openOneDataPlane(d.address, d.coinId))
+            {
+                return false;
+            }
+        }
+        setActiveCoinId(m_config.activeCoinId);
+        m_connected = m_rdmaSender != nullptr;
+        return m_connected.load();
+    }
+
+    bool CoincidenceClient::openOneDataPlane(const std::string &address, uint32_t coinId)
     {
         rdma::RdmaWriteSender::Config sc;
         sc.nodeId = m_config.nodeId;
@@ -197,10 +229,10 @@ namespace openpni::distributed::streaming
         {
             sc.txSlotCount = m_config.txSlotCount;
         }
-        m_rdmaSender = std::make_unique<rdma::RdmaWriteSender>(std::move(sc));
+        auto sender = std::make_unique<rdma::RdmaWriteSender>(std::move(sc));
 
         rdma::RdmaEndpointInfo localEp{};
-        if (!m_rdmaSender->prepareLocalEndpoint(&localEp))
+        if (!sender->prepareLocalEndpoint(&localEp))
         {
             LOG(ERROR) << "prepareLocalEndpoint failed";
             return false;
@@ -209,6 +241,16 @@ namespace openpni::distributed::streaming
         {
             LOG(ERROR) << "requireRoce but local endpoint is not RoCE";
             return false;
+        }
+
+        std::shared_ptr<grpc::Channel> channel = m_channel;
+        std::unique_ptr<coincidence::CoincidenceService::Stub> extraStub;
+        coincidence::CoincidenceService::Stub *stub = m_stub.get();
+        if (address != m_config.serverAddress)
+        {
+            channel = grpc::CreateChannel(address, grpc::InsecureChannelCredentials());
+            extraStub = coincidence::CoincidenceService::NewStub(channel);
+            stub = extraStub.get();
         }
 
         grpc::ClientContext context;
@@ -225,7 +267,7 @@ namespace openpni::distributed::streaming
         rdma::fillProtoEndpoint(localEp, req.mutable_node_endpoint());
 
         coincidence::OpenDataPlaneResponse resp;
-        grpc::Status status = m_stub->OpenDataPlane(&context, req, &resp);
+        grpc::Status status = stub->OpenDataPlane(&context, req, &resp);
         if (!status.ok() || !resp.success())
         {
             LOG(ERROR) << "OpenDataPlane failed: "
@@ -239,16 +281,16 @@ namespace openpni::distributed::streaming
             LOG(ERROR) << "requireRoce but coin endpoint is InProcess";
             return false;
         }
-        if (!m_rdmaSender->connect(coinEp))
+        if (!sender->connect(coinEp))
         {
             LOG(ERROR) << "RDMA connect failed";
             return false;
         }
-        if (m_rdmaSender->kind() == rdma::DataPlaneKind::RdmaRoceV2)
+        if (sender->kind() == rdma::DataPlaneKind::RdmaRoceV2)
         {
             const bool registered = openpni::distributed::r2s::multi_gpu::tryCudaHostRegister(
-                m_rdmaSender->txStagingBase(), m_rdmaSender->txStagingBytes());
-            m_rdmaSender->setTxCudaRegistered(registered);
+                sender->txStagingBase(), sender->txStagingBytes());
+            sender->setTxCudaRegistered(registered);
             if (!registered)
             {
                 LOG(ERROR) << "cudaHostRegister TX arena failed; RoCE device D2H requires "
@@ -256,21 +298,49 @@ namespace openpni::distributed::streaming
                            << m_config.nodeId;
                 return false;
             }
-            LOG(INFO) << "txCudaRegistered=1 node=" << m_config.nodeId
-                      << " bytes=" << m_rdmaSender->txStagingBytes();
         }
         LOG(INFO) << "RDMA dataplane connected node=" << m_config.nodeId
-                  << " kind=" << static_cast<uint32_t>(m_rdmaSender->kind())
-                  << " localDevice=" << localEp.deviceName
-                  << " gidIndex=" << localEp.gidIndex
-                  << " localQp=" << localEp.qpNum
-                  << " remoteQp=" << coinEp.qpNum
-                  << " slots=" << m_rdmaSender->slotCount()
-                  << " stride=" << m_rdmaSender->slotStride()
-                  << " txCudaRegistered="
-                  << (m_rdmaSender->txCudaRegistered() ? 1 : 0);
-        m_connected = true;
+                  << " coinId=" << coinId
+                  << " kind=" << static_cast<uint32_t>(sender->kind());
+        if (!m_rdmaSender)
+        {
+            m_rdmaSender = std::move(sender);
+            m_activeCoinId.store(coinId, std::memory_order_release);
+        }
+        else
+        {
+            m_idleSenders[coinId] = std::move(sender);
+        }
         return true;
+    }
+
+    uint32_t CoincidenceClient::activeCoinId() const
+    {
+        return m_activeCoinId.load(std::memory_order_acquire);
+    }
+
+    void CoincidenceClient::setActiveCoinId(uint32_t coinId)
+    {
+        std::lock_guard<std::mutex> senderLock(m_senderMutex);
+        const uint32_t cur = m_activeCoinId.load(std::memory_order_acquire);
+        if (cur == coinId && m_rdmaSender)
+        {
+            return;
+        }
+        if (m_rdmaSender)
+        {
+            m_idleSenders[cur] = std::move(m_rdmaSender);
+        }
+        auto it = m_idleSenders.find(coinId);
+        if (it == m_idleSenders.end())
+        {
+            LOG(ERROR) << "setActiveCoinId: no session for coin " << coinId;
+            return;
+        }
+        m_rdmaSender = std::move(it->second);
+        m_idleSenders.erase(it);
+        m_activeCoinId.store(coinId, std::memory_order_release);
+        LOG(INFO) << "active coin switched to " << coinId << " node=" << m_config.nodeId;
     }
 
     void CoincidenceClient::destroyTxD2hDeviceResources(TxD2hResources *res)
@@ -471,6 +541,11 @@ namespace openpni::distributed::streaming
         {
             return false;
         }
+        std::lock_guard<std::mutex> senderLock(m_senderMutex);
+        if (!m_rdmaSender)
+        {
+            return false;
+        }
         const bool ok = m_rdmaSender->sendPackedSingles(
             chunkId, computerClock_ms, duration_ms, src, count);
         m_connected = ok;
@@ -486,6 +561,7 @@ namespace openpni::distributed::streaming
         {
             return true;
         }
+        std::lock_guard<std::mutex> senderLock(m_senderMutex);
         if (!m_rdmaSender)
         {
             return false;
@@ -1099,7 +1175,7 @@ namespace openpni::distributed::streaming
                     m_lastRttMs.store(now - response.echo_timestamp_ms(), std::memory_order_release);
                 }
             }
-            applyProducerCommand(response.command());
+            applyProducerCommand(response.command(), response.active_coin_id());
         }
     }
 
@@ -1149,10 +1225,21 @@ namespace openpni::distributed::streaming
         request->set_acq_running(tel.acqRunning);
     }
 
-    void CoincidenceClient::applyProducerCommand(coincidence::ProducerCommand command)
+    void CoincidenceClient::applyProducerCommand(coincidence::ProducerCommand command,
+                                                 uint32_t activeCoinId)
     {
+        const bool switchCoin =
+            command == coincidence::CMD_SET_ACTIVE_COIN ||
+            (!m_config.destinations.empty() &&
+             activeCoinId != m_activeCoinId.load(std::memory_order_acquire));
+        if (switchCoin)
+        {
+            setActiveCoinId(activeCoinId);
+        }
         switch (command)
         {
+        case coincidence::CMD_SET_ACTIVE_COIN:
+            break;
         case coincidence::CMD_PAUSE_PRODUCE:
             if (!m_paused.exchange(true))
             {

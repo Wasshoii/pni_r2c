@@ -34,6 +34,7 @@ flowchart TB
     r2sGpu[test_r2s_50100_multi_gpu]
     coinGpu[test_coin_multi_gpu]
     carry[test_coin_carry_boundary]
+    shard[test_coin_time_shard]
   end
   subgraph comm [通信]
     orch[test_rdma_orchestration]
@@ -78,6 +79,7 @@ flowchart TB
 | `test_r2s_50100_multi_gpu` | 测试 50100 单事件转换在多 GPU 上的正确性 |
 | `test_coin_multi_gpu` | 测试符合计算在多 GPU 上与单 GPU 结果一致 |
 | `test_coin_carry_boundary` | 测试流式分段符合在窗口边界用 carry 能否找回丢失的符合 |
+| `test_coin_time_shard` | 测试时间分片双对齐器交接是否与 9120 金标准等价（delay 全等，prompt 遵守 carry 契约） |
 | `test_app_config_parse` | 测试 AppConfig 能否解析 example 与 InProcess 冒烟 JSON（有 app 二进制再跑 --dry-run） |
 | `test_timesync_algorithm` | 测试多节点时钟漂移校正算法（不走真实 gRPC） |
 | `test_pni_r2s_offline` | 用盘上 raw 离线跑 50100 R2S，产出 singles 供对照（非 CI） |
@@ -87,7 +89,7 @@ flowchart TB
 
 | 目标 | 用途 |
 |------|------|
-| `test_rdma_orchestration` | 测试 worker↔coin 的 Register / OpenDataPlane / Start 握手、PAUSE、InProcess 发送与通道 remap |
+| `test_rdma_orchestration` | 测试 worker↔coin 握手、PAUSE、InProcess 发送、通道 remap，以及时间分片冷/热切、租约 FSM 与 Ship |
 | `test_rdma_singles_ingress` | 测试 `.lsingle` 经数据面灌入 coin 接收环的连续性与吞吐（不算符合） |
 | `test_acq_control_init` | 测试采集 Master 向节点下发任务并进入 CONFIGURED |
 | `test_timesync_grpc` | 测试 timesync 的 gRPC 同步、多轮校正与并发客户端 |

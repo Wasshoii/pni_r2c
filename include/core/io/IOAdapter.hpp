@@ -277,7 +277,8 @@ namespace coreio
                 Fields::local_crystal_index2 |
                 Fields::channel_index1 |
                 Fields::channel_index2 |
-                Fields::time_of_flight_100fs);
+                Fields::time_of_flight_100fs |
+                Fields::coincidence_timestamp_100us);
 
             ::openpni::io::listmode::ListmodeFileHeader header;
             header.SetFieldsInUse(fieldsInUse);
@@ -286,6 +287,7 @@ namespace coreio
             header.SetBitsForStorage(Fields::channel_index1, 16);
             header.SetBitsForStorage(Fields::channel_index2, 16);
             header.SetBitsForStorage(Fields::time_of_flight_100fs, 16);
+            header.SetBitsForStorage(Fields::coincidence_timestamp_100us, 32);
             header.SetFileTypeName(::openpni::io::listmode::fields::file_type_coin_listmode);
 
             latestWriter_ = std::make_unique<::openpni::io::ListmodeFileOutput>(std::move(header), std::move(ioOptions));

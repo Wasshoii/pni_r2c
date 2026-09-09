@@ -70,6 +70,34 @@ namespace openpni::distributed::streaming
             uint32_t slotCount = 0;
             size_t slotBytes = 0;
             uint32_t heartbeatTimeoutMs = 3000;
+
+            uint32_t coinId = 0;
+            bool enableTimeShard = false;
+            uint64_t plannedLeaseSpan_100fs = 0;
+            uint64_t minLease_100fs = 0;
+            uint32_t nextCoinId = 1;
+        };
+
+        enum class TimeLeasePhase : uint32_t
+        {
+            LeaseActive = 0,
+            PrepareNext = 1,
+            Cutting = 2,
+            Shipping = 3,
+            Redirected = 4,
+            DrainPrev = 5
+        };
+
+        struct TimeLease
+        {
+            uint64_t epochId = 0;
+            uint32_t coinId = 0;
+            uint64_t t0_100fs = 0;
+            uint64_t t1_100fs = 0;
+            uint64_t minLease_100fs = 0;
+            TimeLeasePhase phase = TimeLeasePhase::LeaseActive;
+            uint32_t activeCoinId = 0;
+            bool nextPrepared = false;
         };
 
         explicit CoincidenceServiceImpl(StreamingTimeAligner &aligner);
@@ -145,6 +173,16 @@ namespace openpni::distributed::streaming
         void notifyServerStopping();
         void clearServerStoppingState();
 
+        TimeLease timeLease() const;
+        void markNextCoinPrepared(bool prepared);
+        void requestSetActiveCoin(uint32_t coinId);
+        uint32_t activeCoinId() const;
+        bool cutEpochAtWatermark();
+        EpochHandoff takeEpochHandoff();
+        bool applyEpochHandoff(EpochHandoff handoff);
+        bool maybePreemptLease();
+        bool shipEpochTo(CoincidenceServiceImpl &next);
+
         openpni::distributed::dataplane::rdma::RdmaRecvServer &rdmaServer() { return *m_rdmaServer; }
 
     private:
@@ -192,6 +230,10 @@ namespace openpni::distributed::streaming
         std::atomic<uint32_t> m_observedDataPlaneKind{0};
         std::atomic<uint32_t> m_pendingProducerCommand{
             static_cast<uint32_t>(coincidence::CMD_NONE)};
+        std::atomic<uint32_t> m_activeCoinId{0};
+
+        TimeLease m_lease;
+        mutable std::mutex m_leaseMutex;
 
         std::unique_ptr<openpni::distributed::dataplane::rdma::RdmaRecvServer> m_rdmaServer;
 

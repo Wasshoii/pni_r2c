@@ -38,6 +38,11 @@ namespace openpni::distributed::streaming
         }
 
         startRdmaIngest();
+        m_lease.coinId = m_orchestration.coinId;
+        m_lease.activeCoinId = m_orchestration.coinId;
+        m_lease.minLease_100fs = m_orchestration.minLease_100fs;
+        m_lease.t1_100fs = m_orchestration.plannedLeaseSpan_100fs;
+        m_activeCoinId.store(m_orchestration.coinId, std::memory_order_release);
     }
 
     void CoincidenceServiceImpl::startRdmaIngest()
@@ -268,9 +273,16 @@ namespace openpni::distributed::streaming
             std::lock_guard<std::mutex> lock(m_orchestrationMutex);
             if (m_registeredNodes.find(nodeId) == m_registeredNodes.end())
             {
-                response->set_success(false);
-                response->set_message("Node not registered; call RegisterNode before OpenDataPlane");
-                return grpc::Status::OK;
+                // Worker coins accept OpenDataPlane without Register; Register/HB
+                // stay on Master (coin 0).
+                if (m_orchestration.coinId == 0)
+                {
+                    response->set_success(false);
+                    response->set_message(
+                        "Node not registered; call RegisterNode before OpenDataPlane");
+                    return grpc::Status::OK;
+                }
+                m_registeredNodes.insert(nodeId);
             }
         }
 
@@ -726,6 +738,7 @@ namespace openpni::distributed::streaming
         response->set_echo_timestamp_ms(request->timestamp_ms());
         response->set_command(pendingProducerCommand());
         response->set_start_signal_issued(m_startSignalIssued.load(std::memory_order_acquire));
+        response->set_active_coin_id(m_activeCoinId.load(std::memory_order_acquire));
         return grpc::Status::OK;
     }
 
@@ -936,6 +949,153 @@ namespace openpni::distributed::streaming
     {
         m_pendingProducerCommand.store(static_cast<uint32_t>(command), std::memory_order_release);
         LOG(INFO) << "Pending producer command=" << static_cast<uint32_t>(command);
+    }
+
+    CoincidenceServiceImpl::TimeLease CoincidenceServiceImpl::timeLease() const
+    {
+        std::lock_guard<std::mutex> lock(m_leaseMutex);
+        return m_lease;
+    }
+
+    void CoincidenceServiceImpl::markNextCoinPrepared(bool prepared)
+    {
+        std::lock_guard<std::mutex> lock(m_leaseMutex);
+        m_lease.nextPrepared = prepared;
+        if (prepared && m_lease.phase == TimeLeasePhase::LeaseActive)
+        {
+            m_lease.phase = TimeLeasePhase::PrepareNext;
+        }
+    }
+
+    void CoincidenceServiceImpl::requestSetActiveCoin(uint32_t coinId)
+    {
+        m_activeCoinId.store(coinId, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(m_leaseMutex);
+            m_lease.activeCoinId = coinId;
+            m_lease.phase = TimeLeasePhase::Redirected;
+        }
+        setPendingProducerCommand(coincidence::CMD_SET_ACTIVE_COIN);
+    }
+
+    uint32_t CoincidenceServiceImpl::activeCoinId() const
+    {
+        return m_activeCoinId.load(std::memory_order_acquire);
+    }
+
+    bool CoincidenceServiceImpl::cutEpochAtWatermark()
+    {
+        const uint64_t W = m_aligner.publishedWatermark();
+        if (W == 0)
+        {
+            return false;
+        }
+        uint64_t epochId = 0;
+        TimeLeasePhase prev = TimeLeasePhase::LeaseActive;
+        {
+            std::lock_guard<std::mutex> lock(m_leaseMutex);
+            if (m_lease.phase == TimeLeasePhase::Cutting ||
+                m_lease.phase == TimeLeasePhase::Shipping ||
+                m_lease.phase == TimeLeasePhase::Redirected ||
+                m_lease.phase == TimeLeasePhase::DrainPrev)
+            {
+                return false;
+            }
+            prev = m_lease.phase;
+            m_lease.phase = TimeLeasePhase::Cutting;
+            m_lease.t1_100fs = W;
+            epochId = m_lease.epochId + 1;
+        }
+        if (!m_aligner.completeEpoch(W, epochId))
+        {
+            std::lock_guard<std::mutex> lock(m_leaseMutex);
+            m_lease.phase = prev;
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(m_leaseMutex);
+        m_lease.epochId = epochId;
+        m_lease.phase = TimeLeasePhase::Shipping;
+        return true;
+    }
+
+    EpochHandoff CoincidenceServiceImpl::takeEpochHandoff()
+    {
+        return m_aligner.takeHandoff();
+    }
+
+    bool CoincidenceServiceImpl::applyEpochHandoff(EpochHandoff handoff)
+    {
+        return m_aligner.applyHandoff(std::move(handoff));
+    }
+
+    bool CoincidenceServiceImpl::maybePreemptLease()
+    {
+        if (!m_orchestration.enableTimeShard)
+        {
+            return false;
+        }
+        const uint64_t nowW = m_aligner.publishedWatermark();
+        bool high = m_aligner.getMemoryStatus().usageRatio >= 0.80;
+        for (size_t i = 0; i < m_aligner.getNodeCount(); ++i)
+        {
+            auto *buf = m_aligner.getNodeBuffer(static_cast<uint16_t>(i));
+            if (buf && buf->occupancyRatio() >= 0.80)
+            {
+                high = true;
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_leaseMutex);
+            if (!m_lease.nextPrepared)
+            {
+                return false;
+            }
+            if (m_lease.phase != TimeLeasePhase::LeaseActive &&
+                m_lease.phase != TimeLeasePhase::PrepareNext)
+            {
+                return false;
+            }
+            const uint64_t elapsed = nowW > m_lease.t0_100fs ? nowW - m_lease.t0_100fs : 0;
+            if (m_lease.minLease_100fs > 0 && elapsed < m_lease.minLease_100fs)
+            {
+                return false;
+            }
+            uint64_t plannedT1 = m_orchestration.plannedLeaseSpan_100fs;
+            if (m_lease.t0_100fs > 0 && m_orchestration.plannedLeaseSpan_100fs > 0 &&
+                plannedT1 < m_lease.t0_100fs)
+            {
+                plannedT1 = m_lease.t0_100fs + m_orchestration.plannedLeaseSpan_100fs;
+            }
+            const bool planned = plannedT1 > 0 && nowW >= plannedT1;
+            if (!high && !planned)
+            {
+                return false;
+            }
+        }
+        return cutEpochAtWatermark();
+    }
+
+    bool CoincidenceServiceImpl::shipEpochTo(CoincidenceServiceImpl &next)
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_leaseMutex);
+            m_lease.phase = TimeLeasePhase::Shipping;
+        }
+        EpochHandoff h = m_aligner.takeHandoff();
+        if (h.cutWatermark_100fs == 0)
+        {
+            return false;
+        }
+        if (!next.applyEpochHandoff(std::move(h)))
+        {
+            return false;
+        }
+        requestSetActiveCoin(next.m_orchestration.coinId);
+        {
+            std::lock_guard<std::mutex> lock(m_leaseMutex);
+            m_lease.phase = TimeLeasePhase::DrainPrev;
+        }
+        return true;
     }
 
     void CoincidenceServiceImpl::maybeAutoStartAfterDataplane()

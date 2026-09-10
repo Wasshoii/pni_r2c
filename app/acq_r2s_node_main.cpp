@@ -552,6 +552,11 @@ int main(int argc, char **argv)
     coinClientConfig.rdmaDeviceName = cfg.coinClient.dataplane.deviceName;
     coinClientConfig.gidIndex = cfg.coinClient.dataplane.gidIndex;
     coinClientConfig.txSlotCount = cfg.coinClient.dataplane.txSlotCount;
+    coinClientConfig.activeCoinId = cfg.coinClient.activeCoinId;
+    for (const auto &dest : cfg.coinClient.destinations)
+    {
+        coinClientConfig.destinations.push_back({dest.coinId, dest.address});
+    }
 
     streaming::CoincidenceClient coinClient(coinClientConfig);
 

@@ -36,6 +36,8 @@ namespace openpni::distributed::grpcnode
             uint64_t plannedLeaseSpan_100fs = 0;
             uint64_t minLease_100fs = 0;
             uint32_t nextCoinId = 1;
+            std::string nextCoinAddress;
+            std::string masterAddress;
         };
 
         explicit CoinGrpcNode(InitOptions init);

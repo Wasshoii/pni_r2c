@@ -6,6 +6,7 @@
 #include "app/common/AppConfig.hpp"
 
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <sys/wait.h>
@@ -152,6 +153,136 @@ namespace
         return true;
     }
 
+    bool writeTempJson(const std::string &path, const std::string &body)
+    {
+        std::ofstream ofs(path);
+        if (!ofs)
+        {
+            return false;
+        }
+        ofs << body;
+        return static_cast<bool>(ofs);
+    }
+
+    bool testParseTimeShardRoles()
+    {
+        const std::string masterPath = "/tmp/r2c_parse_coin_master_shard.json";
+        const std::string computePath = "/tmp/r2c_parse_coin_compute.json";
+        const std::string workerPath = "/tmp/r2c_parse_worker_dest.json";
+        if (!writeTempJson(masterPath, R"({
+  "cluster": {
+    "listenAddress": "0.0.0.0:50061",
+    "expectedNodeCount": 2,
+    "role": "master",
+    "coinId": 0,
+    "enableTimeShard": true,
+    "plannedLeaseSpan_100fs": 10000000,
+    "minLease_100fs": 1000,
+    "nextCoinId": 1,
+    "nextCoinAddress": "127.0.0.1:50062"
+  },
+  "dataplane": { "requireRoce": false, "forceInProcess": true },
+  "coincidence": { "detectorProfile": "BDM2", "outputDir": "/tmp/r2c_parse_master" }
+})"))
+        {
+            return fail("write master time-shard json");
+        }
+        if (!writeTempJson(computePath, R"({
+  "cluster": {
+    "listenAddress": "0.0.0.0:50062",
+    "expectedNodeCount": 2,
+    "role": "compute",
+    "coinId": 1,
+    "masterAddress": "127.0.0.1:50061"
+  },
+  "dataplane": { "requireRoce": false, "forceInProcess": true },
+  "coincidence": { "detectorProfile": "BDM2", "outputDir": "/tmp/r2c_parse_compute" }
+})"))
+        {
+            return fail("write compute json");
+        }
+        if (!writeTempJson(workerPath, R"({
+  "cluster": { "serverAddress": "127.0.0.1:50061", "nodeId": 0, "nodeAddress": "127.0.0.1" },
+  "dataplane": { "requireRoce": false, "forceInProcess": true },
+  "coinClient": {
+    "enabled": true,
+    "activeCoinId": 0,
+    "destinations": [
+      { "coinId": 0, "address": "127.0.0.1:50061" },
+      { "coinId": 1, "address": "127.0.0.1:50062" }
+    ]
+  },
+  "source": { "type": "synthetic", "promptPairs": 8, "delayPairs": 8 }
+})"))
+        {
+            return fail("write worker destinations json");
+        }
+
+        appcfg::CoinMasterConfig master;
+        appcfg::CoinMasterConfig compute;
+        appcfg::AcqR2SNodeConfig worker;
+        std::string err;
+        if (!appcfg::loadCoinMasterConfig(masterPath, &master, &err))
+        {
+            std::cerr << err << "\n";
+            return fail("load master time-shard json");
+        }
+        if (!appcfg::loadCoinMasterConfig(computePath, &compute, &err))
+        {
+            std::cerr << err << "\n";
+            return fail("load compute json");
+        }
+        if (!appcfg::loadAcqR2SNodeConfig(workerPath, &worker, &err))
+        {
+            std::cerr << err << "\n";
+            return fail("load worker destinations json");
+        }
+        if (master.coinMaster.role != appcfg::CoinRole::Master ||
+            !master.coinMaster.enableTimeShard ||
+            master.coinMaster.nextCoinId != 1 ||
+            master.coinMaster.nextCoinAddress != "127.0.0.1:50062")
+        {
+            return fail("master time-shard fields");
+        }
+        if (compute.coinMaster.role != appcfg::CoinRole::Compute ||
+            compute.coinMaster.coinId != 1 ||
+            compute.coinMaster.masterAddress != "127.0.0.1:50061")
+        {
+            return fail("compute role fields");
+        }
+        if (worker.coinClient.destinations.size() != 2 ||
+            worker.coinClient.destinations[1].coinId != 1 ||
+            worker.coinClient.destinations[1].address != "127.0.0.1:50062")
+        {
+            return fail("worker destinations");
+        }
+
+        appcfg::CoinMasterConfig k1;
+        if (!appcfg::loadCoinMasterConfig("app/config/rdma_cluster/coin.json", &k1, &err))
+        {
+            std::cerr << err << "\n";
+            return fail("load K=1 rdma_cluster/coin.json");
+        }
+        if (k1.coinMaster.role != appcfg::CoinRole::Master ||
+            k1.coinMaster.enableTimeShard ||
+            k1.coinMaster.coinId != 0)
+        {
+            return fail("K=1 coin.json must stay master without time shard");
+        }
+        appcfg::AcqR2SNodeConfig k1w;
+        if (!appcfg::loadAcqR2SNodeConfig("app/config/rdma_cluster/worker0.json", &k1w, &err))
+        {
+            std::cerr << err << "\n";
+            return fail("load K=1 worker0.json");
+        }
+        if (!k1w.coinClient.destinations.empty())
+        {
+            return fail("K=1 worker destinations must be empty");
+        }
+        std::cout << "[PASS] parse_time_shard_roles\n";
+        return true;
+    }
+
     bool runDryRun(const std::string &bin, const std::string &configPath)
     {
         const pid_t pid = fork();
@@ -235,6 +366,10 @@ int main()
         rc = 1;
     }
     if (!testParseInProcessSmoke())
+    {
+        rc = 1;
+    }
+    if (!testParseTimeShardRoles())
     {
         rc = 1;
     }

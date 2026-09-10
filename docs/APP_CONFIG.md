@@ -130,6 +130,13 @@
 ### cluster
 - listenAddress: 符合服务监听地址。
 - expectedNodeCount: 预期 worker 数。Start 条件为 `registered==N && dataplane_open==N`。
+- role: `master`（默认）或 `compute`。同一二进制 `app_coin_master` / `app_coin_node`。
+- coinId: Master 为 0；被控符合节点 `>= 1`。
+- masterAddress: `role=compute` 时主动连接的 Master 控制面地址。
+- enableTimeShard / plannedLeaseSpan_100fs / minLease_100fs: 仅 Master 租约；缺省 false/0 即 K=1。
+- nextCoinId / nextCoinAddress: 下一跳符合节点（Ship RDMA 对端）。也可等 compute `RegisterCoin` 后用其 listen 地址。
+
+Worker `coinClient.destinations`: `[{coinId, address}, ...]`，预连所有 coin，只向 `activeCoinId` WRITE。不填则只连 `serverAddress`（K=1）。
 
 ### dataplane
 - 同 worker：`requireRoce` / `deviceName` / `gidIndex` / slot 参数。

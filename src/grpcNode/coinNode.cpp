@@ -42,6 +42,7 @@ namespace openpni::distributed::grpcnode
             cfg.plannedLeaseSpan_100fs = init.plannedLeaseSpan_100fs;
             cfg.minLease_100fs = init.minLease_100fs;
             cfg.nextCoinId = init.nextCoinId;
+            cfg.nextCoinAddress = init.nextCoinAddress;
             return cfg;
         }
     } // namespace

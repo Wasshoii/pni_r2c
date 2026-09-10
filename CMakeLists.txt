@@ -498,6 +498,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
         src/grpcService/CoincidenceServiceImpl.cpp
         src/grpcService/CoincidenceClient.cpp
         src/grpcService/EpochHandoffShip.cpp
+        src/grpcService/CoinPeerClient.cpp
       )
       target_include_directories(r2c_grpc_service_coin_objs
         PRIVATE
@@ -735,7 +736,8 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
     endif()
 
     if(R2C_BUILD_APP_COIN_MASTER)
-      add_executable(app_coin_master
+      foreach(coin_app app_coin_master app_coin_node)
+      add_executable(${coin_app}
         app/coin_master_main.cpp
         $<TARGET_OBJECTS:r2c_app_common_objs>
         $<TARGET_OBJECTS:r2c_grpc_service_acq_master_objs>
@@ -745,7 +747,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
         $<TARGET_OBJECTS:r2c_core_streaming_objs>
         $<TARGET_OBJECTS:r2c_proto_objs>
       )
-      target_include_directories(app_coin_master
+      target_include_directories(${coin_app}
         PRIVATE
           "${CMAKE_CURRENT_SOURCE_DIR}"
           "${R2C_PROTO_GEN_ROOT}"
@@ -754,8 +756,8 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
           "${CMAKE_CURRENT_SOURCE_DIR}/include"
           "${CMAKE_CURRENT_SOURCE_DIR}/src"
       )
-      target_compile_options(app_coin_master PRIVATE -O3 -march=native -fopenmp)
-      target_link_libraries(app_coin_master
+      target_compile_options(${coin_app} PRIVATE -O3 -march=native -fopenmp)
+      target_link_libraries(${coin_app}
         PRIVATE
           PkgConfig::R2C_PNI
           PkgConfig::R2C_GRPC
@@ -765,16 +767,17 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
           ${R2C_TBB_LIBRARY}
           dl
       )
-      r2c_target_link_cuda_s2c(app_coin_master)
+      r2c_target_link_cuda_s2c(${coin_app})
       if(R2C_DPDK_FOUND)
-        target_link_directories(app_coin_master PRIVATE ${R2C_DPDK_LIBRARY_DIRS})
-        target_link_options(app_coin_master PRIVATE -Wl,--no-as-needed)
-        target_link_libraries(app_coin_master
+        target_link_directories(${coin_app} PRIVATE ${R2C_DPDK_LIBRARY_DIRS})
+        target_link_options(${coin_app} PRIVATE -Wl,--no-as-needed)
+        target_link_libraries(${coin_app}
           PRIVATE
             PkgConfig::R2C_PNI
             ${R2C_DPDK_LINK_LIBRARIES}
         )
       endif()
+      endforeach()
     endif()
   endif()
 endif()
@@ -1542,6 +1545,7 @@ endfunction()
 
 r2c_set_output_dir(app_acq_r2s_node app)
 r2c_set_output_dir(app_coin_master app)
+r2c_set_output_dir(app_coin_node app)
 
 r2c_set_output_dir(tool_sharded_raw_merge tools)
 r2c_set_output_dir(tool_udp_raw_replayer tools)

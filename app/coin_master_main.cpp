@@ -18,6 +18,7 @@
 #include "app/common/AppConfig.hpp"
 #include "grpcNode/coinNode.hpp"
 #include "grpcService/AcquisitionMaster.hpp"
+#include "grpcService/CoinPeerClient.hpp"
 
 namespace
 {
@@ -337,11 +338,21 @@ int main(int argc, char **argv)
     }
 
     std::cout << "===========================================" << std::endl;
-    std::cout << "  App: Coin Master (coincidence-only)" << std::endl;
+    std::cout << "  App: Coin "
+              << (cfg.coinMaster.role == appcfg::CoinRole::Compute ? "Compute" : "Master")
+              << " (coincidence-only)" << std::endl;
     std::cout << "===========================================" << std::endl;
     std::cout << "configPath               : " << configPath << std::endl;
+    std::cout << "coin.role                : "
+              << (cfg.coinMaster.role == appcfg::CoinRole::Compute ? "compute" : "master") << std::endl;
+    std::cout << "coin.coinId              : " << cfg.coinMaster.coinId << std::endl;
     std::cout << "coin.listenAddress       : " << cfg.coinMaster.listenAddress << std::endl;
+    std::cout << "coin.masterAddress       : "
+              << (cfg.coinMaster.masterAddress.empty() ? "(none)" : cfg.coinMaster.masterAddress) << std::endl;
     std::cout << "coin.expectedNodeCount   : " << cfg.coinMaster.expectedNodeCount << std::endl;
+    std::cout << "coin.enableTimeShard     : " << (cfg.coinMaster.enableTimeShard ? "true" : "false") << std::endl;
+    std::cout << "coin.nextCoinAddress     : "
+              << (cfg.coinMaster.nextCoinAddress.empty() ? "(none)" : cfg.coinMaster.nextCoinAddress) << std::endl;
     std::cout << "coin.detectorProfile     : " << cfg.coinMaster.detectorProfile << std::endl;
     std::cout << "dataplane.requireRoce    : " << (cfg.coinMaster.dataplane.requireRoce ? "true" : "false") << std::endl;
     std::cout << "dataplane.deviceName     : " << (cfg.coinMaster.dataplane.deviceName.empty() ? "(auto)" : cfg.coinMaster.dataplane.deviceName) << std::endl;
@@ -438,6 +449,28 @@ int main(int argc, char **argv)
     coinInit.gidIndex = cfg.coinMaster.dataplane.gidIndex;
     coinInit.slotCount = cfg.coinMaster.dataplane.slotCount;
     coinInit.slotBytes = cfg.coinMaster.dataplane.slotBytes;
+    coinInit.coinId = cfg.coinMaster.coinId;
+    coinInit.enableTimeShard = cfg.coinMaster.enableTimeShard &&
+                               cfg.coinMaster.role != appcfg::CoinRole::Compute;
+    coinInit.plannedLeaseSpan_100fs = cfg.coinMaster.plannedLeaseSpan_100fs;
+    coinInit.minLease_100fs = cfg.coinMaster.minLease_100fs;
+    coinInit.nextCoinId = cfg.coinMaster.nextCoinId;
+    coinInit.nextCoinAddress = cfg.coinMaster.nextCoinAddress;
+    coinInit.masterAddress = cfg.coinMaster.masterAddress;
+
+    if (cfg.coinMaster.role == appcfg::CoinRole::Compute)
+    {
+        if (cfg.coinMaster.masterAddress.empty())
+        {
+            std::cerr << "[CoinCompute] cluster.masterAddress is required when role=compute" << std::endl;
+            return 2;
+        }
+        if (cfg.coinMaster.coinId == 0)
+        {
+            std::cerr << "[CoinCompute] cluster.coinId must be >= 1 when role=compute" << std::endl;
+            return 2;
+        }
+    }
 
     grpcnode::CoinGrpcNode coinNode(coinInit);
     if (!coinNode.start())
@@ -447,6 +480,24 @@ int main(int argc, char **argv)
     }
 
     std::cout << "[CoinMaster] Coin service listening on " << cfg.coinMaster.listenAddress << std::endl;
+
+    streaming::CoinPeerClient peerClient({
+        cfg.coinMaster.masterAddress,
+        cfg.coinMaster.coinId,
+        cfg.coinMaster.listenAddress,
+        cfg.coinMaster.heartbeatIntervalMs});
+    if (cfg.coinMaster.role == appcfg::CoinRole::Compute)
+    {
+        if (!peerClient.start())
+        {
+            std::cerr << "[CoinCompute] RegisterCoin to Master failed: "
+                      << cfg.coinMaster.masterAddress << std::endl;
+            coinNode.stop();
+            return 3;
+        }
+        std::cout << "[CoinCompute] registered with Master " << cfg.coinMaster.masterAddress
+                  << " coinId=" << cfg.coinMaster.coinId << std::endl;
+    }
 
     acq::AcquisitionMaster acqMaster;
     bool acqMasterStarted = false;
@@ -495,6 +546,10 @@ int main(int argc, char **argv)
 
     while (!g_stopRequested.load(std::memory_order_relaxed))
     {
+        if (cfg.coinMaster.role != appcfg::CoinRole::Compute)
+        {
+            (void)coinNode.service().tickLease();
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(cfg.coinMaster.statusPrintIntervalMs));
 
         const auto &stats = coinNode.statistics();
@@ -664,6 +719,11 @@ int main(int argc, char **argv)
         acqMaster.SendShutdown("coin-master-shutdown");
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         acqMaster.StopServer();
+    }
+
+    if (cfg.coinMaster.role == appcfg::CoinRole::Compute)
+    {
+        peerClient.stop();
     }
 
     coinNode.stop();

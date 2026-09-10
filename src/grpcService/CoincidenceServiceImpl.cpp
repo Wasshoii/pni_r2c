@@ -3,6 +3,7 @@
 #include "dataplane/rdma/ProtoConvert.hpp"
 #include "dataplane/rdma/RdmaContext.hpp"
 #include "dataplane/rdma/SlotProtocol.hpp"
+#include "grpcService/EpochHandoffShip.hpp"
 
 #include <cstring>
 #include <iostream>
@@ -38,11 +39,18 @@ namespace openpni::distributed::streaming
         }
 
         startRdmaIngest();
+        startShipRecv();
         m_lease.coinId = m_orchestration.coinId;
         m_lease.activeCoinId = m_orchestration.coinId;
         m_lease.minLease_100fs = m_orchestration.minLease_100fs;
         m_lease.t1_100fs = m_orchestration.plannedLeaseSpan_100fs;
         m_activeCoinId.store(m_orchestration.coinId, std::memory_order_release);
+    }
+
+    CoincidenceServiceImpl::~CoincidenceServiceImpl()
+    {
+        notifyServerStopping();
+        stopShipSender();
     }
 
     void CoincidenceServiceImpl::startRdmaIngest()
@@ -87,6 +95,74 @@ namespace openpni::distributed::streaming
             }
             return true; });
         m_rdmaServer->start();
+    }
+
+    void CoincidenceServiceImpl::startShipRecv()
+    {
+        rdma::RdmaRecvServer::Config cfg;
+        cfg.requireRoce = m_orchestration.requireRoce;
+        cfg.forceInProcess = m_orchestration.forceInProcess;
+        cfg.deviceName = m_orchestration.deviceName;
+        cfg.gidIndex = m_orchestration.gidIndex;
+        cfg.preferHugePages = false;
+        cfg.slotCount = 16;
+        cfg.slotBytes = 256 * 1024;
+        LOG(INFO) << "Ship recv server requireRoce=" << (cfg.requireRoce ? "true" : "false")
+                  << " forceInProcess=" << (cfg.forceInProcess ? "true" : "false")
+                  << " slots=" << cfg.slotCount
+                  << " slotBytes=" << cfg.slotBytes;
+        m_shipServer = std::make_unique<rdma::RdmaRecvServer>(cfg);
+        m_shipServer->setIngest([this](const rdma::SlotChunkView &view) -> bool
+                               {
+            if (!m_shipAssembler.ingest(view))
+            {
+                std::lock_guard<std::mutex> lock(m_shipAckMutex);
+                m_shipApplyFailed = true;
+                m_shipAckCv.notify_all();
+                return false;
+            }
+            EpochHandoff handoff;
+            if (!m_shipAssembler.takeIfComplete(&handoff))
+            {
+                return true;
+            }
+            const uint64_t epochId = handoff.epochId;
+            const bool ok = applyEpochHandoff(std::move(handoff));
+            {
+                std::lock_guard<std::mutex> lock(m_shipAckMutex);
+                if (ok)
+                {
+                    m_shipAppliedEpoch = epochId;
+                    m_shipApplyFailed = false;
+                }
+                else
+                {
+                    m_shipApplyFailed = true;
+                }
+            }
+            m_shipAckCv.notify_all();
+            if (!ok)
+            {
+                LOG(ERROR) << "ship applyHandoff failed epoch=" << epochId;
+            }
+            else
+            {
+                LOG(INFO) << "ship applyHandoff ok epoch=" << epochId;
+            }
+            return ok; });
+        m_shipServer->start();
+    }
+
+    void CoincidenceServiceImpl::stopShipSender()
+    {
+        std::lock_guard<std::mutex> lock(m_shipTxMutex);
+        if (m_shipSender)
+        {
+            m_shipSender->close();
+            m_shipSender.reset();
+        }
+        m_shipStub.reset();
+        m_shipChannel.reset();
     }
 
     bool CoincidenceServiceImpl::pushTimestampedChunk(
@@ -368,6 +444,148 @@ namespace openpni::distributed::streaming
                   << " slots=" << local.slotCount
                   << " stride=" << local.slotStride;
         maybeAutoStartAfterDataplane();
+        return grpc::Status::OK;
+    }
+
+    grpc::Status CoincidenceServiceImpl::OpenShipPlane(
+        grpc::ServerContext *context,
+        const coincidence::OpenShipPlaneRequest *request,
+        coincidence::OpenShipPlaneResponse *response)
+    {
+        (void)context;
+        if (!m_shipServer)
+        {
+            response->set_success(false);
+            response->set_message("Ship receive server not initialized");
+            return grpc::Status::OK;
+        }
+
+        const uint32_t sessionId = request->from_coin_id();
+        auto session = m_shipServer->ensureSession(sessionId);
+        if (!session)
+        {
+            response->set_success(false);
+            response->set_message("Failed to prepare ship receive session");
+            return grpc::Status::OK;
+        }
+
+        if (m_orchestration.requireRoce && session->kind() != rdma::DataPlaneKind::RdmaRoceV2)
+        {
+            response->set_success(false);
+            response->set_message("requireRoce but ship session is not RoCE");
+            return grpc::Status::OK;
+        }
+
+        if (request->has_node_endpoint())
+        {
+            const auto remote = rdma::fromProtoEndpoint(request->node_endpoint());
+            if (m_orchestration.requireRoce && remote.kind != rdma::DataPlaneKind::RdmaRoceV2)
+            {
+                response->set_success(false);
+                response->set_message("requireRoce but ship endpoint is InProcess");
+                return grpc::Status::OK;
+            }
+            if (session->kind() == rdma::DataPlaneKind::RdmaRoceV2)
+            {
+                if (!session->acceptRemote(remote))
+                {
+                    response->set_success(false);
+                    response->set_message("Failed to accept remote ship endpoint");
+                    return grpc::Status::OK;
+                }
+            }
+        }
+
+        const auto local = session->localEndpoint();
+        const auto protoKind = rdma::toProto(local.kind);
+        response->set_success(true);
+        response->set_message("Ship plane ready");
+        response->set_data_plane_kind(protoKind);
+        rdma::fillProtoEndpoint(local, response->mutable_coin_endpoint());
+        LOG(INFO) << "OpenShipPlane from_coin=" << sessionId
+                  << " kind=" << static_cast<uint32_t>(local.kind)
+                  << " qp=" << local.qpNum
+                  << " slots=" << local.slotCount;
+        return grpc::Status::OK;
+    }
+
+    grpc::Status CoincidenceServiceImpl::WaitForShipApplied(
+        grpc::ServerContext *context,
+        const coincidence::WaitForShipAppliedRequest *request,
+        coincidence::WaitForShipAppliedResponse *response)
+    {
+        (void)context;
+        uint32_t timeoutMs = request->timeout_ms();
+        if (timeoutMs == 0)
+        {
+            timeoutMs = 30000;
+        }
+        const uint64_t epochId = request->epoch_id();
+        std::unique_lock<std::mutex> lock(m_shipAckMutex);
+        const auto ready = [this, epochId]()
+        {
+            return m_serverStopping.load(std::memory_order_acquire) ||
+                   m_shipApplyFailed ||
+                   (epochId == 0 ? m_shipAppliedEpoch > 0 : m_shipAppliedEpoch == epochId);
+        };
+        bool ok = ready();
+        if (!ok)
+        {
+            ok = m_shipAckCv.wait_for(lock, std::chrono::milliseconds(timeoutMs), ready);
+        }
+        if (m_shipApplyFailed)
+        {
+            response->set_success(false);
+            response->set_message("applyHandoff failed");
+            response->set_epoch_id(m_shipAppliedEpoch);
+            return grpc::Status::OK;
+        }
+        if (!ok || m_serverStopping.load(std::memory_order_acquire))
+        {
+            response->set_success(false);
+            response->set_message("timed out waiting for ship apply");
+            response->set_epoch_id(m_shipAppliedEpoch);
+            return grpc::Status::OK;
+        }
+        response->set_success(true);
+        response->set_message("epoch applied");
+        response->set_epoch_id(m_shipAppliedEpoch);
+        return grpc::Status::OK;
+    }
+
+    grpc::Status CoincidenceServiceImpl::RegisterCoin(
+        grpc::ServerContext *context,
+        const coincidence::RegisterCoinRequest *request,
+        coincidence::RegisterCoinResponse *response)
+    {
+        (void)context;
+        const uint32_t coinId = request->coin_id();
+        if (coinId == 0)
+        {
+            response->set_success(false);
+            response->set_message("coin_id 0 is Master; compute coins must use coin_id >= 1");
+            return grpc::Status::OK;
+        }
+        if (request->listen_address().empty())
+        {
+            response->set_success(false);
+            response->set_message("listen_address is required");
+            return grpc::Status::OK;
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_computeCoinsMutex);
+            ComputeCoinInfo info;
+            info.coinId = coinId;
+            info.listenAddress = request->listen_address();
+            info.lastHeartbeat = std::chrono::steady_clock::now();
+            m_computeCoins[coinId] = std::move(info);
+        }
+        response->set_success(true);
+        response->set_message("compute coin registered");
+        response->set_expected_node_count(m_orchestration.expectedNodeCount);
+        response->set_start_signal_issued(m_startSignalIssued.load(std::memory_order_acquire));
+        LOG(INFO) << "RegisterCoin coin=" << coinId
+                  << " listen=" << request->listen_address();
         return grpc::Status::OK;
     }
 
@@ -702,6 +920,23 @@ namespace openpni::distributed::streaming
     {
         (void)context;
 
+        if (request->coin_id() != 0)
+        {
+            std::lock_guard<std::mutex> lock(m_computeCoinsMutex);
+            auto it = m_computeCoins.find(request->coin_id());
+            if (it != m_computeCoins.end())
+            {
+                it->second.lastHeartbeat = std::chrono::steady_clock::now();
+            }
+            response->set_acknowledged(true);
+            response->set_server_timestamp_ms(nowMs());
+            response->set_echo_timestamp_ms(request->timestamp_ms());
+            response->set_command(pendingProducerCommand());
+            response->set_start_signal_issued(m_startSignalIssued.load(std::memory_order_acquire));
+            response->set_active_coin_id(m_activeCoinId.load(std::memory_order_acquire));
+            return grpc::Status::OK;
+        }
+
         const uint32_t nodeId = request->node_id();
 
         {
@@ -875,6 +1110,12 @@ namespace openpni::distributed::streaming
         {
             m_rdmaServer->stop();
         }
+        if (m_shipServer)
+        {
+            m_shipServer->stop();
+        }
+        m_shipAckCv.notify_all();
+        stopShipSender();
     }
 
     void CoincidenceServiceImpl::clearServerStoppingState()
@@ -1075,8 +1316,46 @@ namespace openpni::distributed::streaming
         return cutEpochAtWatermark();
     }
 
+    bool CoincidenceServiceImpl::shipEpochTo()
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_leaseMutex);
+            m_lease.phase = TimeLeasePhase::Shipping;
+        }
+        EpochHandoff h;
+        if (m_pendingShip.cutWatermark_100fs != 0)
+        {
+            h = std::move(m_pendingShip);
+            m_pendingShip = EpochHandoff{};
+        }
+        else
+        {
+            h = m_aligner.takeHandoff();
+        }
+        if (h.cutWatermark_100fs == 0)
+        {
+            LOG(ERROR) << "shipEpochTo: empty handoff";
+            return false;
+        }
+        if (!sendEpochHandoffAndWait(h))
+        {
+            m_pendingShip = std::move(h);
+            return false;
+        }
+        requestSetActiveCoin(m_orchestration.nextCoinId);
+        {
+            std::lock_guard<std::mutex> lock(m_leaseMutex);
+            m_lease.phase = TimeLeasePhase::DrainPrev;
+        }
+        return true;
+    }
+
     bool CoincidenceServiceImpl::shipEpochTo(CoincidenceServiceImpl &next)
     {
+        if (m_shipSender)
+        {
+            return shipEpochTo();
+        }
         {
             std::lock_guard<std::mutex> lock(m_leaseMutex);
             m_lease.phase = TimeLeasePhase::Shipping;
@@ -1096,6 +1375,179 @@ namespace openpni::distributed::streaming
             m_lease.phase = TimeLeasePhase::DrainPrev;
         }
         return true;
+    }
+
+    bool CoincidenceServiceImpl::connectShipTo(const std::string &nextListenAddress, uint32_t nextCoinId)
+    {
+        if (nextListenAddress.empty())
+        {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(m_shipTxMutex);
+        if (m_shipSender && m_shipStub && m_shipPeerCoinId == nextCoinId)
+        {
+            return true;
+        }
+        if (m_shipSender)
+        {
+            m_shipSender->close();
+            m_shipSender.reset();
+        }
+        m_shipStub.reset();
+        m_shipChannel.reset();
+
+        rdma::RdmaWriteSender::Config sc;
+        sc.nodeId = m_orchestration.coinId;
+        sc.deviceName = m_orchestration.deviceName;
+        sc.requireRoce = m_orchestration.requireRoce;
+        sc.forceInProcess = m_orchestration.forceInProcess;
+        sc.preferHugePages = false;
+        sc.gidIndex = m_orchestration.gidIndex;
+        sc.stagingSlotBytes = 256 * 1024;
+        auto sender = std::make_unique<rdma::RdmaWriteSender>(std::move(sc));
+        rdma::RdmaEndpointInfo localEp{};
+        if (!sender->prepareLocalEndpoint(&localEp))
+        {
+            LOG(ERROR) << "connectShipTo: prepareLocalEndpoint failed";
+            return false;
+        }
+        if (m_orchestration.requireRoce && localEp.kind != rdma::DataPlaneKind::RdmaRoceV2)
+        {
+            LOG(ERROR) << "connectShipTo: requireRoce but local endpoint is not RoCE";
+            return false;
+        }
+
+        auto channel = grpc::CreateChannel(nextListenAddress, grpc::InsecureChannelCredentials());
+        auto stub = coincidence::CoincidenceService::NewStub(channel);
+
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
+        coincidence::OpenShipPlaneRequest req;
+        req.set_from_coin_id(m_orchestration.coinId);
+        rdma::fillProtoEndpoint(localEp, req.mutable_node_endpoint());
+        coincidence::OpenShipPlaneResponse resp;
+        const grpc::Status status = stub->OpenShipPlane(&context, req, &resp);
+        if (!status.ok() || !resp.success())
+        {
+            LOG(ERROR) << "OpenShipPlane failed: "
+                       << (status.ok() ? resp.message() : status.error_message());
+            return false;
+        }
+        const auto coinEp = rdma::fromProtoEndpoint(resp.coin_endpoint());
+        if (m_orchestration.requireRoce && coinEp.kind != rdma::DataPlaneKind::RdmaRoceV2)
+        {
+            LOG(ERROR) << "connectShipTo: requireRoce but peer endpoint is InProcess";
+            return false;
+        }
+        if (!sender->connect(coinEp))
+        {
+            LOG(ERROR) << "connectShipTo: RDMA connect failed";
+            return false;
+        }
+        m_shipSender = std::move(sender);
+        m_shipChannel = std::move(channel);
+        m_shipStub = std::move(stub);
+        m_shipPeerCoinId = nextCoinId;
+        m_orchestration.nextCoinId = nextCoinId;
+        m_orchestration.nextCoinAddress = nextListenAddress;
+        LOG(INFO) << "Ship plane connected to " << nextListenAddress
+                  << " nextCoinId=" << nextCoinId;
+        return true;
+    }
+
+    bool CoincidenceServiceImpl::sendEpochHandoffAndWait(const EpochHandoff &handoff)
+    {
+        std::unique_lock<std::mutex> txLock(m_shipTxMutex);
+        if (!m_shipSender || !m_shipStub)
+        {
+            LOG(ERROR) << "sendEpochHandoffAndWait: ship sender not connected";
+            return false;
+        }
+        if (!sendEpochHandoffViaRdma(*m_shipSender, handoff))
+        {
+            return false;
+        }
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
+        coincidence::WaitForShipAppliedRequest req;
+        req.set_epoch_id(handoff.epochId);
+        req.set_timeout_ms(30000);
+        coincidence::WaitForShipAppliedResponse resp;
+        const grpc::Status status = m_shipStub->WaitForShipApplied(&context, req, &resp);
+        txLock.unlock();
+        if (!status.ok() || !resp.success())
+        {
+            LOG(ERROR) << "WaitForShipApplied failed: "
+                       << (status.ok() ? resp.message() : status.error_message());
+            return false;
+        }
+        return true;
+    }
+
+    std::string CoincidenceServiceImpl::resolveNextCoinAddress() const
+    {
+        if (!m_orchestration.nextCoinAddress.empty())
+        {
+            return m_orchestration.nextCoinAddress;
+        }
+        std::lock_guard<std::mutex> lock(m_computeCoinsMutex);
+        auto it = m_computeCoins.find(m_orchestration.nextCoinId);
+        if (it == m_computeCoins.end())
+        {
+            return {};
+        }
+        return it->second.listenAddress;
+    }
+
+    bool CoincidenceServiceImpl::shipPlaneReady() const
+    {
+        std::lock_guard<std::mutex> lock(m_shipTxMutex);
+        return m_shipSender != nullptr && m_shipStub != nullptr;
+    }
+
+    std::string CoincidenceServiceImpl::registeredCoinListenAddress(uint32_t coinId) const
+    {
+        std::lock_guard<std::mutex> lock(m_computeCoinsMutex);
+        auto it = m_computeCoins.find(coinId);
+        if (it == m_computeCoins.end())
+        {
+            return {};
+        }
+        return it->second.listenAddress;
+    }
+
+    bool CoincidenceServiceImpl::tickLease()
+    {
+        if (!m_orchestration.enableTimeShard)
+        {
+            return false;
+        }
+        if (!shipPlaneReady())
+        {
+            const std::string addr = resolveNextCoinAddress();
+            if (!addr.empty() && connectShipTo(addr, m_orchestration.nextCoinId))
+            {
+                markNextCoinPrepared(true);
+            }
+        }
+        else
+        {
+            TimeLease lease = timeLease();
+            if (!lease.nextPrepared)
+            {
+                markNextCoinPrepared(true);
+            }
+        }
+        const TimeLease before = timeLease();
+        if (before.phase == TimeLeasePhase::Shipping)
+        {
+            return shipEpochTo();
+        }
+        if (!maybePreemptLease())
+        {
+            return false;
+        }
+        return shipEpochTo();
     }
 
     void CoincidenceServiceImpl::maybeAutoStartAfterDataplane()

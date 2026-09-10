@@ -204,8 +204,8 @@ Running 内增加 epoch 子状态：`LeaseActive` → `PrepareNext` → `Cutting
 |------|------|----------|
 | P1 aligner | `StreamingTimeAligner::completeEpoch` / `takeHandoff` / `applyHandoff`；`shipEpochHandoff` | [`test_coin_time_shard`](../tests/correctness/test_coin_time_shard.cpp)：9120 `.lsingle` 双实例对照 `getDListmode(cutoff=0)`；delay 全等；prompt ≤ 金标准 + 两段 `carrySinglesTotal`（Test 9a） |
 | P2 LMF | 文件前缀 `prompt_epoch{E}_coin{id}_{t0}_{t1}`；`AppendSegment` clockMs = `epochId`；打开 `coincidence_timestamp_100us` | 同上：按 `(符合PET时间, epochId, 下标)` 归并后再比条数 |
-| P3 控制面 | proto `CMD_SET_ACTIVE_COIN`；heartbeat `active_coin_id`；`CoincidenceClient` 多 session | `test_rdma_orchestration` 冷切（只证 QP/命令）与热切（同进程 `shipEpochTo`） |
-| P4 租约 | Master `TimeLease`：`LeaseActive → PrepareNext → Cutting → Shipping → Redirected → DrainPrev`；计划 PET `t1` + 环高水位抢占 | `test_rdma_orchestration` `time_lease_fsm`：未 Prepare 续租在 A；只切一次 |
-| P5 Ship | `shipEpochHandoffViaDataplane`（InProcess / 本机 RoCE 专用 QP） | `epoch_ship_inprocess`；无 RNIC 则 skip RoCE，与 `test_rdma_dataplane_loopback` 相同 |
+| P3 控制面 | proto `CMD_SET_ACTIVE_COIN`；heartbeat `active_coin_id`；`CoincidenceClient` 多 session；compute `RegisterCoin` | `test_rdma_orchestration` 冷切（只证 QP/命令）与热切（节点自有 ship QP） |
+| P4 租约 | Master `TimeLease`：`LeaseActive → PrepareNext → Cutting → Shipping → Redirected → DrainPrev`；计划 PET `t1` + 环高水位抢占；Running 循环 `tickLease` | `time_lease_fsm`：未 Prepare 续租在 A；只切一次。`time_lease_tick_production_ship`：Prepare→Cut→Ship→Redirect |
+| P5 Ship | `OpenShipPlane` + 专用 `RdmaRecvServer`（与 worker ingest 隔离）；`shipEpochTo` 走 RDMA + `WaitForShipApplied` 后再 `SET_ACTIVE_COIN` | 加大 payload 的 `epoch_ship_inprocess`；双 `CoinGrpcNode` 生产 ship QP；无 RNIC 则 skip 两进程 RoCE |
 
 无 9120 数据时 `test_coin_time_shard` skip（退出 0）。K=1 的 app JSON 不填 destinations，行为与现 `rdma_cluster/*.json` 相同。跨进程 app 冒烟仍是 [`test_app_inprocess_smoke`](测试/集成.md#test_app_inprocess_smoke)。

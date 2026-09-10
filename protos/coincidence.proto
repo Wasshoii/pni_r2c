@@ -267,6 +267,7 @@ message HeartbeatRequest {
     uint64 acq_bytes_total = 15;   // reserved; stub reports 0
     bool acq_running = 16;         // reserved; stub reports false
     uint64 last_rtt_ms = 17;
+    uint32 coin_id = 18; // set by compute coins registering with Master
 }
 
 // 心跳响应
@@ -289,6 +290,44 @@ message NotifyProducerCompleteResponse {
     string message = 2;
     uint32 producers_complete_count = 3;
     bool all_complete = 4;
+}
+
+// Coin-A → Coin-B overlap/tail dataplane (isolated from worker ingest).
+message OpenShipPlaneRequest {
+    uint32 from_coin_id = 1;
+    RdmaEndpoint node_endpoint = 2;
+    uint32 requested_slot_count = 3;
+    uint32 requested_slot_bytes = 4;
+}
+
+message OpenShipPlaneResponse {
+    bool success = 1;
+    string message = 2;
+    DataPlaneKind data_plane_kind = 3;
+    RdmaEndpoint coin_endpoint = 4;
+}
+
+message WaitForShipAppliedRequest {
+    uint64 epoch_id = 1;
+    uint32 timeout_ms = 2;
+}
+
+message WaitForShipAppliedResponse {
+    bool success = 1;
+    string message = 2;
+    uint64 epoch_id = 3;
+}
+
+message RegisterCoinRequest {
+    uint32 coin_id = 1;
+    string listen_address = 2;
+}
+
+message RegisterCoinResponse {
+    bool success = 1;
+    string message = 2;
+    uint32 expected_node_count = 3;
+    bool start_signal_issued = 4;
 }
 
 // ==================== 服务定义 ====================
@@ -321,6 +360,11 @@ service CoincidenceService {
 
     // Producer finished sending; coin drains the aligner when all nodes complete.
     rpc NotifyProducerComplete(NotifyProducerCompleteRequest) returns (NotifyProducerCompleteResponse);
+
+    // Dedicated Coin-A → Coin-B overlap/tail channel (not worker ingest).
+    rpc OpenShipPlane(OpenShipPlaneRequest) returns (OpenShipPlaneResponse);
+    rpc WaitForShipApplied(WaitForShipAppliedRequest) returns (WaitForShipAppliedResponse);
+    rpc RegisterCoin(RegisterCoinRequest) returns (RegisterCoinResponse);
 }
 
 // 分布式节点服务（可选，用于主节点向从节点发送命令）

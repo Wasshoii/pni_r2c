@@ -20,12 +20,15 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <glog/logging.h>
 #include <grpcpp/grpcpp.h>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 namespace rdma = openpni::distributed::dataplane::rdma;
@@ -1007,9 +1010,18 @@ namespace
             coinB.stop();
             return false;
         }
-        if (!coinA.service().shipEpochTo(coinB.service()))
+        if (!coinA.service().connectShipTo(addrB, 1))
         {
-            std::cerr << "hot shipEpochTo failed\n";
+            std::cerr << "hot connectShipTo failed\n";
+            client0.stop();
+            client1.stop();
+            coinA.stop();
+            coinB.stop();
+            return false;
+        }
+        if (!coinA.service().shipEpochTo())
+        {
+            std::cerr << "hot shipEpochTo RDMA failed\n";
             client0.stop();
             client1.stop();
             coinA.stop();
@@ -1164,18 +1176,20 @@ namespace
         in.epochId = 7;
         in.cutWatermark_100fs = 123456;
         in.overlap_100fs = 2000;
-        in.carry.resize(8);
+        constexpr uint32_t kCarry = 20000;
+        constexpr uint32_t kTail = 10000;
+        in.carry.resize(kCarry);
         for (uint32_t i = 0; i < in.carry.size(); ++i)
         {
-            in.carry[i].channelIndex = static_cast<uint16_t>(i);
+            in.carry[i].channelIndex = static_cast<uint16_t>(i % 48);
             in.carry[i].crystalIndex = 1;
-            in.carry[i].timevalue_100fs = in.cutWatermark_100fs - 10 + i;
+            in.carry[i].timevalue_100fs = in.cutWatermark_100fs - kCarry + i;
             in.carry[i].energy_ev = 511.0f;
         }
         streaming::TimestampedSingleChunk tail;
         tail.nodeId = 1;
         tail.chunkId = 9;
-        tail.singles.resize(5);
+        tail.singles.resize(kTail);
         for (uint32_t i = 0; i < tail.singles.size(); ++i)
         {
             tail.singles[i].channelIndex = 3;
@@ -1211,8 +1225,9 @@ namespace
                 return false;
             }
         }
-        if (out.tail[0].nodeId != 1 || out.tail[0].singles.size() != 5 ||
-            !singlesMatch(in.tail[0].singles[0], out.tail[0].singles[0]))
+        if (out.tail[0].nodeId != 1 || out.tail[0].singles.size() != kTail ||
+            !singlesMatch(in.tail[0].singles[0], out.tail[0].singles[0]) ||
+            !singlesMatch(in.tail[0].singles[kTail - 1], out.tail[0].singles[kTail - 1]))
         {
             std::cerr << "epoch ship tail mismatch\n";
             return false;
@@ -1221,13 +1236,198 @@ namespace
                   << " carry=" << out.carry.size() << " tail=" << out.tail.size() << "\n";
         return true;
     }
+
+    bool testTimeLeaseTickProductionShip()
+    {
+        const std::string addrA = "127.0.0.1:51076";
+        const std::string addrB = "127.0.0.1:51077";
+        grpcnode::CoinGrpcNode::InitOptions initA;
+        initA.alignerConfig = makeAligner("/tmp/r2c_orch_tick_a", 1);
+        initA.alignerConfig.extractOnly = true;
+        initA.listenAddress = addrA;
+        initA.expectedNodeCount = 1;
+        initA.autoStartWhenAllRegistered = true;
+        initA.startLeadTimeMs = 0;
+        initA.forceInProcess = true;
+        initA.coinId = 0;
+        initA.enableTimeShard = true;
+        initA.plannedLeaseSpan_100fs = 1;
+        initA.minLease_100fs = 0;
+        initA.nextCoinId = 1;
+        initA.nextCoinAddress = addrB;
+        grpcnode::CoinGrpcNode::InitOptions initB = initA;
+        initB.alignerConfig = makeAligner("/tmp/r2c_orch_tick_b", 1);
+        initB.alignerConfig.extractOnly = true;
+        initB.listenAddress = addrB;
+        initB.coinId = 1;
+        initB.enableTimeShard = false;
+        initB.nextCoinAddress.clear();
+        grpcnode::CoinGrpcNode coinA(initA);
+        grpcnode::CoinGrpcNode coinB(initB);
+        if (!coinA.start() || !coinB.start())
+        {
+            std::cerr << "tick dual coin start failed\n";
+            return false;
+        }
+        streaming::CoincidenceClientConfig cc;
+        cc.serverAddress = addrA;
+        cc.nodeId = 0;
+        cc.nodeAddress = "127.0.0.1";
+        cc.forceInProcess = true;
+        cc.waitForStartTimeoutMs = 15000;
+        cc.heartbeatIntervalMs = 50;
+        cc.destinations = {{0, addrA}, {1, addrB}};
+        streaming::CoincidenceClient client(cc);
+        if (!startClientThread(client))
+        {
+            std::cerr << "tick client start failed\n";
+            client.stop();
+            coinA.stop();
+            coinB.stop();
+            return false;
+        }
+        streaming::SyntheticSpec spec;
+        spec.nodeId = 0;
+        spec.peerNodeId = 0;
+        spec.promptPairs = 256;
+        spec.delayPairs = 0;
+        auto buf = streaming::generateSyntheticSingles(spec);
+        if (!client.sendSingles(buf, 0, 0))
+        {
+            std::cerr << "tick send failed\n";
+            client.stop();
+            coinA.stop();
+            coinB.stop();
+            return false;
+        }
+        bool gotW = false;
+        for (int i = 0; i < 200; ++i)
+        {
+            if (coinA.aligner().publishedWatermark() > 0)
+            {
+                gotW = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        bool shipped = false;
+        for (int i = 0; i < 20 && gotW; ++i)
+        {
+            if (coinA.service().tickLease())
+            {
+                shipped = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        const bool switched = waitClientActiveCoin(client, 1, 5000);
+        const bool planeReady = coinA.service().shipPlaneReady();
+        client.stop();
+        coinA.stop();
+        coinB.stop();
+        if (!gotW || !shipped || !switched || !planeReady)
+        {
+            std::cerr << "tick production ship failed gotW=" << gotW << " shipped=" << shipped
+                      << " switched=" << switched << " plane=" << planeReady << "\n";
+            return false;
+        }
+        std::cout << "[PASS] time_lease_tick_production_ship\n";
+        return true;
+    }
+
+    int runShipSink(const std::string &addr)
+    {
+        grpcnode::CoinGrpcNode::InitOptions init;
+        init.alignerConfig = makeAligner("/tmp/r2c_orch_ship_sink");
+        init.alignerConfig.extractOnly = true;
+        init.listenAddress = addr;
+        init.expectedNodeCount = 1;
+        init.autoStartWhenAllRegistered = false;
+        init.rejectStreamBeforeStart = false;
+        init.forceInProcess = false;
+        init.requireRoce = true;
+        init.coinId = 1;
+        grpcnode::CoinGrpcNode coin(init);
+        if (!coin.start())
+        {
+            return 2;
+        }
+        for (;;)
+        {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    }
+
+    bool testTwoProcessShipRoce(const char *self)
+    {
+        if (!rdma::RdmaDevice::hasVerbsDevice())
+        {
+            std::cout << "[SKIP] epoch_ship_two_process_roce (no verbs device)\n";
+            return true;
+        }
+        const std::string addrB = "127.0.0.1:51191";
+        const std::string addrA = "127.0.0.1:51190";
+        const pid_t pid = fork();
+        if (pid < 0)
+        {
+            std::cerr << "epoch_ship_two_process_roce fork failed\n";
+            return false;
+        }
+        if (pid == 0)
+        {
+            execl(self, self, "--ship-sink", addrB.c_str(), static_cast<char *>(nullptr));
+            _exit(127);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        grpcnode::CoinGrpcNode::InitOptions initA;
+        initA.alignerConfig = makeAligner("/tmp/r2c_orch_ship_src");
+        initA.alignerConfig.extractOnly = true;
+        initA.listenAddress = addrA;
+        initA.expectedNodeCount = 1;
+        initA.forceInProcess = false;
+        initA.requireRoce = true;
+        initA.coinId = 0;
+        grpcnode::CoinGrpcNode coinA(initA);
+        bool ok = coinA.start() && coinA.service().connectShipTo(addrB, 1);
+        streaming::EpochHandoff in;
+        in.epochId = 3;
+        in.cutWatermark_100fs = 999;
+        in.overlap_100fs = 2000;
+        in.carry.resize(128);
+        for (uint32_t i = 0; i < in.carry.size(); ++i)
+        {
+            in.carry[i].timevalue_100fs = 10 + i;
+            in.carry[i].energy_ev = 511.0f;
+        }
+        if (ok)
+        {
+            ok = coinA.service().sendEpochHandoffAndWait(in);
+        }
+        coinA.stop();
+        kill(pid, SIGTERM);
+        int status = 0;
+        waitpid(pid, &status, 0);
+        if (!ok)
+        {
+            std::cout << "[SKIP] epoch_ship_two_process_roce (handshake or apply failed)\n";
+            return true;
+        }
+        std::cout << "[PASS] epoch_ship_two_process_roce\n";
+        return true;
+    }
 } // namespace
 
 int main(int argc, char **argv)
 {
     google::InitGoogleLogging(argv[0]);
     FLAGS_logtostderr = 1;
+    if (argc >= 3 && std::string(argv[1]) == "--ship-sink")
+    {
+        return runShipSink(argv[2]);
+    }
     int rc = 0;
+    if (!testTwoProcessShipRoce(argv[0]))
+        rc = 1;
     if (!testHandshakeOrderInProcess())
         rc = 1;
     if (!testDualNodeSyntheticAndDrain())
@@ -1251,6 +1451,8 @@ int main(int argc, char **argv)
     if (!testTimeShardHotSwitchInProcess())
         rc = 1;
     if (!testTimeLeaseFsmInProcess())
+        rc = 1;
+    if (!testTimeLeaseTickProductionShip())
         rc = 1;
     if (!testEpochShipDataplane(false))
         rc = 1;

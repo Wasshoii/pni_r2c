@@ -162,7 +162,8 @@
       "configurePreset": "linux-release-apps-basic",
       "targets": [
         "r2c_proto",
-        "app_coin_master"
+        "app_coin_master",
+        "app_coin_node"
       ]
     },
     {

@@ -1,14 +1,6 @@
 #include "grpcService/EpochHandoffShip.hpp"
 
-#include "dataplane/rdma/SlotProtocol.hpp"
-
-#include <chrono>
-#include <condition_variable>
 #include <cstring>
-#include <mutex>
-#include <thread>
-#include <unordered_map>
-#include <vector>
 #include <glog/logging.h>
 
 namespace openpni::distributed::streaming
@@ -18,9 +10,6 @@ namespace openpni::distributed::streaming
     namespace
     {
         constexpr uint64_t kShipMagic = 0x4550484f43485348ull; // 'EPOCHSH'
-        constexpr uint32_t kDurMeta = 1;
-        constexpr uint32_t kDurCarry = 2;
-        constexpr uint32_t kDurTail = 3;
 
 #pragma pack(push, 1)
         struct EpochShipMeta
@@ -35,7 +24,140 @@ namespace openpni::distributed::streaming
 #pragma pack(pop)
 
         static_assert(sizeof(EpochShipMeta) % 16 == 0, "meta must pack into Single records");
+
+        uint64_t nonemptyTailCount(const EpochHandoff &handoff)
+        {
+            uint64_t n = 0;
+            for (const auto &chunk : handoff.tail)
+            {
+                if (chunk.remainingCount() > 0 && chunk.remainingData())
+                {
+                    ++n;
+                }
+            }
+            return n;
+        }
     } // namespace
+
+    bool EpochShipAssembler::ingest(const rdma::SlotChunkView &view)
+    {
+        std::lock_guard<std::mutex> lock(m_mu);
+        if (view.singlesCount == 0 || !view.singlesPacked)
+        {
+            return true;
+        }
+        const auto *src = static_cast<const Single *>(view.singlesPacked);
+        if (view.durationMs == kEpochShipDurMeta)
+        {
+            if (view.singlesCount * sizeof(Single) < sizeof(EpochShipMeta))
+            {
+                m_failed = true;
+                m_cv.notify_all();
+                return false;
+            }
+            EpochShipMeta meta{};
+            std::memcpy(static_cast<void *>(&meta), src, sizeof(meta));
+            if (meta.magic != kShipMagic)
+            {
+                m_failed = true;
+                m_cv.notify_all();
+                return false;
+            }
+            m_epochId = meta.epochId;
+            m_cutWatermark_100fs = meta.cutWatermark_100fs;
+            m_overlap_100fs = meta.overlap_100fs;
+            m_carryCount = meta.carryCount;
+            m_tailCount = meta.tailCount;
+            m_metaDone = true;
+            m_cv.notify_all();
+            return true;
+        }
+        auto &chunk = m_assembling[view.chunkId];
+        if (chunk.singles.empty())
+        {
+            chunk.nodeId = static_cast<uint16_t>(view.computerClockMs);
+            chunk.chunkId = view.chunkId;
+            chunk.duration_ms = view.durationMs;
+        }
+        chunk.singles.insert(chunk.singles.end(), src, src + view.singlesCount);
+        const bool eof = (view.flags & rdma::kSlotFlagEof) != 0;
+        if (!eof)
+        {
+            return true;
+        }
+        chunk.updateTimeRange();
+        if (view.durationMs == kEpochShipDurCarry)
+        {
+            m_carry = std::move(chunk.singles);
+        }
+        else if (view.durationMs == kEpochShipDurTail)
+        {
+            m_tails.push_back(std::move(chunk));
+        }
+        m_assembling.erase(view.chunkId);
+        m_cv.notify_all();
+        return true;
+    }
+
+    bool EpochShipAssembler::failed() const
+    {
+        std::lock_guard<std::mutex> lock(m_mu);
+        return m_failed;
+    }
+
+    bool EpochShipAssembler::isComplete() const
+    {
+        std::lock_guard<std::mutex> lock(m_mu);
+        return completeUnlocked();
+    }
+
+    bool EpochShipAssembler::completeUnlocked() const
+    {
+        return m_metaDone && !m_failed && m_carry.size() == m_carryCount &&
+               m_tails.size() >= m_tailCount;
+    }
+
+    bool EpochShipAssembler::takeIfComplete(EpochHandoff *out)
+    {
+        if (!out)
+        {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(m_mu);
+        if (!completeUnlocked())
+        {
+            return false;
+        }
+        out->epochId = m_epochId;
+        out->cutWatermark_100fs = m_cutWatermark_100fs;
+        out->overlap_100fs = m_overlap_100fs;
+        out->carry = std::move(m_carry);
+        out->tail = std::move(m_tails);
+        m_metaDone = false;
+        m_failed = false;
+        m_epochId = 0;
+        m_cutWatermark_100fs = 0;
+        m_overlap_100fs = 0;
+        m_carryCount = 0;
+        m_tailCount = 0;
+        m_assembling.clear();
+        return true;
+    }
+
+    void EpochShipAssembler::reset()
+    {
+        std::lock_guard<std::mutex> lock(m_mu);
+        m_metaDone = false;
+        m_failed = false;
+        m_epochId = 0;
+        m_cutWatermark_100fs = 0;
+        m_overlap_100fs = 0;
+        m_carryCount = 0;
+        m_tailCount = 0;
+        m_carry.clear();
+        m_tails.clear();
+        m_assembling.clear();
+    }
 
     bool sendEpochHandoffViaRdma(rdma::RdmaWriteSender &tx, const EpochHandoff &handoff)
     {
@@ -44,11 +166,11 @@ namespace openpni::distributed::streaming
         meta.cutWatermark_100fs = handoff.cutWatermark_100fs;
         meta.overlap_100fs = handoff.overlap_100fs;
         meta.carryCount = handoff.carry.size();
-        meta.tailCount = handoff.tail.size();
+        meta.tailCount = nonemptyTailCount(handoff);
 
         const uint32_t metaSingles =
             static_cast<uint32_t>(sizeof(meta) / sizeof(Single));
-        if (!tx.sendPackedSingles(0, handoff.cutWatermark_100fs, kDurMeta, &meta, metaSingles))
+        if (!tx.sendPackedSingles(0, handoff.cutWatermark_100fs, kEpochShipDurMeta, &meta, metaSingles))
         {
             LOG(ERROR) << "epoch ship: meta send failed";
             return false;
@@ -59,7 +181,7 @@ namespace openpni::distributed::streaming
             if (!tx.sendPackedSingles(
                     chunkId++,
                     handoff.cutWatermark_100fs,
-                    kDurCarry,
+                    kEpochShipDurCarry,
                     handoff.carry.data(),
                     static_cast<uint32_t>(handoff.carry.size())))
             {
@@ -78,7 +200,7 @@ namespace openpni::distributed::streaming
             if (!tx.sendPackedSingles(
                     chunkId++,
                     chunk.nodeId,
-                    kDurTail,
+                    kEpochShipDurTail,
                     src,
                     n))
             {
@@ -115,68 +237,9 @@ namespace openpni::distributed::streaming
         wcfg.txSlotCount = 2;
 
         rdma::RdmaRecvServer server(scfg);
-
-        std::mutex mu;
-        std::condition_variable cv;
-        bool metaDone = false;
-        bool failed = false;
-        EpochShipMeta meta{};
-        std::vector<Single> carry;
-        std::vector<TimestampedSingleChunk> tails;
-        std::unordered_map<uint64_t, TimestampedSingleChunk> assembling;
-
+        EpochShipAssembler assembler;
         server.setIngest([&](const rdma::SlotChunkView &view) -> bool
-                         {
-            std::lock_guard<std::mutex> lock(mu);
-            if (view.singlesCount == 0 || !view.singlesPacked)
-            {
-                return true;
-            }
-            const auto *src = static_cast<const Single *>(view.singlesPacked);
-            if (view.durationMs == kDurMeta)
-            {
-                if (view.singlesCount * sizeof(Single) < sizeof(EpochShipMeta))
-                {
-                    failed = true;
-                    cv.notify_all();
-                    return false;
-                }
-                std::memcpy(static_cast<void *>(&meta), src, sizeof(meta));
-                if (meta.magic != kShipMagic)
-                {
-                    failed = true;
-                    cv.notify_all();
-                    return false;
-                }
-                metaDone = true;
-                cv.notify_all();
-                return true;
-            }
-            auto &chunk = assembling[view.chunkId];
-            if (chunk.singles.empty())
-            {
-                chunk.nodeId = static_cast<uint16_t>(view.computerClockMs);
-                chunk.chunkId = view.chunkId;
-                chunk.duration_ms = view.durationMs;
-            }
-            chunk.singles.insert(chunk.singles.end(), src, src + view.singlesCount);
-            const bool eof = (view.flags & rdma::kSlotFlagEof) != 0;
-            if (!eof)
-            {
-                return true;
-            }
-            chunk.updateTimeRange();
-            if (view.durationMs == kDurCarry)
-            {
-                carry = std::move(chunk.singles);
-            }
-            else if (view.durationMs == kDurTail)
-            {
-                tails.push_back(std::move(chunk));
-            }
-            assembling.erase(view.chunkId);
-            cv.notify_all();
-            return true; });
+                         { return assembler.ingest(view); });
 
         server.start();
         auto session = server.ensureSession(0);
@@ -214,37 +277,16 @@ namespace openpni::distributed::streaming
         }
 
         const bool sent = sendEpochHandoffViaRdma(sender, handoff);
-        uint64_t expectedTails = 0;
-        for (const auto &c : handoff.tail)
+        const bool okWait = assembler.waitUntilComplete(std::chrono::seconds(30));
+        sender.close();
+        server.stop();
+        if (!sent || !okWait || assembler.failed() || !assembler.takeIfComplete(out))
         {
-            if (c.remainingCount() > 0)
-            {
-                ++expectedTails;
-            }
-        }
-        const bool expectCarry = !handoff.carry.empty();
-        {
-            std::unique_lock<std::mutex> lock(mu);
-            const bool ok = cv.wait_for(lock, std::chrono::seconds(8), [&]()
-                                        {
-                                            return failed || (metaDone && (!expectCarry || carry.size() == handoff.carry.size()) &&
-                                                              tails.size() >= expectedTails);
-                                        });
-            sender.close();
-            server.stop();
-            if (!sent || !ok || failed || !metaDone)
-            {
-                return false;
-            }
-            out->epochId = meta.epochId;
-            out->cutWatermark_100fs = meta.cutWatermark_100fs;
-            out->overlap_100fs = meta.overlap_100fs;
-            out->carry = std::move(carry);
-            out->tail = std::move(tails);
+            return false;
         }
         return out->cutWatermark_100fs == handoff.cutWatermark_100fs &&
                out->carry.size() == handoff.carry.size() &&
-               out->tail.size() == expectedTails;
+               out->tail.size() == nonemptyTailCount(handoff);
     }
 
 } // namespace openpni::distributed::streaming

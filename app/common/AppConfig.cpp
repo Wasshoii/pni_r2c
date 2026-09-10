@@ -317,6 +317,110 @@ namespace openpni::distributed::app
             return false;
         }
 
+        bool parseCoinRole(const std::string &raw, CoinRole *out)
+        {
+            std::string s = raw;
+            for (char &c : s)
+            {
+                if (c >= 'A' && c <= 'Z')
+                {
+                    c = static_cast<char>(c - 'A' + 'a');
+                }
+            }
+            if (s.empty() || s == "master")
+            {
+                *out = CoinRole::Master;
+                return true;
+            }
+            if (s == "compute" || s == "node" || s == "worker")
+            {
+                *out = CoinRole::Compute;
+                return true;
+            }
+            return false;
+        }
+
+        bool readDestinations(const Struct &obj, const std::string &key, std::vector<CoinDestination> *out)
+        {
+            const Value *v = findField(obj, key);
+            if (!v)
+            {
+                return true;
+            }
+            if (v->kind_case() != Value::kListValue)
+            {
+                return false;
+            }
+            std::vector<CoinDestination> values;
+            values.reserve(static_cast<size_t>(v->list_value().values_size()));
+            for (const auto &item : v->list_value().values())
+            {
+                if (item.kind_case() != Value::kStructValue)
+                {
+                    return false;
+                }
+                const Struct &entry = item.struct_value();
+                CoinDestination dest;
+                if (!readUInt(entry, "coinId", &dest.coinId))
+                {
+                    return false;
+                }
+                if (!readString(entry, "address", &dest.address) || dest.address.empty())
+                {
+                    return false;
+                }
+                values.push_back(std::move(dest));
+            }
+            *out = std::move(values);
+            return true;
+        }
+
+        bool applyTimeShardFields(const Struct &sec, CoinMasterSection *out, std::string *err, const char *prefix)
+        {
+            std::string role;
+            if (!readString(sec, "role", &role))
+            {
+                return fail(err, std::string(prefix) + ".role must be string");
+            }
+            if (!role.empty() && !parseCoinRole(role, &out->role))
+            {
+                return fail(err, std::string(prefix) + ".role must be master or compute");
+            }
+            if (!readUInt(sec, "coinId", &out->coinId))
+            {
+                return fail(err, std::string(prefix) + ".coinId must be non-negative integer");
+            }
+            if (!readString(sec, "masterAddress", &out->masterAddress))
+            {
+                return fail(err, std::string(prefix) + ".masterAddress must be string");
+            }
+            if (!readBool(sec, "enableTimeShard", &out->enableTimeShard))
+            {
+                return fail(err, std::string(prefix) + ".enableTimeShard must be bool");
+            }
+            if (!readUInt(sec, "plannedLeaseSpan_100fs", &out->plannedLeaseSpan_100fs))
+            {
+                return fail(err, std::string(prefix) + ".plannedLeaseSpan_100fs must be non-negative integer");
+            }
+            if (!readUInt(sec, "minLease_100fs", &out->minLease_100fs))
+            {
+                return fail(err, std::string(prefix) + ".minLease_100fs must be non-negative integer");
+            }
+            if (!readUInt(sec, "nextCoinId", &out->nextCoinId))
+            {
+                return fail(err, std::string(prefix) + ".nextCoinId must be non-negative integer");
+            }
+            if (!readString(sec, "nextCoinAddress", &out->nextCoinAddress))
+            {
+                return fail(err, std::string(prefix) + ".nextCoinAddress must be string");
+            }
+            if (!readUInt(sec, "heartbeatIntervalMs", &out->heartbeatIntervalMs))
+            {
+                return fail(err, std::string(prefix) + ".heartbeatIntervalMs must be non-negative integer");
+            }
+            return true;
+        }
+
         bool applyAcqNodeSection(const Struct &root, AcqR2SNodeConfig *cfg, std::string *err)
         {
             if (const Struct *sec = findObject(root, "acqNode"))
@@ -543,6 +647,14 @@ namespace openpni::distributed::app
                 {
                     return fail(err, "coinClient.waitForStartRetryIntervalMs must be non-negative integer");
                 }
+                if (!readUInt(*sec, "activeCoinId", &cfg->coinClient.activeCoinId))
+                {
+                    return fail(err, "coinClient.activeCoinId must be non-negative integer");
+                }
+                if (!readDestinations(*sec, "destinations", &cfg->coinClient.destinations))
+                {
+                    return fail(err, "coinClient.destinations must be [{coinId, address}, ...]");
+                }
             }
             return true;
         }
@@ -631,6 +743,10 @@ namespace openpni::distributed::app
                 if (!readUInt(*sec, "runSeconds", &cfg->coinMaster.runSeconds))
                 {
                     return fail(err, "coinMaster.runSeconds must be non-negative integer");
+                }
+                if (!applyTimeShardFields(*sec, &cfg->coinMaster, err, "coinMaster"))
+                {
+                    return false;
                 }
             }
             return true;
@@ -1037,6 +1153,14 @@ namespace openpni::distributed::app
             {
                 return fail(err, "cluster.channelCount must be non-negative integer");
             }
+            if (!readUInt(*sec, "activeCoinId", &cfg->coinClient.activeCoinId))
+            {
+                return fail(err, "cluster.activeCoinId must be non-negative integer");
+            }
+            if (!readDestinations(*sec, "destinations", &cfg->coinClient.destinations))
+            {
+                return fail(err, "cluster.destinations must be [{coinId, address}, ...]");
+            }
             return true;
         }
 
@@ -1054,6 +1178,10 @@ namespace openpni::distributed::app
             if (!readUInt(*sec, "expectedNodeCount", &cfg->coinMaster.expectedNodeCount))
             {
                 return fail(err, "cluster.expectedNodeCount must be non-negative integer");
+            }
+            if (!applyTimeShardFields(*sec, &cfg->coinMaster, err, "cluster"))
+            {
+                return false;
             }
             return true;
         }

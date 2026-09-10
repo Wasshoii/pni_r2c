@@ -98,6 +98,12 @@ namespace openpni::distributed::app
         uint16_t inputChannelCount = 4;
     };
 
+    struct CoinDestination
+    {
+        uint32_t coinId = 0;
+        std::string address;
+    };
+
     struct CoinClientSection
     {
         bool enabled = true;
@@ -116,6 +122,8 @@ namespace openpni::distributed::app
         uint32_t waitForStartTimeoutMs = 0;
         uint32_t waitForStartRpcTimeoutMs = 15000;
         uint32_t waitForStartRetryIntervalMs = 1000;
+        uint32_t activeCoinId = 0;
+        std::vector<CoinDestination> destinations;
         DataplaneSection dataplane;
     };
 
@@ -142,6 +150,12 @@ namespace openpni::distributed::app
         RuntimeSection runtime;
     };
 
+    enum class CoinRole
+    {
+        Master,
+        Compute
+    };
+
     struct CoinMasterSection
     {
         std::string listenAddress = "0.0.0.0:50061";
@@ -154,6 +168,15 @@ namespace openpni::distributed::app
         uint32_t runSeconds = 0;
         DataplaneSection dataplane;
         std::string detectorProfile = "BDM2";
+        CoinRole role = CoinRole::Master;
+        uint32_t coinId = 0;
+        std::string masterAddress;
+        bool enableTimeShard = false;
+        uint64_t plannedLeaseSpan_100fs = 0;
+        uint64_t minLease_100fs = 0;
+        uint32_t nextCoinId = 1;
+        std::string nextCoinAddress;
+        uint32_t heartbeatIntervalMs = 1000;
     };
 
     struct CoinProtocolSection

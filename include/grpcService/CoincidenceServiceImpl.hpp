@@ -2,6 +2,8 @@
 
 #include "core/streaming/StreamingCoincidence.hpp"
 #include "dataplane/rdma/RdmaRecvServer.hpp"
+#include "dataplane/rdma/RdmaWriteSender.hpp"
+#include "grpcService/EpochHandoffShip.hpp"
 #include "protos/coincidence.grpc.pb.h"
 
 #include <grpcpp/grpcpp.h>
@@ -14,6 +16,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -76,6 +79,7 @@ namespace openpni::distributed::streaming
             uint64_t plannedLeaseSpan_100fs = 0;
             uint64_t minLease_100fs = 0;
             uint32_t nextCoinId = 1;
+            std::string nextCoinAddress;
         };
 
         enum class TimeLeasePhase : uint32_t
@@ -102,6 +106,7 @@ namespace openpni::distributed::streaming
 
         explicit CoincidenceServiceImpl(StreamingTimeAligner &aligner);
         CoincidenceServiceImpl(StreamingTimeAligner &aligner, OrchestrationConfig orchestration);
+        ~CoincidenceServiceImpl();
 
         /** Shared ingest used by RDMA receive path (and legacy helpers). */
         bool ingestPackedSinglesChunk(
@@ -158,6 +163,21 @@ namespace openpni::distributed::streaming
             const coincidence::NotifyProducerCompleteRequest *request,
             coincidence::NotifyProducerCompleteResponse *response) override;
 
+        grpc::Status OpenShipPlane(
+            grpc::ServerContext *context,
+            const coincidence::OpenShipPlaneRequest *request,
+            coincidence::OpenShipPlaneResponse *response) override;
+
+        grpc::Status WaitForShipApplied(
+            grpc::ServerContext *context,
+            const coincidence::WaitForShipAppliedRequest *request,
+            coincidence::WaitForShipAppliedResponse *response) override;
+
+        grpc::Status RegisterCoin(
+            grpc::ServerContext *context,
+            const coincidence::RegisterCoinRequest *request,
+            coincidence::RegisterCoinResponse *response) override;
+
         bool waitForAllNodes(uint32_t timeoutMs = 0) const;
         bool waitForStartSignal(uint32_t timeoutMs = 0) const;
 
@@ -181,7 +201,13 @@ namespace openpni::distributed::streaming
         EpochHandoff takeEpochHandoff();
         bool applyEpochHandoff(EpochHandoff handoff);
         bool maybePreemptLease();
+        bool connectShipTo(const std::string &nextListenAddress, uint32_t nextCoinId);
+        bool shipEpochTo();
         bool shipEpochTo(CoincidenceServiceImpl &next);
+        bool sendEpochHandoffAndWait(const EpochHandoff &handoff);
+        bool tickLease();
+        bool shipPlaneReady() const;
+        std::string registeredCoinListenAddress(uint32_t coinId) const;
 
         openpni::distributed::dataplane::rdma::RdmaRecvServer &rdmaServer() { return *m_rdmaServer; }
 
@@ -198,6 +224,9 @@ namespace openpni::distributed::streaming
         void drainAlignerIfAllComplete();
         void updateNodeStats(uint32_t nodeId, uint64_t singlesCount);
         void startRdmaIngest();
+        void startShipRecv();
+        void stopShipSender();
+        std::string resolveNextCoinAddress() const;
         coincidence::DataPlaneKind observedDataPlaneKindUnlocked() const;
         coincidence::ProducerCommand pendingProducerCommand() const;
         void setPendingProducerCommand(coincidence::ProducerCommand command);
@@ -236,6 +265,29 @@ namespace openpni::distributed::streaming
         mutable std::mutex m_leaseMutex;
 
         std::unique_ptr<openpni::distributed::dataplane::rdma::RdmaRecvServer> m_rdmaServer;
+        std::unique_ptr<openpni::distributed::dataplane::rdma::RdmaRecvServer> m_shipServer;
+        EpochShipAssembler m_shipAssembler;
+
+        mutable std::mutex m_shipTxMutex;
+        std::unique_ptr<openpni::distributed::dataplane::rdma::RdmaWriteSender> m_shipSender;
+        std::shared_ptr<grpc::Channel> m_shipChannel;
+        std::unique_ptr<coincidence::CoincidenceService::Stub> m_shipStub;
+        uint32_t m_shipPeerCoinId = 0;
+        EpochHandoff m_pendingShip;
+
+        mutable std::mutex m_shipAckMutex;
+        std::condition_variable m_shipAckCv;
+        uint64_t m_shipAppliedEpoch = 0;
+        bool m_shipApplyFailed = false;
+
+        struct ComputeCoinInfo
+        {
+            uint32_t coinId = 0;
+            std::string listenAddress;
+            std::chrono::steady_clock::time_point lastHeartbeat{};
+        };
+        mutable std::mutex m_computeCoinsMutex;
+        std::unordered_map<uint32_t, ComputeCoinInfo> m_computeCoins;
 
         struct PartialChunk
         {

@@ -22,6 +22,7 @@ tests/
 |-----|------|------------------|
 | `app_acq_r2s_node` | worker：R2S + `CoincidenceClient` 发送 | synthetic、R2S GPU、RDMA 发送、本机 R2S 发数 |
 | `app_coin_master` | 符合-only：RDMA 收 + 对齐 + 符合 | 编排握手、L2 收包、符合 GPU、L3 回放、R2S→coin |
+| `app_coin_node` | 与 `app_coin_master` 同一 `coin_master_main.cpp`，JSON `role=compute` | 时间分片被控符合节点 RegisterCoin / 收包 |
 
 timesync、AcquisitionMaster **现行 app 未接线或会忽略**，对应测试只保模块。
 
@@ -35,6 +36,7 @@ flowchart TB
     coinGpu[test_coin_multi_gpu]
     carry[test_coin_carry_boundary]
     shard[test_coin_time_shard]
+    shardShip[test_coin_time_shard_ship]
   end
   subgraph comm [通信]
     orch[test_rdma_orchestration]
@@ -42,21 +44,31 @@ flowchart TB
   end
   subgraph integ [集成]
     smoke[test_app_inprocess_smoke]
+    shardSmoke[test_app_time_shard_smoke]
     r2sGrpc[test_r2s_rdma_send]
     coinStream[test_coin_lsingle_stream]
     r2sCoin[test_r2s_rdma_coin]
   end
   worker[app_acq_r2s_node]
   coin[app_coin_master]
+  coinNode[app_coin_node]
   syn --> worker
   r2sGpu --> worker
   loop --> worker
   cfg --> worker
   cfg --> coin
+  cfg --> coinNode
   orch --> worker
   orch --> coin
+  orch --> coinNode
   smoke --> worker
   smoke --> coin
+  shardSmoke --> worker
+  shardSmoke --> coin
+  shardSmoke --> coinNode
+  shard --> coin
+  shardShip --> coin
+  shardShip --> coinNode
   ingress --> coin
   r2sGrpc --> worker
   coinStream --> coin
@@ -80,6 +92,7 @@ flowchart TB
 | `test_coin_multi_gpu` | 测试符合计算在多 GPU 上与单 GPU 结果一致 |
 | `test_coin_carry_boundary` | 测试流式分段符合在窗口边界用 carry 能否找回丢失的符合 |
 | `test_coin_time_shard` | 测试时间分片双对齐器交接是否与 9120 金标准等价（delay 全等，prompt 遵守 carry 契约） |
+| `test_coin_time_shard_ship` | 测试生产 Ship QP + GPU 双 `CoinGrpcNode` 交接是否与 9120 金标准等价 |
 | `test_app_config_parse` | 测试 AppConfig 能否解析 example 与 InProcess 冒烟 JSON（有 app 二进制再跑 --dry-run） |
 | `test_timesync_algorithm` | 测试多节点时钟漂移校正算法（不走真实 gRPC） |
 | `test_pni_r2s_offline` | 用盘上 raw 离线跑 50100 R2S，产出 singles 供对照（非 CI） |
@@ -89,7 +102,7 @@ flowchart TB
 
 | 目标 | 用途 |
 |------|------|
-| `test_rdma_orchestration` | 测试 worker↔coin 握手、PAUSE、InProcess 发送、通道 remap，以及时间分片冷/热切、租约 FSM 与 Ship |
+| `test_rdma_orchestration` | 测试 worker↔coin 握手、PAUSE、InProcess 发送、通道 remap，以及时间分片冷/热切、高压抢占、空交接与 Ship |
 | `test_rdma_singles_ingress` | 测试 `.lsingle` 经数据面灌入 coin 接收环的连续性与吞吐（不算符合） |
 | `test_acq_control_init` | 测试采集 Master 向节点下发任务并进入 CONFIGURED |
 | `test_timesync_grpc` | 测试 timesync 的 gRPC 同步、多轮校正与并发客户端 |
@@ -100,6 +113,7 @@ flowchart TB
 | 目标 | 用途 |
 |------|------|
 | `test_app_inprocess_smoke` | 测试真实 `app_coin_master` + `app_acq_r2s_node` 的 InProcess synthetic 握手与收发 |
+| `test_app_time_shard_smoke` | 测试 Master+Compute 控制面 RegisterCoin；有 RNIC 时再跑 RoCE 收发/热切 |
 | `test_r2s_rdma_send` | 测试两路 R2S 节点经 RDMA 发到本机接收端（不含符合计算） |
 | `test_coin_lsingle_stream` | 测试预计算 singles 灌入真实 coin 后能否产出 prompt/delay |
 | `test_r2s_rdma_coin` | 测试本机双 R2S + coin 全链路（R2S → RDMA → 符合） |

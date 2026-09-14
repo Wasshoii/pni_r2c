@@ -1,0 +1,29 @@
+{
+  "cluster": {
+    "listenAddress": "127.0.0.1:51092",
+    "expectedNodeCount": 2,
+    "role": "compute",
+    "coinId": 1,
+    "masterAddress": "127.0.0.1:51091"
+  },
+  "dataplane": {
+    "requireRoce": false,
+    "forceInProcess": true,
+    "deviceName": "",
+    "gidIndex": 0
+  },
+  "coincidence": {
+    "detectorProfile": "BDM2",
+    "outputDir": "/tmp/r2c_time_shard_smoke/compute",
+    "protocol": {
+      "timeWindowPs": 2000,
+      "delayTimePs": 2000000,
+      "energyLowerEV": 350000.0,
+      "energyUpperEV": 650000.0
+    }
+  },
+  "runtime": {
+    "runSeconds": 15,
+    "statusIntervalMs": 200
+  }
+}

@@ -621,6 +621,36 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
       )
       r2c_target_link_cuda_s2c(test_rdma_orchestration)
 
+      add_executable(test_coin_time_shard_ship
+        tests/correctness/test_coin_time_shard_ship.cpp
+        $<TARGET_OBJECTS:r2c_grpc_service_coin_objs>
+        $<TARGET_OBJECTS:r2c_dataplane_rdma_objs>
+        $<TARGET_OBJECTS:r2c_grpc_node_coin_objs>
+        $<TARGET_OBJECTS:r2c_core_streaming_objs>
+        $<TARGET_OBJECTS:r2c_proto_objs>
+      )
+      target_include_directories(test_coin_time_shard_ship
+        PRIVATE
+          "${CMAKE_CURRENT_SOURCE_DIR}"
+          "${R2C_PROTO_GEN_ROOT}"
+          "${R2C_PROTO_GEN_DIR}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include"
+          "${CMAKE_CURRENT_SOURCE_DIR}/src"
+      )
+      target_compile_options(test_coin_time_shard_ship PRIVATE -O2 -pthread -fopenmp)
+      target_link_libraries(test_coin_time_shard_ship
+        PRIVATE
+          PkgConfig::R2C_PNI
+          PkgConfig::R2C_GRPC
+          PkgConfig::R2C_IBVERBS
+          PkgConfig::R2C_GLOG
+          OpenMP::OpenMP_CXX
+          ${R2C_TBB_LIBRARY}
+          dl
+      )
+      r2c_target_link_cuda_s2c(test_coin_time_shard_ship)
+
       add_executable(test_rdma_dataplane_loopback
         tests/correctness/test_rdma_dataplane_loopback.cpp
         $<TARGET_OBJECTS:r2c_dataplane_rdma_objs>
@@ -672,6 +702,11 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
         tests/correctness/test_app_inprocess_smoke.cpp
       )
       target_compile_options(test_app_inprocess_smoke PRIVATE -Wall -Wextra -O2)
+
+      add_executable(test_app_time_shard_smoke
+        tests/correctness/test_app_time_shard_smoke.cpp
+      )
+      target_compile_options(test_app_time_shard_smoke PRIVATE -Wall -Wextra -O2)
     endif()
 
     if(R2C_BUILD_TEST_LOCAL_GRPC_SINGLES_INGRESS)
@@ -1559,8 +1594,10 @@ r2c_set_output_dir(test_coin_synthetic_singles test)
 r2c_set_output_dir(test_coin_multi_gpu test)
 r2c_set_output_dir(test_rdma_recv_stub test)
 r2c_set_output_dir(test_rdma_orchestration test)
+r2c_set_output_dir(test_coin_time_shard_ship test)
 r2c_set_output_dir(test_app_config_parse test)
 r2c_set_output_dir(test_app_inprocess_smoke test)
+r2c_set_output_dir(test_app_time_shard_smoke test)
 r2c_set_output_dir(test_acq_control_init test)
 r2c_set_output_dir(test_pni_r2s_offline test)
 r2c_set_output_dir(test_pni_coin_offline test)
@@ -1598,12 +1635,20 @@ r2c_register_test(test_timesync_grpc core correctness)
 
 r2c_register_test(test_coin_streaming_aligner pni integration manual correctness)
 r2c_register_test(test_coin_time_shard cuda integration correctness)
+r2c_register_test(test_coin_time_shard_ship cuda integration correctness)
+if(BUILD_TESTING AND TARGET test_coin_time_shard_ship)
+  set_tests_properties(test_coin_time_shard_ship PROPERTIES TIMEOUT 600)
+endif()
 r2c_register_test(test_coin_synthetic_singles pni correctness)
 r2c_register_test(test_coin_multi_gpu cuda integration correctness)
 r2c_register_test(test_rdma_recv_stub pni integration manual correctness)
 r2c_register_test(test_rdma_orchestration pni integration correctness)
 r2c_register_test(test_app_config_parse pni correctness)
 r2c_register_test(test_app_inprocess_smoke pni integration correctness)
+r2c_register_test(test_app_time_shard_smoke pni integration correctness)
+if(BUILD_TESTING AND TARGET test_app_time_shard_smoke)
+  set_tests_properties(test_app_time_shard_smoke PROPERTIES TIMEOUT 180)
+endif()
 r2c_register_test(test_acq_control_init pni correctness)
 
 r2c_register_test(test_pni_r2s_offline cuda manual correctness)

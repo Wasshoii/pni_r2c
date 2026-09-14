@@ -24,6 +24,7 @@
 #include <glog/logging.h>
 #include <grpcpp/grpcpp.h>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <sys/wait.h>
@@ -904,6 +905,9 @@ namespace
         grpcnode::CoinGrpcNode::InitOptions initA;
         initA.alignerConfig = makeAligner("/tmp/r2c_orch_shard_hot_a", 2);
         initA.alignerConfig.extractOnly = true;
+        initA.alignerConfig.minSegmentSingles = 0;
+        initA.alignerConfig.minSegmentOverlapFactor = 1;
+        initA.alignerConfig.maxProcessLatencyMs = 10;
         initA.listenAddress = addrA;
         initA.expectedNodeCount = 2;
         initA.autoStartWhenAllRegistered = true;
@@ -915,6 +919,9 @@ namespace
         grpcnode::CoinGrpcNode::InitOptions initB = initA;
         initB.alignerConfig = makeAligner("/tmp/r2c_orch_shard_hot_b", 2);
         initB.alignerConfig.extractOnly = true;
+        initB.alignerConfig.minSegmentSingles = 0;
+        initB.alignerConfig.minSegmentOverlapFactor = 1;
+        initB.alignerConfig.maxProcessLatencyMs = 10;
         initB.listenAddress = addrB;
         initB.coinId = 1;
         initB.enableTimeShard = false;
@@ -937,6 +944,26 @@ namespace
         if (!client0.isRunning() || !client1.isRunning())
         {
             std::cerr << "hot client start failed\n";
+            client0.stop();
+            client1.stop();
+            coinA.stop();
+            coinB.stop();
+            return false;
+        }
+        bool bStarted = false;
+        for (int i = 0; i < 100; ++i)
+        {
+            if (coinB.startSignalIssued() && coinB.dataplaneOpenCount() >= 2)
+            {
+                bStarted = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (!bStarted)
+        {
+            std::cerr << "hot coin B did not start dataplaneOpen=" << coinB.dataplaneOpenCount()
+                      << " startIssued=" << coinB.startSignalIssued() << "\n";
             client0.stop();
             client1.stop();
             coinA.stop();
@@ -1039,9 +1066,62 @@ namespace
             coinB.stop();
             return false;
         }
+        const uint64_t aBeforeSecond = coinA.statistics().totalSinglesReceived.load();
+        const uint64_t bBeforeSecond = coinB.statistics().totalSinglesReceived.load();
+        auto occSum = [](grpcnode::CoinGrpcNode &coin) {
+            double occ = 0.0;
+            for (size_t i = 0; i < coin.aligner().getNodeCount(); ++i)
+            {
+                auto *buf = coin.aligner().getNodeBuffer(static_cast<uint16_t>(i));
+                if (buf)
+                {
+                    occ += buf->occupancyRatio();
+                }
+            }
+            return occ;
+        };
+        const double bOccBefore = occSum(coinB);
         if (!sendRange(client0, s0, half, total) || !sendRange(client1, s1, half, total))
         {
             std::cerr << "hot second-half send failed\n";
+            client0.stop();
+            client1.stop();
+            coinA.stop();
+            coinB.stop();
+            return false;
+        }
+        bool bGrew = false;
+        uint64_t aAfterSecond = aBeforeSecond;
+        uint64_t bAfterSecond = bBeforeSecond;
+        double bOccAfter = bOccBefore;
+        for (int i = 0; i < 50; ++i)
+        {
+            aAfterSecond = coinA.statistics().totalSinglesReceived.load();
+            bAfterSecond = coinB.statistics().totalSinglesReceived.load();
+            bOccAfter = occSum(coinB);
+            if (bAfterSecond > bBeforeSecond || bOccAfter > bOccBefore + 0.01)
+            {
+                bGrew = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (aAfterSecond > aBeforeSecond)
+        {
+            std::cerr << "hot second-half still ingested on A " << aBeforeSecond << "->"
+                      << aAfterSecond << "\n";
+            client0.stop();
+            client1.stop();
+            coinA.stop();
+            coinB.stop();
+            return false;
+        }
+        if (!bGrew)
+        {
+            std::cerr << "hot second-half did not ingest on B recv " << bBeforeSecond << "->"
+                      << bAfterSecond << " occ " << bOccBefore << "->" << bOccAfter
+                      << " startIssued=" << coinB.startSignalIssued()
+                      << " running=" << coinB.aligner().isRunning() << "\n";
             client0.stop();
             client1.stop();
             coinA.stop();
@@ -1237,6 +1317,206 @@ namespace
         return true;
     }
 
+    void fillShipSingles(std::vector<streaming::Single> *v, uint64_t t0, uint32_t n)
+    {
+        v->resize(n);
+        for (uint32_t i = 0; i < n; ++i)
+        {
+            (*v)[i].channelIndex = 1;
+            (*v)[i].crystalIndex = 1;
+            (*v)[i].timevalue_100fs = t0 + i;
+            (*v)[i].energy_ev = 511.0f;
+        }
+    }
+
+    bool testEpochShipEmptyFrames()
+    {
+        auto roundTrip = [](const streaming::EpochHandoff &in, const char *tag) {
+            streaming::EpochHandoff out;
+            if (!streaming::shipEpochHandoffViaDataplane(in, &out, false))
+            {
+                std::cerr << "epoch ship empty " << tag << " failed\n";
+                return false;
+            }
+            if (out.epochId != in.epochId || out.cutWatermark_100fs != in.cutWatermark_100fs ||
+                out.carry.size() != in.carry.size())
+            {
+                std::cerr << "epoch ship empty " << tag << " meta mismatch\n";
+                return false;
+            }
+            return true;
+        };
+
+        streaming::EpochHandoff emptyCarry;
+        emptyCarry.epochId = 11;
+        emptyCarry.cutWatermark_100fs = 5000;
+        emptyCarry.overlap_100fs = 2000;
+        streaming::TimestampedSingleChunk tailOnly;
+        tailOnly.nodeId = 0;
+        tailOnly.chunkId = 1;
+        fillShipSingles(&tailOnly.singles, 5001, 16);
+        tailOnly.updateTimeRange();
+        emptyCarry.tail.push_back(std::move(tailOnly));
+        if (!roundTrip(emptyCarry, "empty_carry"))
+        {
+            return false;
+        }
+
+        streaming::EpochHandoff emptyTail;
+        emptyTail.epochId = 12;
+        emptyTail.cutWatermark_100fs = 6000;
+        emptyTail.overlap_100fs = 2000;
+        fillShipSingles(&emptyTail.carry, 5900, 16);
+        if (!roundTrip(emptyTail, "empty_tail"))
+        {
+            return false;
+        }
+
+        streaming::EpochHandoff skipEmpty;
+        skipEmpty.epochId = 13;
+        skipEmpty.cutWatermark_100fs = 7000;
+        skipEmpty.overlap_100fs = 2000;
+        fillShipSingles(&skipEmpty.carry, 6900, 8);
+        streaming::TimestampedSingleChunk emptyNode;
+        emptyNode.nodeId = 0;
+        emptyNode.chunkId = 1;
+        streaming::TimestampedSingleChunk liveNode;
+        liveNode.nodeId = 1;
+        liveNode.chunkId = 2;
+        fillShipSingles(&liveNode.singles, 7001, 12);
+        liveNode.updateTimeRange();
+        skipEmpty.tail.push_back(std::move(emptyNode));
+        skipEmpty.tail.push_back(std::move(liveNode));
+        streaming::EpochHandoff out;
+        if (!streaming::shipEpochHandoffViaDataplane(skipEmpty, &out, false))
+        {
+            std::cerr << "epoch ship empty skip-tail failed\n";
+            return false;
+        }
+        if (out.tail.size() != 1 || out.tail[0].nodeId != 1 || out.tail[0].singles.size() != 12)
+        {
+            std::cerr << "empty tail node was not skipped tailCount=" << out.tail.size() << "\n";
+            return false;
+        }
+        std::cout << "[PASS] epoch_ship_empty_frames\n";
+        return true;
+    }
+
+    bool fillUntilHighWater(grpcnode::CoinGrpcNode *coin, streaming::CoincidenceClient *client)
+    {
+        streaming::SyntheticSpec spec;
+        spec.nodeId = 0;
+        spec.peerNodeId = 0;
+        spec.promptPairs = 64;
+        spec.delayPairs = 0;
+        std::vector<streaming::Single> buf;
+        for (int round = 0; round < 8; ++round)
+        {
+            streaming::fillSyntheticChunk(spec, static_cast<uint64_t>(round) * 8, 8, &buf);
+            if (!client->sendSingles(buf, 0, 0))
+            {
+                return false;
+            }
+            auto *ring = coin->aligner().getNodeBuffer(0);
+            if (ring && ring->occupancyRatio() >= 0.80 && coin->aligner().publishedWatermark() > 0)
+            {
+                return true;
+            }
+        }
+        for (int i = 0; i < 50; ++i)
+        {
+            auto *ring = coin->aligner().getNodeBuffer(0);
+            if (ring && ring->occupancyRatio() >= 0.80 && coin->aligner().publishedWatermark() > 0)
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        auto *ring = coin->aligner().getNodeBuffer(0);
+        return ring && ring->occupancyRatio() >= 0.80 && coin->aligner().publishedWatermark() > 0;
+    }
+
+    bool testHighWaterPreemptInProcess()
+    {
+        auto runCase = [](const std::string &addr, uint64_t minLease, bool prepare,
+                          bool expectCut, const char *tag) {
+            grpcnode::CoinGrpcNode::InitOptions init;
+            init.alignerConfig = makeAligner("/tmp/r2c_orch_highwater");
+            init.alignerConfig.extractOnly = true;
+            init.alignerConfig.maxChunksPerNode = 8;
+            init.alignerConfig.stolenDequeCap = 0;
+            init.alignerConfig.bufferHighWaterRatio = 0.99;
+            init.alignerConfig.processingIntervalMs = 60000;
+            init.alignerConfig.maxProcessLatencyMs = 60000;
+            init.alignerConfig.minSegmentOverlapFactor = 1000;
+            init.alignerConfig.coinProtocol.timeWindow_ps = 2000;
+            init.alignerConfig.coinProtocol.delayTime_ps = 2000000;
+            init.listenAddress = addr;
+            init.expectedNodeCount = 1;
+            init.autoStartWhenAllRegistered = true;
+            init.startLeadTimeMs = 0;
+            init.forceInProcess = true;
+            init.coinId = 0;
+            init.enableTimeShard = true;
+            init.plannedLeaseSpan_100fs = std::numeric_limits<uint64_t>::max();
+            init.minLease_100fs = minLease;
+            grpcnode::CoinGrpcNode coin(init);
+            if (!coin.start())
+            {
+                std::cerr << "high-water " << tag << " start failed\n";
+                return false;
+            }
+            streaming::CoincidenceClientConfig cc;
+            cc.serverAddress = addr;
+            cc.nodeId = 0;
+            cc.nodeAddress = "127.0.0.1";
+            cc.forceInProcess = true;
+            cc.waitForStartTimeoutMs = 15000;
+            streaming::CoincidenceClient client(cc);
+            if (!startClientThread(client))
+            {
+                std::cerr << "high-water " << tag << " client start failed\n";
+                client.stop();
+                coin.stop();
+                return false;
+            }
+            if (!fillUntilHighWater(&coin, &client))
+            {
+                auto *ring = coin.aligner().getNodeBuffer(0);
+                std::cerr << "high-water " << tag << " occupancy not reached occ="
+                          << (ring ? ring->occupancyRatio() : -1.0)
+                          << " W=" << coin.aligner().publishedWatermark() << "\n";
+                client.stop();
+                coin.stop();
+                return false;
+            }
+            if (prepare)
+            {
+                coin.service().markNextCoinPrepared(true);
+            }
+            const bool cut = coin.service().maybePreemptLease();
+            client.stop();
+            coin.stop();
+            if (cut != expectCut)
+            {
+                std::cerr << "high-water " << tag << " cut=" << cut << " expected=" << expectCut
+                          << "\n";
+                return false;
+            }
+            return true;
+        };
+
+        if (!runCase("127.0.0.1:51078", 0, false, false, "no_prepare") ||
+            !runCase("127.0.0.1:51079", 0, true, true, "preempt") ||
+            !runCase("127.0.0.1:51080", std::numeric_limits<uint64_t>::max(), true, false,
+                     "min_lease"))
+        {
+            return false;
+        }
+        std::cout << "[PASS] time_lease_high_water_preempt\n";
+        return true;
+    }
+
     bool testTimeLeaseTickProductionShip()
     {
         const std::string addrA = "127.0.0.1:51076";
@@ -1393,12 +1673,13 @@ namespace
         in.epochId = 3;
         in.cutWatermark_100fs = 999;
         in.overlap_100fs = 2000;
-        in.carry.resize(128);
-        for (uint32_t i = 0; i < in.carry.size(); ++i)
-        {
-            in.carry[i].timevalue_100fs = 10 + i;
-            in.carry[i].energy_ev = 511.0f;
-        }
+        fillShipSingles(&in.carry, 10, 128);
+        streaming::TimestampedSingleChunk tail;
+        tail.nodeId = 1;
+        tail.chunkId = 4;
+        fillShipSingles(&tail.singles, 1000, 2048);
+        tail.updateTimeRange();
+        in.tail.push_back(std::move(tail));
         if (ok)
         {
             ok = coinA.service().sendEpochHandoffAndWait(in);
@@ -1409,8 +1690,8 @@ namespace
         waitpid(pid, &status, 0);
         if (!ok)
         {
-            std::cout << "[SKIP] epoch_ship_two_process_roce (handshake or apply failed)\n";
-            return true;
+            std::cerr << "epoch_ship_two_process_roce handshake or apply failed\n";
+            return false;
         }
         std::cout << "[PASS] epoch_ship_two_process_roce\n";
         return true;
@@ -1454,9 +1735,13 @@ int main(int argc, char **argv)
         rc = 1;
     if (!testTimeLeaseTickProductionShip())
         rc = 1;
+    if (!testHighWaterPreemptInProcess())
+        rc = 1;
     if (!testEpochShipDataplane(false))
         rc = 1;
     if (!testEpochShipDataplane(true))
+        rc = 1;
+    if (!testEpochShipEmptyFrames())
         rc = 1;
     return rc;
 }

@@ -121,7 +121,7 @@ flowchart TD
 1. 全局事件集合按 PET 时间分成半开区间 `… [t0, W) ∪ [W, t1) …`（与现 `upper_bound` 对齐：切点时刻归下一 epoch）。
 2. 跨 `W` 的 prompt/delay 对只在 **B** 上出现一次：overlap 在 B 的角色 = 今日 `m_carrySingles`，`carryCutoff = W`。
 3. A 不得再匹配 `> W`；B 不得把 overlap 内部再配对（现成 `carryCutoff`）。
-4. 多机串起来的结果 = 单机从 t0 跑到结束（允许已知的 prompt-cutoff 契约偏差，与 Test 9a 一致）。
+4. 多机串起来的结果 = 单机从 t0 跑到结束（prompt / delay 与金标准全等）。
 
 交接通道：控制面 gRPC 下发租约；**重叠窗 + 尾包走数据面**（Coin-A→Coin-B 的 RDMA/专用 QP）。控制面只适合很小的元数据。Overlap 在 60 Gib/s 下约 2 μs × 全空间片，大约千量级 singles/片源；尾包可能很大，必须走数据面。
 
@@ -202,10 +202,10 @@ Running 内增加 epoch 子状态：`LeaseActive` → `PrepareNext` → `Cutting
 
 | 阶段 | 代码 | 单机门禁 |
 |------|------|----------|
-| P1 aligner | `StreamingTimeAligner::completeEpoch` / `takeHandoff` / `applyHandoff`；`shipEpochHandoff` | [`test_coin_time_shard`](../tests/correctness/test_coin_time_shard.cpp)：9120 `.lsingle` 双实例对照 `getDListmode(cutoff=0)`；delay 全等；prompt ≤ 金标准 + 两段 `carrySinglesTotal`（Test 9a） |
+| P1 aligner | `StreamingTimeAligner::completeEpoch` / `takeHandoff` / `applyHandoff`；`shipEpochHandoff` | [`test_coin_time_shard`](../tests/correctness/test_coin_time_shard.cpp)：9120 `.lsingle` 双实例对照 `getDListmode(cutoff=0)`；prompt / delay 与金标准全等 |
 | P2 LMF | 文件前缀 `prompt_epoch{E}_coin{id}_{t0}_{t1}`；`AppendSegment` clockMs = `epochId`；打开 `coincidence_timestamp_100us` | 同上：按 `(符合PET时间, epochId, 下标)` 归并后再比条数 |
 | P3 控制面 | proto `CMD_SET_ACTIVE_COIN`；heartbeat `active_coin_id`；`CoincidenceClient` 多 session；compute `RegisterCoin` | `test_rdma_orchestration` 冷切（只证 QP/命令）与热切（节点自有 ship QP） |
 | P4 租约 | Master `TimeLease`：`LeaseActive → PrepareNext → Cutting → Shipping → Redirected → DrainPrev`；计划 PET `t1` + 环高水位抢占；Running 循环 `tickLease` | `time_lease_fsm`：未 Prepare 续租在 A；只切一次。`time_lease_tick_production_ship`：Prepare→Cut→Ship→Redirect。高压抢占：`occupancy>=0.80` 且已 Prepare 才切；`minLease` 未满不切 |
-| P5 Ship | `OpenShipPlane` + 专用 `RdmaRecvServer`（与 worker ingest 隔离）；`shipEpochTo` 走 RDMA + `WaitForShipApplied` 后再 `SET_ACTIVE_COIN` | [`test_coin_time_shard_ship`](../tests/correctness/test_coin_time_shard_ship.cpp)：生产 ship QP + 9120 GPU 金标准（delay 全等，prompt ≤ gold+carry）。`epoch_ship_inprocess` 含空 carry/tail；有 verbs 时两进程 RoCE 握手/apply 失败即失败 |
+| P5 Ship | `OpenShipPlane` + 专用 `RdmaRecvServer`（与 worker ingest 隔离）；`shipEpochTo` 走 RDMA + `WaitForShipApplied` 后再 `SET_ACTIVE_COIN` | [`test_coin_time_shard_ship`](../tests/correctness/test_coin_time_shard_ship.cpp)：生产 ship QP + 9120 GPU 金标准（prompt / delay 全等）。`epoch_ship_inprocess` 含空 carry/tail；有 verbs 时两进程 RoCE 握手/apply 失败即失败 |
 
 无 9120 数据时 `test_coin_time_shard` / `test_coin_time_shard_ship` skip（退出 0）。K=1 的 app JSON 不填 destinations，行为与现 `rdma_cluster/*.json` 相同。K=2 app 冒烟是 [`test_app_time_shard_smoke`](测试/集成.md#test_app_time_shard_smoke)：无 RNIC 只证 `RegisterCoin` 控制面；InProcess 数据面不能跨进程，收发/热切仅在有 RNIC 时走本机 RoCE。K=1 跨进程冒烟仍是 [`test_app_inprocess_smoke`](测试/集成.md#test_app_inprocess_smoke)。

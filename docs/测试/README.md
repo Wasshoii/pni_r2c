@@ -91,7 +91,7 @@ flowchart TB
 | `test_r2s_50100_multi_gpu` | 测试 50100 单事件转换在多 GPU 上的正确性 |
 | `test_coin_multi_gpu` | 测试符合计算在多 GPU 上与单 GPU 结果一致 |
 | `test_coin_carry_boundary` | 测试流式分段符合在窗口边界用 carry 能否找回丢失的符合 |
-| `test_coin_time_shard` | 测试时间分片双对齐器交接是否与 9120 金标准等价（delay 全等，prompt 遵守 carry 契约） |
+| `test_coin_time_shard` | 测试时间分片双对齐器交接是否与 9120 金标准等价（prompt / delay 全等） |
 | `test_coin_time_shard_ship` | 测试生产 Ship QP + GPU 双 `CoinGrpcNode` 交接是否与 9120 金标准等价 |
 | `test_app_config_parse` | 测试 AppConfig 能否解析 example 与 InProcess 冒烟 JSON（有 app 二进制再跑 --dry-run） |
 | `test_timesync_algorithm` | 测试多节点时钟漂移校正算法（不走真实 gRPC） |

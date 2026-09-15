@@ -221,10 +221,9 @@ int main(int argc, char **argv)
         std::cerr << "split delay " << splitDelay << " != gold " << goldDelay << "\n";
         return 1;
     }
-    if (splitPrompt > goldPrompt + splitCarry)
+    if (splitPrompt != goldPrompt)
     {
-        std::cerr << "split prompt " << splitPrompt << " exceeds gold+carry " << goldPrompt << "+"
-                  << splitCarry << "\n";
+        std::cerr << "split prompt " << splitPrompt << " != gold " << goldPrompt << "\n";
         return 1;
     }
 
@@ -242,6 +241,6 @@ int main(int argc, char **argv)
     }
 
     std::cout << "PASS: time-shard production ship vs 9120 gold "
-                 "(delay exact, prompt within carry contract)\n";
+                 "(prompt/delay match gold)\n";
     return 0;
 }

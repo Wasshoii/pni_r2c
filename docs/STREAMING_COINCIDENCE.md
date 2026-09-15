@@ -117,10 +117,9 @@ carry 占比与边界单调性：段跨度小于重叠窗时 carry 占比趋近 
 
 #### 单批上限（重要）
 
-底层 `openpni::Coincidence::getDListmode` 对单批 singles 数存在上限，越界表现为 CUDA 非法
-访存（硬崩溃，不是降级）。9120 双节点数据实测在 5×10^5 与 10^6 之间触发。`maxSegmentSingles`
-就是这个上限的护栏，默认 262144；**不建议设为 0（不限制）**，突发流量下水位线一次推进很远
-就会踩到内核上限。初始化时若检测到 0 或估算显存不足会打 WARNING。
+符合核工作集已从加倍后的 2N 降到 N，但 `getDListmode` 仍受显存与 CUB `int` 排序上限约束。
+`maxSegmentSingles` 是对齐器侧护栏，默认 262144；**不建议设为 0（不限制）**，突发流量下水位线一次推进很远
+仍可能 OOM。初始化时若检测到 0 或估算显存不足会打 WARNING。
 
 #### 多 GPU 流水线与写盘顺序
 
@@ -150,17 +149,12 @@ carry 占比与边界单调性：段跨度小于重叠窗时 carry 占比趋近 
 `ring_size = max(computeInstances+2, depth+2, 4)`。单 GPU 回退（`enableMultiGpu=false`）仍走
 同步 `processCoincidence`，不为 legacy `Coincidence` 再做一套环。
 
-流水线只改何时算、何时写，不改段边界与 cutoff；Test 9 分段不变性仍然成立。
+流水线只改何时算、何时写，不改段边界与 cutoff；Test 9 分段不变性要求 prompt / delay 与整批金标准全等。
 
-#### 已知上游缺陷
+#### 符合核契约
 
-`getDListmode(..., carryCutoffTime_100fs)` 的约定是「原始时间 ≤ cutoff 的事件视为尾部保
-留，彼此之间不配对」。预编译内核只在 **delay** 路径实现了该抑制，**prompt** 路径忽略
-cutoff。后果：每段的 carry 前缀内部的 prompt 配对会被重复计入，总 prompt 数比金标准多出
-恰好 `carrySinglesTotal` 条；delay 数严格与分段方式无关。
-`tests/correctness/test_coin_streaming_aligner.cpp` 的 Test 9a 用合成数据固化了这个契约，
-Test 9 则断言「prompt 偏差恰等于 carry 条数」——偏差一旦超出 carry，就说明分段/carry 逻辑
-真的出了回归。
+`getDListmode(..., carryCutoffTime_100fs)`：一对事件由 **原始时间较晚的端点** 拥有，仅当较晚端 `> cutoff` 时发出（prompt 与 delay 同一规则；`cutoff=0` 关闭）。核不再整批加倍 delay 副本；工作集为 N。能窗（默认 350–650 keV）仍是符合协议的光电峰筛选，R2S 默认不预切。
+`tests/correctness/test_coin_streaming_aligner.cpp` 的 Test 9a 用合成数据固化该契约（整批 ≤ cutoff 应 0 对；混合批只出新数据的对）。Test 9 断言分段 prompt/delay 与金标准全等。
 
 ### 4. CoincidenceServiceImpl
 

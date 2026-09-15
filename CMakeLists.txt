@@ -62,6 +62,116 @@ if(NOT R2C_PKG_CONFIG_PATH STREQUAL "")
   set(ENV{PKG_CONFIG_PATH} "${R2C_PKG_CONFIG_PATH}")
 endif()
 
+# Explicit libpni prefix. Empty = auto: system install, then build/local_pni.
+set(R2C_PNI_ROOT "" CACHE PATH "libpni prefix containing lib/pkgconfig/libpni.pc; empty selects system then local_pni")
+set(R2C_LOCAL_PNI_PREFIX "${CMAKE_SOURCE_DIR}/build/local_pni")
+
+function(r2c_clear_libpni_pkg_cache)
+  get_cmake_property(_r2c_pni_cache_vars CACHE_VARIABLES)
+  foreach(_r2c_pni_var IN LISTS _r2c_pni_cache_vars)
+    if(_r2c_pni_var STREQUAL "R2C_PNI_ROOT")
+      continue()
+    endif()
+    if(_r2c_pni_var MATCHES "^R2C_PNI_" OR _r2c_pni_var MATCHES "^pkgcfg_lib_R2C_PNI_")
+      unset(${_r2c_pni_var} CACHE)
+    endif()
+  endforeach()
+endfunction()
+
+function(r2c_require_libpni)
+  if(TARGET PkgConfig::R2C_PNI)
+    return()
+  endif()
+
+  set(_r2c_pni_pc_dir "")
+  set(_r2c_pni_origin "")
+
+  if(R2C_PNI_ROOT)
+    if(NOT EXISTS "${R2C_PNI_ROOT}/lib/pkgconfig/libpni.pc")
+      message(FATAL_ERROR "R2C_PNI_ROOT=${R2C_PNI_ROOT} does not contain lib/pkgconfig/libpni.pc")
+    endif()
+    set(_r2c_pni_pc_dir "${R2C_PNI_ROOT}/lib/pkgconfig")
+    set(_r2c_pni_origin "R2C_PNI_ROOT")
+  else()
+    foreach(_r2c_pni_pc IN ITEMS
+        /usr/local/lib/pkgconfig/libpni.pc
+        /usr/local/lib/x86_64-linux-gnu/pkgconfig/libpni.pc
+        /usr/lib/x86_64-linux-gnu/pkgconfig/libpni.pc
+        /usr/lib/pkgconfig/libpni.pc)
+      if(EXISTS "${_r2c_pni_pc}")
+        get_filename_component(_r2c_pni_pc_dir "${_r2c_pni_pc}" DIRECTORY)
+        set(_r2c_pni_origin "system")
+        break()
+      endif()
+    endforeach()
+
+    if(NOT _r2c_pni_pc_dir)
+      execute_process(
+        COMMAND ${PKG_CONFIG_EXECUTABLE} --variable=prefix libpni
+        RESULT_VARIABLE _r2c_pni_pc_rc
+        OUTPUT_VARIABLE _r2c_pni_pc_prefix
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+      )
+      if(_r2c_pni_pc_rc EQUAL 0 AND _r2c_pni_pc_prefix
+          AND NOT _r2c_pni_pc_prefix STREQUAL "${R2C_LOCAL_PNI_PREFIX}"
+          AND EXISTS "${_r2c_pni_pc_prefix}/lib/pkgconfig/libpni.pc")
+        set(_r2c_pni_pc_dir "${_r2c_pni_pc_prefix}/lib/pkgconfig")
+        set(_r2c_pni_origin "system")
+      endif()
+    endif()
+
+    if(NOT _r2c_pni_pc_dir AND EXISTS "${R2C_LOCAL_PNI_PREFIX}/lib/pkgconfig/libpni.pc")
+      set(_r2c_pni_pc_dir "${R2C_LOCAL_PNI_PREFIX}/lib/pkgconfig")
+      set(_r2c_pni_origin "local_pni")
+    endif()
+  endif()
+
+  if(NOT _r2c_pni_pc_dir)
+    message(FATAL_ERROR
+      "libpni not found. Install it to the system (pkg-config libpni), "
+      "place a prefix at ${R2C_LOCAL_PNI_PREFIX}, or set -DR2C_PNI_ROOT=<prefix>.")
+  endif()
+
+  file(READ "${_r2c_pni_pc_dir}/libpni.pc" _r2c_pni_pc_text)
+  if(_r2c_pni_pc_text MATCHES "prefix=([^\n\r]+)")
+    set(_r2c_pni_wanted_prefix "${CMAKE_MATCH_1}")
+  else()
+    get_filename_component(_r2c_pni_wanted_prefix "${_r2c_pni_pc_dir}/../.." ABSOLUTE)
+  endif()
+
+  if(DEFINED R2C_PNI_PREFIX AND NOT R2C_PNI_PREFIX STREQUAL "${_r2c_pni_wanted_prefix}")
+    message(STATUS "libpni prefix changed (${R2C_PNI_PREFIX} -> ${_r2c_pni_wanted_prefix}); refreshing pkg-config cache")
+    r2c_clear_libpni_pkg_cache()
+  endif()
+
+  set(_r2c_saved_pkg_config_path "$ENV{PKG_CONFIG_PATH}")
+  set(ENV{PKG_CONFIG_PATH} "${_r2c_pni_pc_dir}:${_r2c_saved_pkg_config_path}")
+  pkg_check_modules(R2C_PNI REQUIRED IMPORTED_TARGET libpni)
+  set(ENV{PKG_CONFIG_PATH} "${_r2c_saved_pkg_config_path}")
+
+  message(STATUS "libpni (${_r2c_pni_origin}): ${R2C_PNI_PREFIX}  [${_r2c_pni_pc_dir}/libpni.pc]")
+
+  if(_r2c_pni_origin STREQUAL "local_pni")
+    set(_r2c_build_rpath "${CMAKE_BUILD_RPATH}")
+    set(_r2c_install_rpath "${CMAKE_INSTALL_RPATH}")
+    list(PREPEND _r2c_build_rpath "${R2C_PNI_LIBDIR}")
+    list(PREPEND _r2c_install_rpath "${R2C_PNI_LIBDIR}")
+    set(CMAKE_BUILD_RPATH "${_r2c_build_rpath}" PARENT_SCOPE)
+    set(CMAKE_INSTALL_RPATH "${_r2c_install_rpath}" PARENT_SCOPE)
+  else()
+    set(_r2c_local_rpath_flag "-Wl,-rpath,${R2C_LOCAL_PNI_PREFIX}/lib")
+    if(CMAKE_EXE_LINKER_FLAGS MATCHES "local_pni")
+      string(REPLACE "${_r2c_local_rpath_flag}" "" _r2c_stripped_ldflags "${CMAKE_EXE_LINKER_FLAGS}")
+      string(STRIP "${_r2c_stripped_ldflags}" _r2c_stripped_ldflags)
+      if(NOT _r2c_stripped_ldflags STREQUAL "${CMAKE_EXE_LINKER_FLAGS}")
+        set(CMAKE_EXE_LINKER_FLAGS "${_r2c_stripped_ldflags}" CACHE STRING "Flags used by the linker during all build types." FORCE)
+        message(STATUS "Cleared stale local_pni rpath from CMAKE_EXE_LINKER_FLAGS")
+      endif()
+    endif()
+  endif()
+endfunction()
+
 # Keep migration low-risk: use pkg-config (same dependency source as Makefile).
 pkg_check_modules(R2C_GRPC REQUIRED IMPORTED_TARGET grpc++ protobuf)
 pkg_check_modules(R2C_GLOG REQUIRED IMPORTED_TARGET libglog gflags)
@@ -208,7 +318,7 @@ if(R2C_BUILD_TEST_GRPC)
 endif()
 
 if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_COIN_MASTER OR R2C_BUILD_TEST_COIN_MULTI_GPU OR R2C_BUILD_TEST_COIN_PERF OR R2C_BUILD_TEST_COIN_CARRY_BOUNDARY OR R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN OR R2C_BUILD_TEST_LOCAL_GRPC_SINGLES_INGRESS OR R2C_BUILD_TEST_LOCAL_GRPC_COIN_STREAM OR R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE)
-  pkg_check_modules(R2C_PNI REQUIRED IMPORTED_TARGET libpni)
+  r2c_require_libpni()
   pkg_check_modules(R2C_DPDK QUIET libdpdk)
 
   if(EXISTS "/usr/bin/nvcc")
@@ -818,7 +928,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
 endif()
 
 if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE)
-  pkg_check_modules(R2C_PNI REQUIRED IMPORTED_TARGET libpni)
+  r2c_require_libpni()
   find_library(R2C_TBB_LIBRARY NAMES tbb REQUIRED)
   find_package(OpenMP REQUIRED)
 
@@ -953,7 +1063,7 @@ if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE)
 endif()
 
 if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRPC_R2S OR R2C_BUILD_TEST_LOCAL_GRPC_R2S_COIN OR R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE OR R2C_BUILD_APP_ACQ_R2S_NODE OR R2C_BUILD_TEST_R2S_MULTI_GPU OR R2C_BUILD_TEST_R2S_50100_PERF)
-  pkg_check_modules(R2C_PNI REQUIRED IMPORTED_TARGET libpni)
+  r2c_require_libpni()
   pkg_check_modules(R2C_DPDK QUIET libdpdk)
   find_library(R2C_TBB_LIBRARY NAMES tbb REQUIRED)
   find_package(OpenMP REQUIRED)
@@ -1485,7 +1595,7 @@ if(R2C_BUILD_TEST_PNI_R2C OR R2C_BUILD_TEST_PNI_COIN OR R2C_BUILD_TEST_LOCAL_GRP
 endif()
 
 if(R2C_BUILD_TOOL_UDP_RAW_REPLAYER)
-  pkg_check_modules(R2C_PNI REQUIRED IMPORTED_TARGET libpni)
+  r2c_require_libpni()
   find_package(OpenMP REQUIRED)
 
   add_executable(tool_udp_raw_replayer
@@ -1516,7 +1626,7 @@ if(R2C_BUILD_TOOL_UDP_RAW_REPLAYER)
 endif()
 
 if(R2C_BUILD_TOOL_SHARDED_RAW_MERGE)
-  pkg_check_modules(R2C_PNI REQUIRED IMPORTED_TARGET libpni)
+  r2c_require_libpni()
 
   add_executable(tool_sharded_raw_merge
     src/tools/sharded_raw_merge_main.cpp

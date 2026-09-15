@@ -87,6 +87,11 @@ int main()
         std::cerr << "single-aligner delay " << oneDelay << " != gold " << goldDelay << "\n";
         return 1;
     }
+    if (onePrompt != goldPrompt)
+    {
+        std::cerr << "single-aligner prompt " << onePrompt << " != gold " << goldPrompt << "\n";
+        return 1;
+    }
 
     cfgA.epochId = 1;
     cfgA.coinId = 0;
@@ -164,10 +169,9 @@ int main()
         std::cerr << "split delay " << splitDelay << " != gold " << goldDelay << "\n";
         return 1;
     }
-    if (splitPrompt > goldPrompt + splitCarry)
+    if (splitPrompt != goldPrompt)
     {
-        std::cerr << "split prompt " << splitPrompt << " exceeds gold+carry " << goldPrompt << "+"
-                  << splitCarry << "\n";
+        std::cerr << "split prompt " << splitPrompt << " != gold " << goldPrompt << "\n";
         return 1;
     }
 
@@ -203,6 +207,6 @@ int main()
         return 1;
     }
 
-    std::cout << "PASS: time-shard dual aligner (delay exact, prompt within carry contract)\n";
+    std::cout << "PASS: time-shard dual aligner (prompt/delay match gold)\n";
     return 0;
 }

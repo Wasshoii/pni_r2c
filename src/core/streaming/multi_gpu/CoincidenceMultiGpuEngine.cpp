@@ -88,12 +88,11 @@ namespace
 
         if (config.max_singles_capacity == 0)
         {
-            // 不设上界时单批规模只受水位推进速度约束。预编译 Coincidence 对单批 singles
-            // 数存在上限（实测 9120 双节点数据在 5e5~1e6 之间就会触发非法访存），越过它
-            // 是硬崩溃而非降级，所以这里必须提醒。
+            // 不设上界时单批规模只受水位推进速度约束。符合核工作集为 N，但仍受显存
+            // 与 CUB SortPairs 的 int 上限约束，越过它是硬失败而非降级。
             LOG(WARNING) << "CoincidenceMultiGpuEngine: maxSegmentSingles=0（不限制单批"
-                            "规模）；符合内核对单批 singles 数有上限，突发流量下可能触发"
-                            "非法访存。建议按显存与数据率设一个显式上界（默认 262144）";
+                            "规模）；符合内核仍受显存与排序上限约束，突发流量下可能 OOM。"
+                            "建议按显存与数据率设一个显式上界（默认 262144）";
             return;
         }
 

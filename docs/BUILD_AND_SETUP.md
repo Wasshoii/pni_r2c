@@ -84,6 +84,7 @@ cmake -S . -B build/cmake \
 说明：
 - 默认优先使用 `/usr/bin/protoc` 与 `/usr/bin/grpc_cpp_plugin`。
 - 默认 `R2C_PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig`（避免 protobuf/grpc 版本漂移）。
+- libpni 单独解析：优先系统安装（`/usr/local`、`/usr` 下的 `libpni.pc`），找不到再退回 `build/local_pni`。可用 `-DR2C_PNI_ROOT=<prefix>` 强制指定。
 - 预设默认使用 `/usr/bin/g++-13`。
 
 ### Tests 预设
@@ -198,10 +199,17 @@ cmake --preset linux-release-tests-pni -DR2C_PKG_CONFIG_PATH=/usr/lib/x86_64-lin
 cmake --build --preset build-tests-pni -j
 ```
 
-### 2) Protobuf 版本/头文件不一致
+### 2) 链接时 libpni 符号缺失，或运行时加载了 `build/local_pni`
+configure 优先使用系统 libpni（`/usr/local`、`/usr`），没有系统包才退回 `build/local_pni`。重装 OpenPnI 后重新 `cmake --preset` 即可，不必再手工同步 `local_pni`。强制指定前缀：
+
+```bash
+cmake --preset linux-release-tests-cuda -DR2C_PNI_ROOT=/usr/local
+```
+
+### 3) Protobuf 版本/头文件不一致
 若出现 `.pb.cc` 相关命名空间或类型错误，删掉对应 `build/tests/*` 后重新 `cmake --preset` 再编。
 
-### 3) NVCC 标准支持问题
+### 4) NVCC 标准支持问题
 OpenPnI 相关代码是 C++23 + CUDA 混合链路，`nvcc` 侧应保持 C++20（CMake 已按此配置）。
 
 

@@ -1528,7 +1528,7 @@ bool testFileToBufferLoading()
  *
  * 同一份输入，改变 maxSegmentSingles 与 minSegmentOverlapFactor（即改变水位分段方式），
  * prompt / delay 总数必须完全一致。这是整套 carry + cutoff 分段机制的核心保证：
- * carry 覆盖 [bound - overlap, bound]，使跨段配对不漏；cutoff 抑制 carry 内部互相配对，
+ * carry 覆盖 [bound - overlap, bound]，使跨段配对不漏；较晚端 > cutoff 才发出，
  * 使跨段配对不重。
  */
 namespace
@@ -1602,7 +1602,7 @@ namespace
  * @brief 内核 cutoff 契约微检查
  *
  * 分段不变性完全建立在 getDListmode(..., carryCutoffTime_100fs) 的约定上：
- * 「原始时间 <= cutoff 的事件视为尾部保留，彼此之间不配对」。构造一批全部落在
+ * 一对事件由原始时间较晚的端点拥有，仅当较晚端 > cutoff 时发出。构造一批全部落在
  * cutoff 之下、且互相能配对的事件，正确实现应当返回 0 对。
  */
 bool testKernelCarryCutoffContract()
@@ -1683,22 +1683,19 @@ bool testKernelCarryCutoffContract()
                   << ", delay=" << allCarry.second << ")" << std::endl;
         ok = false;
     }
-    // 混合批里，carry 段内部的配对应被抑制，只剩新数据那 kGroups 对。
-    // 实测预编译内核只在 delay 路径实现了该抑制，prompt 路径忽略 cutoff。这是上游缺陷，
-    // 本仓库无法修；记为告警而非失败，但保留检查——上游修好后这里会自动安静下来。
-    if (mixedWithCutoff.first != baseline.first)
+    if (mixedWithCutoff.first != baseline.first || mixedWithCutoff.second != 0)
     {
-        std::cerr << "WARN: 混合批中 carry 内部的 prompt 配对未被 cutoff 抑制 (got "
-                  << mixedWithCutoff.first << ", expected " << baseline.first
-                  << ")；这是预编译 Coincidence 的已知缺陷，prompt 会按 carry 条数重复计数。"
-                  << std::endl;
+        std::cerr << "FAIL: 混合批中 carry 内部配对未被 cutoff 抑制 (prompt="
+                  << mixedWithCutoff.first << " delay=" << mixedWithCutoff.second
+                  << ", expected prompt=" << baseline.first << " delay=0)" << std::endl;
+        ok = false;
     }
 
     if (!ok)
     {
         return false;
     }
-    std::cout << "PASS: kernel carry-cutoff contract (delay 路径符合约定)" << std::endl;
+    std::cout << "PASS: kernel carry-cutoff contract (prompt/delay 均符合后事件所有权)" << std::endl;
     return true;
 }
 
@@ -1717,10 +1714,8 @@ bool testSegmentationInvariance()
         return true;
     }
 
-    // 金标准必须是「一次内核调用」，而底层 Coincidence 对单批规模有上限（实测本数据
-    // 集在 5e5 与 1e6 之间会踩非法访存，见 docs/STREAMING_COINCIDENCE.md「单批上限」）。
-    // 这里取 1e5/节点（合计 2e5，低于默认 maxSegmentSingles 262144），既留足余量，
-    // 也让测试保持在秒级。
+    // 金标准必须是「一次内核调用」。这里取 1e5/节点（合计 2e5，低于默认
+    // maxSegmentSingles 262144），既留足余量，也让测试保持在秒级。
     constexpr size_t kMaxSinglesPerNode = 100'000;
     constexpr size_t kChunkSingles = 10'000;
     std::array<std::vector<TimestampedSingleChunk>, 2> nodeChunks;
@@ -1822,8 +1817,8 @@ bool testSegmentationInvariance()
         size_t maxSegment;
         uint32_t overlapFactor;
     };
-    // 不测 maxSegmentSingles=0：不设上界会让单批规模随水位自由增长，越过内核的单批
-    // 上限就是非法访存，属于配置错误而非分段逻辑问题。
+    // 不测 maxSegmentSingles=0：不设上界会让单批规模随水位自由增长，属于配置风险
+    // 而非分段逻辑问题。
     const std::vector<Case> cases = {
         {8192, 1}, {16384, 4}, {32768, 16}, {65536, 4}, {131072, 4}, {262144, 16}};
 
@@ -1849,8 +1844,6 @@ bool testSegmentationInvariance()
 
     bool pass = true;
     const uint64_t expectedProcessed = results.front().processed;
-    bool promptMismatch = false;
-    bool promptExplainedByCarry = true;
 
     for (size_t i = 0; i < results.size(); ++i)
     {
@@ -1874,33 +1867,7 @@ bool testSegmentationInvariance()
         }
         if (r.prompt != goldPrompt)
         {
-            promptMismatch = true;
-            // 已知的内核缺陷（见 Test 9a）：混合批里 carry 内部的 prompt 配对不受
-            // cutoff 抑制，于是每段都可能把 carry 重算一遍。超出量不得超过 carry；
-            // 少于 carry（例如水位裕量为 0、更多数据走热路径而不是整段 flush）
-            // 不是分段回归。超出 carry 才说明边界/carry 覆盖出了问题。
-            if (r.prompt < goldPrompt || (r.prompt - goldPrompt) > r.carry)
-            {
-                promptExplainedByCarry = false;
-            }
-        }
-    }
-
-    if (promptMismatch)
-    {
-        if (promptExplainedByCarry)
-        {
-            // delay 与 processed 已对齐金标准。prompt 超出量 ≤ carry，由 Test 9a
-            // 的内核 cutoff 缺陷解释；等于 carry 是 5ms 级 PET 裕量把尾段推进 flush
-            // 时的常见情况，小于 carry 出现在 networkLatencyMargin=0 的热路径切分。
-            std::cerr << "WARN: prompt pairs 超出金标准，且超出量不超过 carry 条数——"
-                      << "已知内核 cutoff 缺陷，分段逻辑无额外偏差。" << std::endl;
-        }
-        else
-        {
-            std::cerr << "FAIL: prompt pairs 偏差无法用 carry 重算解释，"
-                      << "分段/carry 逻辑存在回归。" << std::endl;
-            pass = false;
+            fail("prompt pairs", r.prompt, goldPrompt);
         }
     }
 

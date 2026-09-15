@@ -3353,7 +3353,7 @@ namespace openpni::distributed::streaming
                 }
             }
 
-            // 内核在大约 5e5–1e6 条时会 CUDA 非法访问。GPU 提交不得超过硬预算。
+            // GPU 提交仍不得超过硬预算（显存与 CUB int 排序上限）。
             if (m_useMultiGpu && m_multiGpuEngine && n > hardCap)
             {
                 n = nBudget;

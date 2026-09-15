@@ -379,7 +379,7 @@ namespace
         next.reserve(processed.size() / 8 + 8);
         for (const auto &s : processed)
         {
-            if (s.timevalue_100fs > carryBegin && s.timevalue_100fs <= watermark)
+            if (s.timevalue_100fs >= carryBegin && s.timevalue_100fs <= watermark)
             {
                 next.push_back(s);
             }

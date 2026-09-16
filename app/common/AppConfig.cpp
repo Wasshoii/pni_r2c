@@ -1001,13 +1001,13 @@ namespace openpni::distributed::app
                 {
                     return fail(err, "acquisitionControl.maxFileSizeMb must be non-negative integer");
                 }
-                if (!readUInt(*sec, "dpdkCopyThreadNum", &cfg->acquisitionControl.dpdkCopyThreadNum))
-                {
-                    return fail(err, "acquisitionControl.dpdkCopyThreadNum must be non-negative integer");
-                }
                 if (!readUInt(*sec, "dpdkRxRingsPerPort", &cfg->acquisitionControl.dpdkRxRingsPerPort))
                 {
                     return fail(err, "acquisitionControl.dpdkRxRingsPerPort must be non-negative integer");
+                }
+                if (!readUInt(*sec, "dpdkCopyThreadNum", &cfg->acquisitionControl.dpdkCopyThreadNum))
+                {
+                    return fail(err, "acquisitionControl.dpdkCopyThreadNum must be non-negative integer");
                 }
                 if (!readUInt(*sec, "dpdkMbufDoublePointerSizeMultiply", &cfg->acquisitionControl.dpdkMbufDoublePointerSizeMultiply))
                 {
@@ -1016,6 +1016,22 @@ namespace openpni::distributed::app
                 if (!readUInt(*sec, "dpdkMbufDoublePointerNumMultiply", &cfg->acquisitionControl.dpdkMbufDoublePointerNumMultiply))
                 {
                     return fail(err, "acquisitionControl.dpdkMbufDoublePointerNumMultiply must be non-negative integer");
+                }
+                if (!readUInt(*sec, "dpdkMbufPoolSize", &cfg->acquisitionControl.dpdkMbufPoolSize))
+                {
+                    return fail(err, "acquisitionControl.dpdkMbufPoolSize must be non-negative integer");
+                }
+                if (!readUInt(*sec, "dpdkMbufCacheSize", &cfg->acquisitionControl.dpdkMbufCacheSize))
+                {
+                    return fail(err, "acquisitionControl.dpdkMbufCacheSize must be non-negative integer");
+                }
+                if (!readString(*sec, "dpdkLocalLoopbackIface", &cfg->acquisitionControl.dpdkLocalLoopbackIface))
+                {
+                    return fail(err, "acquisitionControl.dpdkLocalLoopbackIface must be string");
+                }
+                if (!readStringArray(*sec, "dpdkExtraEalArgs", &cfg->acquisitionControl.dpdkExtraEalArgs))
+                {
+                    return fail(err, "acquisitionControl.dpdkExtraEalArgs must be a string array");
                 }
                 if (!readStringArray(*sec, "dpdkBindIps", &cfg->acquisitionControl.dpdkBindIps))
                 {
@@ -1062,13 +1078,13 @@ namespace openpni::distributed::app
                             return fail(err, "acquisitionControl.nodeOverrides[].acquisitionAlgorithm must be one of [inherit, socket, dpdk]");
                         }
 
-                        if (!readUInt(itemObj, "dpdkCopyThreadNum", &overrideCfg.dpdkCopyThreadNum))
-                        {
-                            return fail(err, "acquisitionControl.nodeOverrides[].dpdkCopyThreadNum must be non-negative integer");
-                        }
                         if (!readUInt(itemObj, "dpdkRxRingsPerPort", &overrideCfg.dpdkRxRingsPerPort))
                         {
                             return fail(err, "acquisitionControl.nodeOverrides[].dpdkRxRingsPerPort must be non-negative integer");
+                        }
+                        if (!readUInt(itemObj, "dpdkCopyThreadNum", &overrideCfg.dpdkCopyThreadNum))
+                        {
+                            return fail(err, "acquisitionControl.nodeOverrides[].dpdkCopyThreadNum must be non-negative integer");
                         }
                         if (!readUInt(itemObj, "dpdkMbufDoublePointerSizeMultiply", &overrideCfg.dpdkMbufDoublePointerSizeMultiply))
                         {
@@ -1077,6 +1093,22 @@ namespace openpni::distributed::app
                         if (!readUInt(itemObj, "dpdkMbufDoublePointerNumMultiply", &overrideCfg.dpdkMbufDoublePointerNumMultiply))
                         {
                             return fail(err, "acquisitionControl.nodeOverrides[].dpdkMbufDoublePointerNumMultiply must be non-negative integer");
+                        }
+                        if (!readUInt(itemObj, "dpdkMbufPoolSize", &overrideCfg.dpdkMbufPoolSize))
+                        {
+                            return fail(err, "acquisitionControl.nodeOverrides[].dpdkMbufPoolSize must be non-negative integer");
+                        }
+                        if (!readUInt(itemObj, "dpdkMbufCacheSize", &overrideCfg.dpdkMbufCacheSize))
+                        {
+                            return fail(err, "acquisitionControl.nodeOverrides[].dpdkMbufCacheSize must be non-negative integer");
+                        }
+                        if (!readString(itemObj, "dpdkLocalLoopbackIface", &overrideCfg.dpdkLocalLoopbackIface))
+                        {
+                            return fail(err, "acquisitionControl.nodeOverrides[].dpdkLocalLoopbackIface must be string");
+                        }
+                        if (!readStringArray(itemObj, "dpdkExtraEalArgs", &overrideCfg.dpdkExtraEalArgs))
+                        {
+                            return fail(err, "acquisitionControl.nodeOverrides[].dpdkExtraEalArgs must be a string array");
                         }
                         if (!readStringArray(itemObj, "dpdkBindIps", &overrideCfg.dpdkBindIps))
                         {

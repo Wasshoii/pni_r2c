@@ -591,7 +591,7 @@ namespace openpni::distributed::grpcnode
         {
             std::ostringstream oss;
 
-            const std::string algo = (task.algorithm_type() == acqproto::ALGORITHM_TYPE_DPDK) ? "DPDK" : "SOCKET";
+            const std::string algo = (task.algorithm_type() == acqproto::ALGORITHM_TYPE_DPDK) ? "DPDKNew" : "SOCKET";
             oss << "[AcquisitionNode/Config] node=" << init_.nodeId
                 << " algorithm=" << algo
                 << " storage_unit_size=" << task.storage_unit_size()
@@ -607,10 +607,11 @@ namespace openpni::distributed::grpcnode
             {
                 const auto &dpdk = task.dpdk_options();
                 oss << "[AcquisitionNode/Config] node=" << init_.nodeId
-                    << " dpdk(copy_threads=" << dpdk.copy_thread_num()
-                    << ",rx_rings_per_port=" << dpdk.rx_rings_per_port()
-                    << ",ppsize_mul=" << dpdk.rte_mbuf_double_pointer_size_multiply()
-                    << ",ppnum_mul=" << dpdk.rte_mbuf_double_pointer_num_multiply()
+                    << " dpdk(rx_rings_per_port=" << dpdk.rx_rings_per_port()
+                    << ",mbuf_pool_size=" << dpdk.mbuf_pool_size()
+                    << ",mbuf_cache_size=" << dpdk.mbuf_cache_size()
+                    << ",loopback='" << dpdk.local_loopback_iface() << "'"
+                    << ",extra_eal_args=" << dpdk.extra_eal_args_size()
                     << ",bind_ips=" << dpdk.bind_ips_size() << ")"
                     << "\n";
             }
@@ -889,7 +890,7 @@ namespace openpni::distributed::grpcnode
 
             case acqproto::NodeAcquisitionConfig::RuntimeType::Dpdk:
 #if PNI_STANDARD_CONFIG_ENABLE_DPDK
-                return std::make_unique<NodeRuntimeImpl<openpni::DPDKAcquisition>>(std::move(acqInfo), std::move(storageConfig));
+                return std::make_unique<NodeRuntimeImpl<openpni::DPDKAcquisitionNew>>(std::move(acqInfo), std::move(storageConfig));
 #else
                 throw std::runtime_error("DPDK runtime requested but this build does not enable DPDK");
 #endif
@@ -918,20 +919,30 @@ namespace openpni::distributed::grpcnode
 
             try
             {
-                openpni::dpdk::DPDKInitParam dpdkInfo;
-                dpdkInfo.copyThreadNum = static_cast<int>(config.dpdk.copy_thread_num);
+                openpni::DPDKNewInitParam dpdkInfo;
                 dpdkInfo.etherIpBind = config.dpdk.bind_ips;
-                dpdkInfo.rxThreadNumForEachPort = static_cast<int>(config.dpdk.rx_rings_per_port);
-                dpdkInfo.rte_mbuf_double_pointer_size_multiply =
-                    static_cast<uint16_t>(config.dpdk.rte_mbuf_double_pointer_size_multiply);
-                dpdkInfo.rte_mbuf_double_pointer_num_pultiply =
-                    static_cast<uint16_t>(config.dpdk.rte_mbuf_double_pointer_num_multiply);
+                dpdkInfo.rxThreadNumForEachPort = static_cast<uint8_t>(config.dpdk.rx_rings_per_port);
+                if (config.dpdk.mbuf_pool_size > 0)
+                {
+                    dpdkInfo.mbufPoolSize = config.dpdk.mbuf_pool_size;
+                }
+                if (config.dpdk.mbuf_cache_size > 0)
+                {
+                    dpdkInfo.mbufCacheSize = static_cast<uint16_t>(
+                        std::min<uint32_t>(config.dpdk.mbuf_cache_size, 65535));
+                }
+                if (!config.dpdk.local_loopback_iface.empty())
+                {
+                    dpdkInfo.localLoopbackMode = true;
+                    dpdkInfo.localLoopbackIface = config.dpdk.local_loopback_iface;
+                }
+                dpdkInfo.extraEalArgs = config.dpdk.extra_eal_args;
 
-                openpni::dpdk::InitDPDK(
+                openpni::InitDPDKNew(
                     dpdkInfo,
                     [](const std::string &message)
                     {
-                        LOG(INFO) << "[AcquisitionNode/DPDK] " << message;
+                        LOG(INFO) << "[AcquisitionNode/DPDKNew] " << message;
                     });
                 dpdkInitialized_ = true;
                 return true;

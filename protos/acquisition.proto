@@ -18,13 +18,17 @@ enum AcquisitionAlgorithmType {
     ALGORITHM_TYPE_DPDK = 2;
 }
 
-// DPDK 参数
+// DPDK 参数（ALGORITHM_TYPE_DPDK 走 DPDKAcquisitionNew）
 message DpdkOptions {
-    uint32 copy_thread_num = 1;
+    uint32 copy_thread_num = 1; // 旧 DPDK 字段，节点忽略
     uint32 rx_rings_per_port = 2;
     repeated string bind_ips = 3;
-    uint32 rte_mbuf_double_pointer_size_multiply = 4;
-    uint32 rte_mbuf_double_pointer_num_multiply = 5;
+    uint32 rte_mbuf_double_pointer_size_multiply = 4; // 旧 DPDK 字段，节点忽略
+    uint32 rte_mbuf_double_pointer_num_multiply = 5; // 旧 DPDK 字段，节点忽略
+    uint32 mbuf_pool_size = 6;
+    uint32 mbuf_cache_size = 7;
+    string local_loopback_iface = 8; // 非空则启用 local loopback
+    repeated string extra_eal_args = 9;
 }
 
 // 探测器源信息（由控制节点用于自动生成通道映射）

@@ -240,10 +240,14 @@ namespace openpni::distributed::app
 
             std::string nodeId;
             AlgorithmOverride acquisitionAlgorithm = AlgorithmOverride::Inherit;
-            uint32_t dpdkCopyThreadNum = 0;
+            uint32_t dpdkCopyThreadNum = 0; // ignored legacy
             uint32_t dpdkRxRingsPerPort = 0;
-            uint32_t dpdkMbufDoublePointerSizeMultiply = 0;
-            uint32_t dpdkMbufDoublePointerNumMultiply = 0;
+            uint32_t dpdkMbufDoublePointerSizeMultiply = 0; // ignored legacy
+            uint32_t dpdkMbufDoublePointerNumMultiply = 0; // ignored legacy
+            uint32_t dpdkMbufPoolSize = 0;
+            uint32_t dpdkMbufCacheSize = 0;
+            std::string dpdkLocalLoopbackIface;
+            std::vector<std::string> dpdkExtraEalArgs;
             std::vector<std::string> dpdkBindIps;
         };
 
@@ -275,10 +279,14 @@ namespace openpni::distributed::app
         uint32_t timeSwitchBufferMs = 200;
         uint32_t reservedStorageGiB = 20;
         uint32_t maxFileSizeMb = 256;
-        uint32_t dpdkCopyThreadNum = 8;
+        uint32_t dpdkCopyThreadNum = 8; // ignored legacy
         uint32_t dpdkRxRingsPerPort = 1;
-        uint32_t dpdkMbufDoublePointerSizeMultiply = 32;
-        uint32_t dpdkMbufDoublePointerNumMultiply = 2;
+        uint32_t dpdkMbufDoublePointerSizeMultiply = 32; // ignored legacy
+        uint32_t dpdkMbufDoublePointerNumMultiply = 2; // ignored legacy
+        uint32_t dpdkMbufPoolSize = 0;
+        uint32_t dpdkMbufCacheSize = 0;
+        std::string dpdkLocalLoopbackIface;
+        std::vector<std::string> dpdkExtraEalArgs;
         std::vector<std::string> dpdkBindIps;
         std::vector<NodeOverride> nodeOverrides;
     };

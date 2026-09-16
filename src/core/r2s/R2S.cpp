@@ -598,6 +598,51 @@ namespace openpni::distributed::r2s
 
             return EffectiveViewStatus::Ok;
         }
+
+        template <typename T>
+        bool copyToCudaHost(
+            openpni::tools::HostUniquePtr<T> &dst,
+            const T *src,
+            size_t n)
+        {
+            if (src == nullptr || n == 0)
+            {
+                return false;
+            }
+            dst.SetAllocator(std::make_unique<openpni::detail::VAllocatorCUDAHost>());
+            dst.ResetPointer(n);
+            std::memcpy(dst.Get(), src, n * sizeof(T));
+            return true;
+        }
+
+        bool pinFilteredMetadata(
+            const openpni::RawDataView &sourceView,
+            openpni::RawDataView &effectiveView,
+            openpni::tools::HostUniquePtr<uint64_t> &filteredOffset,
+            openpni::tools::HostUniquePtr<uint16_t> &filteredLength,
+            openpni::tools::HostUniquePtr<uint16_t> &filteredChannel)
+        {
+            const bool metadataRebuilt =
+                effectiveView.offset != sourceView.offset ||
+                effectiveView.length != sourceView.length ||
+                effectiveView.channel != sourceView.channel;
+            if (!metadataRebuilt)
+            {
+                return true;
+            }
+
+            const auto count = static_cast<size_t>(effectiveView.count);
+            if (!copyToCudaHost(filteredOffset, effectiveView.offset, count) ||
+                !copyToCudaHost(filteredLength, effectiveView.length, count) ||
+                !copyToCudaHost(filteredChannel, effectiveView.channel, count))
+            {
+                return false;
+            }
+            effectiveView.offset = filteredOffset.Get();
+            effectiveView.length = filteredLength.Get();
+            effectiveView.channel = filteredChannel.Get();
+            return true;
+        }
     }
 
     R2SStreamProcessor::R2SStreamProcessor(const R2SProcessConfig &config)
@@ -770,27 +815,15 @@ namespace openpni::distributed::r2s
         std::vector<uint16_t> remappedChannel;
         openpni::RawDataView effectiveView{};
 
-        auto *storeOffset = &filteredOffset;
-        auto *storeLength = &filteredLength;
-        auto *storeChannel = &filteredChannel;
-        auto *storeRemap = &remappedChannel;
-        if (m_useMultiGpu50100)
-        {
-            storeOffset = &pending.filteredOffset;
-            storeLength = &pending.filteredLength;
-            storeChannel = &pending.filteredChannel;
-            storeRemap = &pending.remappedChannel;
-        }
-
         const EffectiveViewStatus prepStatus = fillEffectiveView(
             view,
             m_filterUnassignedChannels,
             m_assignedChannelSet,
             m_globalToLocalChannel,
-            *storeOffset,
-            *storeLength,
-            *storeChannel,
-            *storeRemap,
+            filteredOffset,
+            filteredLength,
+            filteredChannel,
+            remappedChannel,
             effectiveView);
         if (prepStatus == EffectiveViewStatus::SkipEmpty)
         {
@@ -822,6 +855,18 @@ namespace openpni::distributed::r2s
                 pending.clockMs = clockMs;
                 pending.durationMs = durationMs;
                 pending.inputKeepAlive = std::move(inputKeepAlive);
+
+                if (!pinFilteredMetadata(
+                        view,
+                        effectiveView,
+                        pending.filteredOffset,
+                        pending.filteredLength,
+                        pending.filteredChannel))
+                {
+                    LOG(ERROR) << "Failed to pin filtered raw metadata for segment " << segmentId;
+                    m_hadError = true;
+                    return false;
+                }
 
                 const uint32_t depth = std::max<uint32_t>(1u, m_config.computePipelineDepth);
                 const bool registered = multi_gpu::tryRegisterRawViewForH2D(effectiveView);
@@ -882,7 +927,7 @@ namespace openpni::distributed::r2s
                 {
                     LOG(INFO) << "Segment " << segmentId
                               << ": submitted " << effectiveView.count << " packets"
-                              << (needBounce ? " (pinned bounce)" : " (cudaHostRegister/direct)")
+                              << (needBounce ? " (pinned bounce)" : " (direct pinned H2D)")
                               << ", pipeline pending=" << m_pendingMultiGpu.size();
                 }
                 return true;

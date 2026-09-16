@@ -6,13 +6,22 @@
 
 `openpni::Single` 的字段与单位以 libpni [CommonDataType](../../../pni-standard-project/docs/接口说明/core/CommonDataType.md) 为准。本仓库只强调其 **16 字节 pack(1)** 布局，作为 R2S 输出与 RDMA 槽 payload 的契约。
 
-## 本批：R2S → RDMA
+## 本批：采集 → R2S → RDMA
 
-先读 [通路/R2S到RDMA.md](通路/R2S到RDMA.md)，再按依赖下钻。
+先读 [通路/采集到R2S.md](通路/采集到R2S.md) 与 [通路/R2S到RDMA.md](通路/R2S到RDMA.md)，再按依赖下钻。
 
 ### 通路
 
+- [通路/采集到R2S.md](通路/采集到R2S.md)
 - [通路/R2S到RDMA.md](通路/R2S到RDMA.md)
+
+### core/acquisition
+
+- [core/acquisition/AcquisitionServer.md](core/acquisition/AcquisitionServer.md)
+
+### grpcNode
+
+- [grpcNode/acquisitionNode.md](grpcNode/acquisitionNode.md)
 
 ### core/r2s
 
@@ -43,7 +52,5 @@
 
 ## 后续（本批不写）
 
-- `include/core/acquisition/**`：采集与 DPDK
 - `include/core/streaming/StreamingCoincidence.hpp` 及符合 GPU
-- `include/grpcNode/**`：进程封装
 - timesync

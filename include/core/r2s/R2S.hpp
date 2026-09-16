@@ -1,5 +1,6 @@
 #pragma once
 
+#include <pni/tools/HostUniquePtr.hpp>
 #include <pni/PnI-Config.hpp>
 
 #include <cstdint>
@@ -529,10 +530,10 @@ namespace openpni::distributed::r2s
             uint32_t durationMs = 0;
             std::unique_ptr<openpni::RawDataView> submittedView;
             std::unique_ptr<multi_gpu::PinnedRawSlot> bounce;
-            std::vector<uint64_t> filteredOffset;
-            std::vector<uint16_t> filteredLength;
-            std::vector<uint16_t> filteredChannel;
-            std::vector<uint16_t> remappedChannel;
+            openpni::tools::HostUniquePtr<uint64_t> filteredOffset;
+            openpni::tools::HostUniquePtr<uint16_t> filteredLength;
+            openpni::tools::HostUniquePtr<uint16_t> filteredChannel;
+            openpni::tools::HostUniquePtr<uint16_t> remappedChannel;
             std::shared_ptr<void> inputKeepAlive;
         };
         std::queue<PendingMultiGpuSubmit> m_pendingMultiGpu;

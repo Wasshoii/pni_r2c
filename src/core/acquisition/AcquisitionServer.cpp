@@ -29,13 +29,12 @@ namespace openpni::distributed::acquisition
         if (task.has_dpdk_options())
         {
             const auto &dpdk = task.dpdk_options();
-            config.dpdk.copy_thread_num = dpdk.copy_thread_num() > 0 ? dpdk.copy_thread_num() : 8;
             config.dpdk.rx_rings_per_port = dpdk.rx_rings_per_port() > 0 ? dpdk.rx_rings_per_port() : 1;
-            config.dpdk.rte_mbuf_double_pointer_size_multiply =
-                dpdk.rte_mbuf_double_pointer_size_multiply() > 0 ? dpdk.rte_mbuf_double_pointer_size_multiply() : 32;
-            config.dpdk.rte_mbuf_double_pointer_num_multiply =
-                dpdk.rte_mbuf_double_pointer_num_multiply() > 0 ? dpdk.rte_mbuf_double_pointer_num_multiply() : 2;
+            config.dpdk.mbuf_pool_size = dpdk.mbuf_pool_size();
+            config.dpdk.mbuf_cache_size = dpdk.mbuf_cache_size();
+            config.dpdk.local_loopback_iface = dpdk.local_loopback_iface();
             config.dpdk.bind_ips.assign(dpdk.bind_ips().begin(), dpdk.bind_ips().end());
+            config.dpdk.extra_eal_args.assign(dpdk.extra_eal_args().begin(), dpdk.extra_eal_args().end());
         }
 
         if (config.max_packet_size < config.min_packet_size)
@@ -79,6 +78,7 @@ namespace openpni::distributed::acquisition
         info.maxBufferSize = config.max_buffer_size;
         info.timeSwitchBuffer_ms = std::max<uint32_t>(config.time_switch_buffer_ms, 10);
         info.totalChannelNum = config.channels.size();
+        info.hostMemoryType = openpni::tools::HostMemoryType::CUDAHost;
 
         for (const auto &chan : config.channels)
         {

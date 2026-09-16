@@ -47,12 +47,38 @@ inline uint64_t rawViewDataBytes(const openpni::RawDataView &view)
     return span;
 }
 
+inline bool isCudaPinnedHost(const void *ptr)
+{
+    if (ptr == nullptr)
+    {
+        return false;
+    }
+
+    cudaPointerAttributes attr{};
+    const cudaError_t err = cudaPointerGetAttributes(&attr, const_cast<void *>(ptr));
+    if (err != cudaSuccess)
+    {
+        static_cast<void>(cudaGetLastError());
+        return false;
+    }
+
+#if defined(CUDART_VERSION) && (CUDART_VERSION >= 11000)
+    return attr.type == cudaMemoryTypeHost || attr.type == cudaMemoryTypeManaged;
+#else
+    return attr.memoryType == cudaMemoryTypeHost;
+#endif
+}
+
 inline bool tryRegisterRawViewForH2D(const openpni::RawDataView &view)
 {
     const uint64_t bytes = rawViewDataBytes(view);
     if (bytes == 0 || view.data == nullptr)
     {
         return false;
+    }
+    if (isCudaPinnedHost(view.data))
+    {
+        return true;
     }
     return tryCudaHostRegister(view.data, static_cast<size_t>(bytes));
 }

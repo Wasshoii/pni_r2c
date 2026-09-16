@@ -18,7 +18,9 @@
 #include <stdexcept>
 
 #include <pni/node/acquisition/Socket.hpp>
-#include <pni/node/acquisition/DPDK.hpp>
+#if PNI_STANDARD_CONFIG_ENABLE_DPDK
+#include <pni/node/acquisition/DPDKNew.hpp>
+#endif
 #include "core/io/IOAdapter.hpp"
 #include "core/io/RawFileOutputFactory.hpp"
 #include "protos/acquisition.pb.h"
@@ -66,11 +68,12 @@ namespace openpni::distributed::acquisition
 
         struct DpdkConfig
         {
-            uint32_t copy_thread_num = 8;
             uint32_t rx_rings_per_port = 1;
             std::vector<std::string> bind_ips;
-            uint32_t rte_mbuf_double_pointer_size_multiply = 32;
-            uint32_t rte_mbuf_double_pointer_num_multiply = 2;
+            uint32_t mbuf_pool_size = 0;
+            uint32_t mbuf_cache_size = 0;
+            std::string local_loopback_iface;
+            std::vector<std::string> extra_eal_args;
         };
 
         RuntimeType runtime_type = RuntimeType::Socket;
@@ -135,7 +138,7 @@ namespace openpni::distributed::acquisition
     };
 
     // 分布式采集节点工作类
-    // 模板参数 AlgoType 可以是 SocketAcquisition 或 DPDKAcquisition
+    // 模板参数 AlgoType 可以是 SocketAcquisition 或 DPDKAcquisitionNew
     template <typename AlgoType = openpni::SocketAcquisition>
     class DistributedAcquisitionNode
     {

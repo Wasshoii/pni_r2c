@@ -69,15 +69,19 @@ test -e /dev/vfio/vfio && echo "/dev/vfio/vfio exists" || echo "missing"
 
 1. `app_coin_master` 下发 `AcquisitionTask`。
 2. `app_acq_r2s_node` 接收任务并创建采集 runtime。
-3. 当 `algorithm_type=ALGORITHM_TYPE_DPDK` 且构建启用 DPDK 时，节点进入 `openpni::DPDKAcquisition`。
+3. 当 `algorithm_type=ALGORITHM_TYPE_DPDK` 且构建启用 DPDK 时，节点进入 `openpni::DPDKAcquisitionNew`（`InitDPDKNew`）。未开 DPDK 时仍走 Socket。旧 `DPDKAcquisition` 不再使用。
 
-同时，DPDK 初始化参数来自任务中的 `dpdk_options`，尤其是：
+同时，DPDK 初始化参数来自任务中的 `dpdk_options`：
 
-1. `copy_thread_num`
-2. `rx_rings_per_port`
-3. `rte_mbuf_double_pointer_size_multiply`
-4. `rte_mbuf_double_pointer_num_multiply`
-5. `bind_ips`
+1. `bind_ips`（必填，数量须等于 DPDK 口数）
+2. `rx_rings_per_port`（每口 RX/Copy worker 对数）
+3. `mbuf_pool_size` / `mbuf_cache_size`（0 表示用 libpni 默认）
+4. `local_loopback_iface`（非空则 loopback vdev）
+5. `extra_eal_args`（绑核、hugepage、`--file-prefix`）
+
+以下旧字段仍可出现在 JSON/proto 中，**节点会忽略**：`copy_thread_num`、`rte_mbuf_double_pointer_size_multiply`、`rte_mbuf_double_pointer_num_multiply`。
+
+采集池由 `MakeAcquisitionInfo` 设为 `CUDAHost`，R2S 应走 pinned 直拷。通路见 [采集到R2S](../接口说明/通路/采集到R2S.md)。
 
 ## 4. 配置步骤（项目视角）
 
@@ -101,15 +105,16 @@ sudo dpdk-devbind.py --status
 在 `coin_master` 配置文件（如 `app/config/experiments/no_data_auto/coin_master_dpdk_nodata.auto.json`）中，至少配置：
 
 1. `acquisitionControl.acquisitionAlgorithm`（`socket` 或 `dpdk`）
-2. `acquisitionControl.dpdkCopyThreadNum`
-3. `acquisitionControl.dpdkRxRingsPerPort`
-4. `acquisitionControl.dpdkMbufDoublePointerSizeMultiply`
-5. `acquisitionControl.dpdkMbufDoublePointerNumMultiply`
-6. `acquisitionControl.dpdkBindIps`（`acquisitionAlgorithm=dpdk` 时必填）
-7. `acquisitionControl.detectorSources[]`、`destinationIp`、端口规划
-8. （推荐）`acquisitionControl.nodeOverrides[]` 做节点级覆盖
+2. `acquisitionControl.dpdkRxRingsPerPort`
+3. `acquisitionControl.dpdkBindIps`（`acquisitionAlgorithm=dpdk` 时必填）
+4. 可选：`dpdkMbufPoolSize`、`dpdkMbufCacheSize`、`dpdkLocalLoopbackIface`、`dpdkExtraEalArgs`
+5. `acquisitionControl.detectorSources[]`、`destinationIp`、端口规划
+6. （推荐）`acquisitionControl.nodeOverrides[]` 做节点级覆盖
+7. 建议 `timeSwitchBufferMs` 取 20–100；默认 1000 对实时过粗
 
-并确保发包端（`app_udp_raw_replayer`）端口与采集控制下发端口匹配。
+并确保发包端（`dpdk_tx_replayer` 或 `app_udp_raw_replayer`）端口与采集控制下发端口匹配。
+
+`dpdkCopyThreadNum` 与 mbuf 双指针乘数仍可写在旧配置里，运行时忽略。
 
 ## 4.3 配置示例（关键字段）
 
@@ -118,10 +123,9 @@ sudo dpdk-devbind.py --status
    "acquisitionControl": {
       "enabled": true,
       "acquisitionAlgorithm": "dpdk",
-      "dpdkCopyThreadNum": 8,
+      "timeSwitchBufferMs": 50,
       "dpdkRxRingsPerPort": 1,
-      "dpdkMbufDoublePointerSizeMultiply": 32,
-      "dpdkMbufDoublePointerNumMultiply": 2,
+      "dpdkExtraEalArgs": ["-l", "0-7"],
       "dpdkBindIps": ["10.10.1.10", "10.10.1.11"]
    }
 }
@@ -140,11 +144,10 @@ sudo dpdk-devbind.py --status
 
 1. `nodeId`：目标节点 ID（必须与采集节点注册 ID 一致）
 2. `acquisitionAlgorithm`：`inherit`、`socket`、`dpdk`
-3. `dpdkCopyThreadNum`：大于 0 时覆盖
-4. `dpdkRxRingsPerPort`：大于 0 时覆盖
-5. `dpdkMbufDoublePointerSizeMultiply`：大于 0 时覆盖
-6. `dpdkMbufDoublePointerNumMultiply`：大于 0 时覆盖
-7. `dpdkBindIps`：非空时覆盖
+3. `dpdkRxRingsPerPort`：大于 0 时覆盖
+4. `dpdkMbufPoolSize` / `dpdkMbufCacheSize`：大于 0 时覆盖
+5. `dpdkLocalLoopbackIface` / `dpdkExtraEalArgs`：非空时覆盖
+6. `dpdkBindIps`：非空时覆盖
 
 示例：
 
@@ -157,7 +160,6 @@ sudo dpdk-devbind.py --status
          {
             "nodeId": "acq-r2s-node-0",
             "acquisitionAlgorithm": "dpdk",
-            "dpdkCopyThreadNum": 12,
             "dpdkRxRingsPerPort": 2,
             "dpdkBindIps": ["10.10.1.10"]
          },
@@ -430,7 +432,7 @@ build/apps/basic/app_dpdk_tx_replayer \
 当前参数模型可运行，但在真实分布式场景建议进一步细化：
 
 1. 建议将 DPDK 参数按节点分组，而不是全局一套。
-   - 例如 B1/B2 网卡型号、NUMA、核数不同，`dpdkCopyThreadNum` 与 `dpdkRxRingsPerPort` 可能需要不同值。
+   - 例如 B1/B2 网卡型号、NUMA、核数不同，`dpdkRxRingsPerPort` 与 `dpdkExtraEalArgs` 可能需要不同值。
 2. `dpdkBindIps` 建议与节点配置模板联动，避免在主控配置中硬编码跨机器 IP。
 3. 已支持节点级 CPU/NUMA 约束配置（在 `app_acq_r2s_node` 的 `runtime` 段），用于高吞吐稳定性优化。
 4. 已支持节点侧 `bind_ips` 本机网卡归属检查，降低配置漂移风险。
@@ -467,3 +469,12 @@ build/apps/basic/app_dpdk_tx_replayer \
 1. Phase-1（低风险）：保留当前全局配置，新增节点级覆盖配置（可选）。
 2. Phase-2（中风险）：按节点 JSON 覆盖自动渲染 `dpdkBindIps` 与 DPDK 参数。
 3. Phase-3（高性能）：引入 NUMA/CPU 亲和参数并在节点侧执行约束检查。
+
+## 8. 后续双机测试（本轮不实现代码）
+
+详细断言见 [采集到R2S](../接口说明/通路/采集到R2S.md)。摘要：
+
+1. A 机 `dpdk_tx_replayer` 按探测器 IP/端口发包。
+2. B 机 `app_acq_r2s_node`，`ALGORITHM_TYPE_DPDK`，`CUDAHost` 池。
+3. 期望日志 `direct pinned H2D`，`unknown` 接近 0，缓冲不顶满。
+4. 扫 `timeSwitchBufferMs`（20–100ms）与 `extra_eal_args` 绑核。

@@ -43,7 +43,7 @@ r2sConfig.onSinglesSpanReady = [&coinClient](std::span<const r2s::Single> single
 
 ## 拷贝次数
 
-BDM50100 + RoCE、不写盘：raw 2 次（host memcpy + H2D）；singles **一次 D2H 直写 TX MR**（消费线程按 GPU 常驻 copy stream，已 `cudaHostRegister`），不经整段 pinned host。单槽 ingest 再 unpack 一次。跨槽 ingest 一次组装后 move。发送缓冲与填槽见 [dataplane/rdma/README.md](../dataplane/rdma/README.md#发送端缓冲)。GPUDirect（未实现）见 [GPUDirectRDMA.md](../dataplane/rdma/GPUDirectRDMA.md)。
+BDM50100 + RoCE、不写盘：raw 一次 CPU memcpy（mbuf→CUDAHost 槽）+ DMA H2D；singles **一次 D2H 直写 TX MR**（消费线程按 GPU 常驻 copy stream，已 `cudaHostRegister`），不经整段 pinned host。单槽 ingest 再 unpack 一次。跨槽 ingest 一次组装后 move。发送缓冲与填槽见 [dataplane/rdma/README.md](../dataplane/rdma/README.md#发送端缓冲)。GPUDirect（未实现）见 [GPUDirectRDMA.md](../dataplane/rdma/GPUDirectRDMA.md)。采集侧细节见 [采集到R2S](采集到R2S.md)。
 
 ## 阅读顺序
 

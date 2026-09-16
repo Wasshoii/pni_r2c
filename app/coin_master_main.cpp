@@ -138,15 +138,20 @@ namespace
         dest->set_port_destination_stride(1);
 
         auto *dpdk = task->mutable_dpdk_options();
-        dpdk->set_copy_thread_num(c.dpdkCopyThreadNum);
         dpdk->set_rx_rings_per_port(c.dpdkRxRingsPerPort);
-        dpdk->set_rte_mbuf_double_pointer_size_multiply(c.dpdkMbufDoublePointerSizeMultiply);
-        dpdk->set_rte_mbuf_double_pointer_num_multiply(c.dpdkMbufDoublePointerNumMultiply);
+        dpdk->set_mbuf_pool_size(c.dpdkMbufPoolSize);
+        dpdk->set_mbuf_cache_size(c.dpdkMbufCacheSize);
+        dpdk->set_local_loopback_iface(c.dpdkLocalLoopbackIface);
 
         dpdk->clear_bind_ips();
         for (const auto &ip : c.dpdkBindIps)
         {
             dpdk->add_bind_ips(ip);
+        }
+        dpdk->clear_extra_eal_args();
+        for (const auto &arg : c.dpdkExtraEalArgs)
+        {
+            dpdk->add_extra_eal_args(arg);
         }
 
         return true;
@@ -178,30 +183,39 @@ namespace
         }
 
         const bool hasDpdkNumericOverride =
-            overrideCfg->dpdkCopyThreadNum > 0 ||
             overrideCfg->dpdkRxRingsPerPort > 0 ||
-            overrideCfg->dpdkMbufDoublePointerSizeMultiply > 0 ||
-            overrideCfg->dpdkMbufDoublePointerNumMultiply > 0;
+            overrideCfg->dpdkMbufPoolSize > 0 ||
+            overrideCfg->dpdkMbufCacheSize > 0;
         const bool hasDpdkIpOverride = !overrideCfg->dpdkBindIps.empty();
+        const bool hasDpdkArgOverride =
+            !overrideCfg->dpdkLocalLoopbackIface.empty() || !overrideCfg->dpdkExtraEalArgs.empty();
 
-        if (hasDpdkNumericOverride || hasDpdkIpOverride)
+        if (hasDpdkNumericOverride || hasDpdkIpOverride || hasDpdkArgOverride)
         {
             auto *dpdk = task->mutable_dpdk_options();
-            if (overrideCfg->dpdkCopyThreadNum > 0)
-            {
-                dpdk->set_copy_thread_num(overrideCfg->dpdkCopyThreadNum);
-            }
             if (overrideCfg->dpdkRxRingsPerPort > 0)
             {
                 dpdk->set_rx_rings_per_port(overrideCfg->dpdkRxRingsPerPort);
             }
-            if (overrideCfg->dpdkMbufDoublePointerSizeMultiply > 0)
+            if (overrideCfg->dpdkMbufPoolSize > 0)
             {
-                dpdk->set_rte_mbuf_double_pointer_size_multiply(overrideCfg->dpdkMbufDoublePointerSizeMultiply);
+                dpdk->set_mbuf_pool_size(overrideCfg->dpdkMbufPoolSize);
             }
-            if (overrideCfg->dpdkMbufDoublePointerNumMultiply > 0)
+            if (overrideCfg->dpdkMbufCacheSize > 0)
             {
-                dpdk->set_rte_mbuf_double_pointer_num_multiply(overrideCfg->dpdkMbufDoublePointerNumMultiply);
+                dpdk->set_mbuf_cache_size(overrideCfg->dpdkMbufCacheSize);
+            }
+            if (!overrideCfg->dpdkLocalLoopbackIface.empty())
+            {
+                dpdk->set_local_loopback_iface(overrideCfg->dpdkLocalLoopbackIface);
+            }
+            if (!overrideCfg->dpdkExtraEalArgs.empty())
+            {
+                dpdk->clear_extra_eal_args();
+                for (const auto &arg : overrideCfg->dpdkExtraEalArgs)
+                {
+                    dpdk->add_extra_eal_args(arg);
+                }
             }
             if (hasDpdkIpOverride)
             {

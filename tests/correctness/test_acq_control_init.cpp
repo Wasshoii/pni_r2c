@@ -89,10 +89,9 @@ namespace
 
         // Fill DPDK options for protocol completeness; ignored for SOCKET runtime.
         auto *dpdk = task.mutable_dpdk_options();
-        dpdk->set_copy_thread_num(12);
         dpdk->set_rx_rings_per_port(2);
-        dpdk->set_rte_mbuf_double_pointer_size_multiply(48);
-        dpdk->set_rte_mbuf_double_pointer_num_multiply(3);
+        dpdk->set_mbuf_pool_size(65535);
+        dpdk->set_mbuf_cache_size(250);
         dpdk->add_bind_ips("192.168.100.10");
         dpdk->add_bind_ips("192.168.100.11");
     }
@@ -133,11 +132,10 @@ namespace
         if (task.has_dpdk_options())
         {
             const auto &dpdk = task.dpdk_options();
-            std::cout << "[InitTest/Config] dpdk(copy_threads=" << dpdk.copy_thread_num()
-                      << ",rx_rings_per_port=" << dpdk.rx_rings_per_port()
+            std::cout << "[InitTest/Config] dpdk(rx_rings_per_port=" << dpdk.rx_rings_per_port()
                       << ",bind_ips=" << dpdk.bind_ips_size()
-                      << ",ppsize_mul=" << dpdk.rte_mbuf_double_pointer_size_multiply()
-                      << ",ppnum_mul=" << dpdk.rte_mbuf_double_pointer_num_multiply()
+                      << ",mbuf_pool_size=" << dpdk.mbuf_pool_size()
+                      << ",mbuf_cache_size=" << dpdk.mbuf_cache_size()
                       << ")"
                       << std::endl;
         }

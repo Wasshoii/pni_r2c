@@ -95,7 +95,7 @@ public:
 - `reopenOutput`：目录批处理切换输出前缀。
 - `finalize`：刷写异步队列、释放 generator。
 
-BDM50100 且 `enableMultiGpu` 时内部使用 `R2S50100MultiGpuEngine`（`submitView` + `nextLease`）。可见 GPU 数为 1 时同样走这条路径（每节点仍是整段任务并行，只是 worker 数为 1）。默认无 energy cut / 无外部 sort 时，`onSinglesSpanReady` 拿到 **device** span，回调返回前 output lease 有效（覆盖整段切槽 D2H）。H2D 优先对输入做 `cudaHostRegister`；失败则 R2S 线程 pin-bounce（槽数 = 流水深度），拷完即可归还采集包槽。`computePipelineDepth>1` 时 submit 后延迟 `next`，`finalize()` 排空在飞段。采集桥在未 bounce 时把 `RawDataLease` 交进 `processSegment` 的 keep-alive，直到对应段 H2D 完成。多卡吞吐缩放前提见 [R2S50100MultiGpuEngine](multi_gpu/R2S50100MultiGpuEngine.md)。
+BDM50100 且 `enableMultiGpu` 时内部使用 `R2S50100MultiGpuEngine`（`submitView` + `nextLease`）。可见 GPU 数为 1 时同样走这条路径（每节点仍是整段任务并行，只是 worker 数为 1）。默认无 energy cut / 无外部 sort 时，`onSinglesSpanReady` 拿到 **device** span，回调返回前 output lease 有效（覆盖整段切槽 D2H）。H2D 优先识别 `cudaMallocHost` pinned 缓冲并直拷；否则才 `cudaHostRegister`；失败则 R2S 线程 pin-bounce（槽数 = 流水深度），拷完即可归还采集包槽。`computePipelineDepth>1` 时 submit 后延迟 `next`，`finalize()` 排空在飞段。采集桥在未 bounce 时把 `RawDataLease` 交进 `processSegment` 的 keep-alive，直到对应段 H2D 完成。多卡吞吐缩放前提见 [R2S50100MultiGpuEngine](multi_gpu/R2S50100MultiGpuEngine.md)。采集接入见 [采集到R2S](../../通路/采集到R2S.md)。
 
 ### RawDataLease / RawDataLeaseSpscRingQueue
 
@@ -125,7 +125,7 @@ bool enqueueRawData(const openpni::RawDataView &view);
 
 - `Config::leaseQueueCapacity` 建议 1～2（在途段数）。
 - `blockWhenQueueFull==true`：反压等待；`false` 且 `dropWhenQueueFull` 时可丢段，丢弃仍归还包槽。
-- 本阶段不描述 DPDK/Socket 采集实现。
+- 本阶段采集实现见 [采集到R2S](../../通路/采集到R2S.md)。
 
 ### 离线批处理
 

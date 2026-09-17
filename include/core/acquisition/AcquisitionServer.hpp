@@ -80,7 +80,7 @@ namespace openpni::distributed::acquisition
         uint32_t min_packet_size = 1024;
         uint32_t max_packet_size = 1024; // 对应 storageUnitSize
         uint64_t max_buffer_size = 4ull * 1024 * 1024 * 1024;
-        uint32_t time_switch_buffer_ms = 1000;
+        uint32_t time_switch_buffer_ms = 50;
         DpdkConfig dpdk;
 
         struct Channel

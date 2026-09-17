@@ -276,7 +276,7 @@ namespace openpni::distributed::app
         uint32_t storageUnitSize = 2048;
         uint32_t minPacketSize = 1;
         uint64_t maxBufferSize = 4ULL * 1024ULL * 1024ULL * 1024ULL;
-        uint32_t timeSwitchBufferMs = 200;
+        uint32_t timeSwitchBufferMs = 50;
         uint32_t reservedStorageGiB = 20;
         uint32_t maxFileSizeMb = 256;
         uint32_t dpdkCopyThreadNum = 8; // ignored legacy

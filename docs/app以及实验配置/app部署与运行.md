@@ -10,8 +10,8 @@ app 目录包含两个当前实验用的可执行程序：
    - 启动顺序：Coincidence 握手（Register → OpenDataPlane → Start）后再发数
 
 2. `bin/app/app_coin_master`
-   - 符合-only：RDMA recv + 时间对齐 + 符合
-   - **不**启动 AcquisitionMaster（`acquisitionControl.enabled` 会被忽略）
+   - 符合 + 可选 `AcquisitionMaster`（`acquisitionControl.enabled=true` 时在 `masterAddress` 上启动采集控制）
+   - DPDK 无数据冒烟见 `dpdk_config/run_dpdk_nodata_smoketest.sh`
 
 跨机实验见 `RDMA多机实验.md`。DPDK 无业务 raw 冒烟见 `dpdk_config/run_dpdk_nodata_smoketest.sh`。
 
@@ -58,16 +58,16 @@ cmake --build --preset build-apps-cuda
    使用dpdk采集测试时，程序可能无法直接退出，可以使用如下指令停止程序
 ```bash
    # 查看是否还在跑
-pgrep -a -f 'build/apps/(basic/app_coin_master|cuda/app_acq_r2s_node)'
+pgrep -a -f 'app_coin_master|app_acq_r2s_node|tool_dpdk_tx_replayer'
 
 # 优雅停止
-pkill -INT -f 'build/apps/(basic/app_coin_master|cuda/app_acq_r2s_node)'
+pkill -INT -f 'app_coin_master|app_acq_r2s_node|tool_dpdk_tx_replayer'
 
 # 若还在，升级为 TERM
-pkill -TERM -f 'build/apps/(basic/app_coin_master|cuda/app_acq_r2s_node)'
+pkill -TERM -f 'app_coin_master|app_acq_r2s_node|tool_dpdk_tx_replayer'
 
 # 最后兜底强杀
-pkill -KILL -f 'build/apps/(basic/app_coin_master|cuda/app_acq_r2s_node)'
+pkill -KILL -f 'app_coin_master|app_acq_r2s_node|tool_dpdk_tx_replayer'
 ```
 
 ## 关联文档

@@ -372,7 +372,7 @@ int main(int argc, char **argv)
     std::cout << "dataplane.deviceName     : " << (cfg.coinMaster.dataplane.deviceName.empty() ? "(auto)" : cfg.coinMaster.dataplane.deviceName) << std::endl;
     std::cout << "dataplane.gidIndex       : " << cfg.coinMaster.dataplane.gidIndex << std::endl;
     std::cout << "aligner.outputDir        : " << cfg.aligner.outputDir << std::endl;
-    std::cout << "acqControl.enabled       : " << (cfg.acquisitionControl.enabled ? "true (IGNORED this phase)" : "false")
+    std::cout << "acqControl.enabled       : " << (cfg.acquisitionControl.enabled ? "true" : "false")
               << std::endl;
     std::cout << "acqControl.algorithm     : "
               << (cfg.acquisitionControl.acquisitionAlgorithm == appcfg::AcqControlSection::AcquisitionAlgorithm::Dpdk ? "dpdk" : "socket")
@@ -440,14 +440,6 @@ int main(int argc, char **argv)
     alignerConfig.coinProtocol.delayTime_ps = cfg.aligner.coinProtocol.delayTimePs;
     alignerConfig.coinProtocol.energyLower_eV = cfg.aligner.coinProtocol.energyLowerEV;
     alignerConfig.coinProtocol.energyUpper_eV = cfg.aligner.coinProtocol.energyUpperEV;
-
-    if (cfg.acquisitionControl.enabled)
-    {
-        std::cerr << "[CoinMaster] acquisitionControl.enabled is ignored in this phase "
-                     "(coin node is coincidence-only). Unset acquisitionControl.enabled."
-                  << std::endl;
-        cfg.acquisitionControl.enabled = false;
-    }
 
     grpcnode::CoinGrpcNode::InitOptions coinInit;
     coinInit.alignerConfig = alignerConfig;

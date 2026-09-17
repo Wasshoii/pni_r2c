@@ -30,7 +30,9 @@ Required:
 
 Options:
   --driver <name>                  target DPDK driver (default: vfio-pci)
-  --hugepages-count <n>            hugepages count (default: 1024)
+  --hugepages-count <n>            hugepages count (default: 1024 → 2GiB at 2M).
+                                   Smoke mbuf pool 65535 fits in 2GiB.
+                                   Default DPDKNew mbuf ~4M needs ≥4096 (8GiB) 2M pages.
   --hugepages-size <2M|1G>         hugepage size (default: 2M)
   --hugepages-mount <path>         hugetlbfs mountpoint (default: /dev/hugepages)
   --chown-user <user>              owner for /dev/vfio and hugetlbfs mount (default: current user)

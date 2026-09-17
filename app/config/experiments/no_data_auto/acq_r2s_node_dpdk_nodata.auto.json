@@ -1,4 +1,8 @@
 {
+  "dataplane": {
+    "requireRoce": false,
+    "forceInProcess": true
+  },
   "acqNode": {
     "masterAddress": "127.0.0.1:50093",
     "nodeId": "acq-r2s-node-0",
@@ -18,9 +22,7 @@
   },
   "bridge": {
     "enabled": false,
-    "queueCapacity": 64,
-    "reservePacketsPerSlot": 512,
-    "reserveBytesPerSlot": 1048576,
+    "leaseQueueCapacity": 2,
     "blockWhenQueueFull": true,
     "queueFullWarnEvery": 5000,
     "inputChannelCount": 1
@@ -46,8 +48,8 @@
   "runtime": {
     "shutdownGraceMs": 1000,
     "enableCpuAffinity": true,
-    "cpuAffinityCores": [ 0 , 1 , 2 , 3],
-    "strictBindIpsOwnershipCheck": true,
+    "cpuAffinityCores": [0, 1, 2, 3],
+    "strictBindIpsOwnershipCheck": false,
     "strictNumaTopologyCheck": false,
     "requireBindIpsSingleNuma": true,
     "requireCpuAffinityOnNuma": false,

@@ -74,7 +74,7 @@ test -e /dev/vfio/vfio && echo "/dev/vfio/vfio exists" || echo "missing"
 同时，DPDK 初始化参数来自任务中的 `dpdk_options`：
 
 1. `bind_ips`（必填，数量须等于 DPDK 口数）
-2. `rx_rings_per_port`（每口 RX/Copy worker 对数）
+2. `rx_rings_per_port`（每口 RX/Copy worker 对数；`>1` 时 DPDKNew 打开 RSS）
 3. `mbuf_pool_size` / `mbuf_cache_size`（0 表示用 libpni 默认）
 4. `local_loopback_iface`（非空则 loopback vdev）
 5. `extra_eal_args`（绑核、hugepage、`--file-prefix`）
@@ -110,7 +110,9 @@ sudo dpdk-devbind.py --status
 4. 可选：`dpdkMbufPoolSize`、`dpdkMbufCacheSize`、`dpdkLocalLoopbackIface`、`dpdkExtraEalArgs`
 5. `acquisitionControl.detectorSources[]`、`destinationIp`、端口规划
 6. （推荐）`acquisitionControl.nodeOverrides[]` 做节点级覆盖
-7. 建议 `timeSwitchBufferMs` 取 20–100；默认 1000 对实时过粗
+7. `timeSwitchBufferMs` 默认 **50**（建议 20–100）。200 Gib/s 时 200ms 一片会超过默认 4 GiB 池。
+8. 200 Gib/s：每 100GbE 口建议 `dpdkRxRingsPerPort=4`（8 个 worker lcore），`extra_eal_args` 绑在网卡 NUMA。默认仍为 1，避免低速场景默默多占核。
+9. `storageUnitSize` 应贴近最大 UDP 载荷；槽比包大时 `DPacketsAsync` H2D 会带 padding。
 
 并确保发包端（`dpdk_tx_replayer` 或 `app_udp_raw_replayer`）端口与采集控制下发端口匹配。
 
@@ -135,6 +137,8 @@ sudo dpdk-devbind.py --status
 1. 当 `acquisitionAlgorithm=dpdk` 时，`dpdkBindIps` 不能为空，且必须是有效 IPv4。
 2. `dpdkBindIps` 应填写 DPDK 绑定网卡对应的数据面 IP，而不是管理面 IP。
 3. 若未启用 DPDK 构建，节点在启动阶段会明确报错。
+4. `dpdkRxRingsPerPort>1` 时 DPDKNew 打开 RSS；日志应出现 `RSS enabled rss_hf=...`。200 Gib/s 把该值调到每 100GbE 口 4，并为每口准备 `2×rings` 个 worker lcore。
+5. 本轮 DPDKNew 还将 RX desc 固定为 4096、通道查找改为哈希、copy 热路径去掉 `shared_lock`；未知通道包不再写入池。
 
 ### 4.3.1 节点级覆盖（nodeOverrides）
 
@@ -349,65 +353,47 @@ bash dpdk_config/dpdk_rollback.sh \
 
 ### 6.4 与 smoketest 联动的关键注意事项
 
-`run_dpdk_nodata_smoketest.sh` 默认会选“第一张具有全局 IPv4 的网卡”作为 `bind_ip`。
+`run_dpdk_nodata_smoketest.sh` 是 **DPDKNew 接线冒烟**，不是 200 Gib/s 数据面测试。
 
-这意味着：
+行为：
 
-1. 若 DPDK 口已绑定 `vfio-pci`，而该口不在内核协议栈中，本机 Python UDP 注入流量可能走管理网卡而非 DPDK 口。
-2. 控制面可能表现正常（节点注册、下发任务成功），但数据面统计仍可能为 0。
+1. 生成 InProcess 符合（`requireRoce=false` / `forceInProcess=true`），避免没 IB 时卡在 RoCE。
+2. `timeSwitchBufferMs=50`，`dpdkMbufPoolSize=65535`，`dpdkExtraEalArgs` 绑 3–4 核，`rx_rings_per_port=1`。
+3. vfio 后内核上看不到数据面 IP，因此关闭 `strictBindIpsOwnershipCheck`。请用 `--bind-ip` 填 DPDK 逻辑 IP，不要依赖“第一张全局 IPv4”（常是管理网）。
+4. **不再用 Python UDP**。内核发包进不了 vfio。加 `--dst-mac` 才调用 `bin/tools/tool_dpdk_tx_replayer`；TX 与 RX 不能共用同一块已绑定网卡，双机或第二块口才能证明收包。
+5. 二进制优先 `bin/app/app_coin_master`、`bin/app/app_acq_r2s_node`（cmake 输出目录），不再假设 `build/apps/basic/app_coin_master`。
+6. 通过条件含 `AcquisitionMaster started`、`algorithm=DPDKNew`、`DPDKNew initialized`。
 
-因此建议：
-
-1. 本机自测时，关注日志中是否出现“DPDK 线程已启动但吞吐为 0”的组合现象。
-2. 若要验证 DPDK 真收包，优先使用外部发包机向 DPDK 数据面链路发包。
-
-### 6.5 DPDK 专用发包器（第一阶段实现）
-
-当前仓库已新增最小 DPDK 发包程序：
-
-1. 可执行目标：`app_dpdk_tx_replayer`
-2. 源码路径：`app/dpdk_tx_replayer_main.cpp`
-3. 构建开关：`R2C_BUILD_APP_DPDK_TX_REPLAYER=ON`
-
-功能范围（第一阶段）：
-
-1. 使用 DPDK 端口发送自定义 UDP 负载（固定 payload）。
-2. 支持按 channel 映射端口（`source-port-base/destination-port-base + channel`）。
-3. 支持限速（`--pps`）或满速发包（`--pps 0`）。
-4. 打印实时发送统计（发送包数、丢弃包数、平均 pps、平均 Mbps）。
-
-#### 6.5.1 构建方式
+示例：
 
 ```bash
-cmake -S . -B build/apps/basic \
-   -DR2C_PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig" \
-   -DR2C_BUILD_APP_DPDK_TX_REPLAYER=ON
-
-cmake --build build/apps/basic --target app_dpdk_tx_replayer
+bash dpdk_config/run_dpdk_nodata_smoketest.sh --bind-ip 10.10.1.10 --skip-inject
+bash dpdk_config/run_dpdk_nodata_smoketest.sh \
+   --bind-ip 10.10.1.10 \
+   --dst-mac aa:bb:cc:dd:ee:ff \
+   --tx-port-id 0
 ```
 
-#### 6.5.2 参数说明（核心）
+后续高速采集测试不要沿用这份 auto JSON 的 rings=1 / mbuf=65535 / 4 核。
 
-1. `--port-id`：DPDK 发送端口 ID。
-2. `--dst-mac`：目标网卡 MAC（必填）。
-3. `--source-ip` / `--destination-ip`：写入 UDP 报文的 IPv4。
-4. `--source-port-base` / `--destination-port-base`：端口基址。
-5. `--channel-count` / `--channel-offset`：通道映射。
-6. `--payload-size`：UDP 负载长度。
-7. `--pps`：目标发包速率，`0` 表示尽可能满速。
-8. `--duration-sec`：持续发包时间。
-9. `--eal-args`：额外 EAL 参数字符串。
+### 6.5 DPDK 专用发包器
 
-查看完整参数：
+可执行目标：`tool_dpdk_tx_replayer`（`src/tools/dpdk_tx_replayer_main.cpp`）。
+
+构建：
 
 ```bash
-build/apps/basic/app_dpdk_tx_replayer --help
+cmake --preset linux-release-tools
+cmake --build --preset build-tools --target tool_dpdk_tx_replayer
 ```
 
-#### 6.5.3 联调示例（单端口、单通道）
+产物：`bin/tools/tool_dpdk_tx_replayer`。
+
+功能：DPDK 口发送固定 UDP 负载；按 channel 映射 `source-port-base` / `destination-port-base`；`--pps` 限速或 `0` 满速。
 
 ```bash
-build/apps/basic/app_dpdk_tx_replayer \
+./bin/tools/tool_dpdk_tx_replayer --help
+./bin/tools/tool_dpdk_tx_replayer \
    --port-id 0 \
    --dst-mac aa:bb:cc:dd:ee:ff \
    --source-ip 192.168.10.11 \
@@ -420,12 +406,7 @@ build/apps/basic/app_dpdk_tx_replayer \
    --duration-sec 30
 ```
 
-#### 6.5.4 使用注意事项
-
-1. `--dst-mac` 必须是接收侧链路可达的目标 MAC，否则链路层会丢包。
-2. 若接收端按 `destinationPortBase + channel` 收包，请保持通道与端口映射一致。
-3. 建议优先在“发包机/采集机分离”的双机环境测极限；单机更适合功能验证与快速回归。
-4. 第一阶段发包器是固定 payload，后续可扩展为 raw 回放/协议字段可配。
+注意：`--dst-mac` 必须是接收侧链路可达 MAC。极限吞吐用发包机/采集机分离；单机只适合功能回归。
 
 ## 7. 真实分布式场景的配置建议
 
@@ -470,11 +451,22 @@ build/apps/basic/app_dpdk_tx_replayer \
 2. Phase-2（中风险）：按节点 JSON 覆盖自动渲染 `dpdkBindIps` 与 DPDK 参数。
 3. Phase-3（高性能）：引入 NUMA/CPU 亲和参数并在节点侧执行约束检查。
 
-## 8. 后续双机测试（本轮不实现代码）
+## 8. 采集侧后续候选（本轮不实现）
+
+已落地项与上机建议见 [采集到R2S](../接口说明/通路/采集到R2S.md)。下面这些按实测再选：
+
+1. 定长槽 padding：H2D 跨度是 `offset[last]+len-offset[0]`，不是 `Σ length`。可选 host dense pack 或 `DPacketsAsync` 有效字节 gather（会改 offset 约定）。
+2. 把 `rxRingSize` / `queueRingSize` 配进 proto（当前 RX desc 编译期 4096）。
+3. copy 侧 `rte_net_get_ptype` / 向量化 `decodeUDP`。
+4. 显式 NUMA：mbuf 池、CUDAHost 池、lcore 与网卡同 node。
+5. 默认 `dpdkRxRingsPerPort` 提到 4（依赖核数，先不上）。
+6. 加深 `leaseQueueCapacity` / `computePipelineDepth`（R2S 反压）。
+
+## 9. 后续双机测试（本轮不实现代码）
 
 详细断言见 [采集到R2S](../接口说明/通路/采集到R2S.md)。摘要：
 
 1. A 机 `dpdk_tx_replayer` 按探测器 IP/端口发包。
 2. B 机 `app_acq_r2s_node`，`ALGORITHM_TYPE_DPDK`，`CUDAHost` 池。
 3. 期望日志 `direct pinned H2D`，`unknown` 接近 0，缓冲不顶满。
-4. 扫 `timeSwitchBufferMs`（20–100ms）与 `extra_eal_args` 绑核。
+4. 扫 `timeSwitchBufferMs`（20–100ms，默认 50）与 `extra_eal_args` 绑核；多 queue 时确认 RSS 日志和各 queue 都有流量。

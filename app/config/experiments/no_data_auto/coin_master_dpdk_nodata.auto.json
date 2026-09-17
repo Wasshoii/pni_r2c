@@ -1,4 +1,8 @@
 {
+  "dataplane": {
+    "requireRoce": false,
+    "forceInProcess": true
+  },
   "coinMaster": {
     "listenAddress": "0.0.0.0:50061",
     "expectedNodeCount": 1,
@@ -54,13 +58,13 @@
     "storageUnitSize": 2048,
     "minPacketSize": 1,
     "maxBufferSize": 4294967296,
-    "timeSwitchBufferMs": 200,
+    "timeSwitchBufferMs": 50,
     "reservedStorageGiB": 20,
     "maxFileSizeMb": 256,
-    "dpdkCopyThreadNum": 4,
     "dpdkRxRingsPerPort": 1,
-    "dpdkMbufDoublePointerSizeMultiply": 32,
-    "dpdkMbufDoublePointerNumMultiply": 2,
+    "dpdkMbufPoolSize": 65535,
+    "dpdkMbufCacheSize": 250,
+    "dpdkExtraEalArgs": ["-l", "0,1,2,3", "--file-prefix", "acq_r2s_nodata"],
     "dpdkBindIps": ["192.168.4.126"],
     "nodeOverrides": [
       {

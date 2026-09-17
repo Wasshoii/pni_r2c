@@ -27,7 +27,7 @@ struct NodeAcquisitionConfig {
   uint32_t min_packet_size;
   uint32_t max_packet_size; // storageUnitSize
   uint64_t max_buffer_size;
-  uint32_t time_switch_buffer_ms;
+  uint32_t time_switch_buffer_ms; // 结构体与任务字段为 0 时回退 50
   DpdkConfig dpdk;
   std::vector<Channel> channels;
 };
@@ -38,6 +38,8 @@ openpni::AcquisitionInfo MakeAcquisitionInfo(const NodeAcquisitionConfig &config
 
 - `ALGORITHM_TYPE_DPDK` → `RuntimeType::Dpdk`；其余（含未指定）→ Socket。
 - `MakeAcquisitionInfo` 始终设置 `hostMemoryType = CUDAHost`，供后续 H2D 走 pinned DMA，见 [采集到R2S](../../通路/采集到R2S.md)。
+- `time_switch_buffer_ms` 任务字段为 0 时回退 **50ms**（`MakeAcquisitionInfo` 再夹到 ≥10）。200 Gib/s 下 200ms 一片会超过默认 4 GiB 池。
+- `rx_rings_per_port > 1` 时 DPDKNew 打开 RSS（UDP+IP 与网卡 capa 取交）；默认仍为 1。200 Gib/s 建议每 100GbE 口 4 对 RX/Copy，见 [DPDK采集配置与使用](../../../app以及实验配置/DPDK采集配置与使用.md)。
 - `local_loopback_iface` 非空时节点侧 `InitDPDKNew` 打开 loopback vdev。
 - proto 里旧字段 `copy_thread_num`、双指针乘数会被忽略。
 
@@ -62,3 +64,4 @@ class DistributedAcquisitionNode {
 
 - 回调内不可持久化 `RawDataView` 指针；异步处理必须租约或拷贝。
 - 多队列 DPDKNew 的 `Release(n)` 是 FIFO。必须与 `completeOldestMultiGpuSegment` 一样按提交顺序归还，不能乱序 complete。
+- 未命中通道表或 `quickFilter` 失败的包只计入 `unknown`，不再写入 CUDAHost 池。

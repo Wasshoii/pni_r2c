@@ -123,7 +123,7 @@ void setReleaseFn(ReleaseFn releaseFn);  // 须在 start 前
 bool enqueueRawData(const openpni::RawDataView &view);
 ```
 
-- `Config::leaseQueueCapacity` 建议 1～2（在途段数）。
+- `Config::leaseQueueCapacity` 默认 **4**（在途段数）。在途字节约 `lease × 时间片 × 线速`，须小于采集 `maxBufferSize`。
 - `blockWhenQueueFull==true`：反压等待；`false` 且 `dropWhenQueueFull` 时可丢段，丢弃仍归还包槽。
 - 本阶段采集实现见 [采集到R2S](../../通路/采集到R2S.md)。
 

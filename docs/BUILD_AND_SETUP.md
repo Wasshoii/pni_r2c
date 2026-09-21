@@ -101,7 +101,7 @@ ctest --test-dir build/tests/core -L core --output-on-failure
 ```
 
 2. PNI（libpni + tbb + openmp）
-- 编译：`test_coin_synthetic_singles`、`test_rdma_dataplane_loopback`、`test_rdma_orchestration`、`test_app_config_parse`、`test_app_inprocess_smoke`、`test_acq_control_init`、`test_coin_streaming_aligner`、`test_rdma_recv_stub`
+- 编译：`test_coin_synthetic_singles`、`test_rdma_dataplane_loopback`、`test_rdma_orchestration`、`test_app_config_parse`、`test_app_inprocess_smoke`、`test_acq_control_init`、`test_coin_streaming_aligner`、`test_rdma_recv_stub`、`test_dpdk_acq_master` / `test_dpdk_acq_node`（`R2C_BUILD_TEST_DPDK_ACQ_PERF`，preset 已开）
 - 默认 ctest（`-LE "integration|manual"`）：`test_coin_synthetic_singles`、`test_rdma_dataplane_loopback`、`test_app_config_parse`、`test_acq_control_init`
 
 ```bash

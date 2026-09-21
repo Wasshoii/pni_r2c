@@ -21,7 +21,7 @@ namespace openpni::distributed::acquisition
             break;
         }
 
-        config.min_packet_size = task.min_packet_size() > 0 ? task.min_packet_size() : 1024;
+        config.min_packet_size = task.min_packet_size() > 0 ? task.min_packet_size() : 1;
         config.max_packet_size = task.storage_unit_size() > 0 ? task.storage_unit_size() : 1024;
         config.max_buffer_size = task.max_buffer_size() > 0 ? task.max_buffer_size() : (4ull * 1024ull * 1024ull * 1024ull);
         config.time_switch_buffer_ms = task.time_switch_buffer_ms() > 0 ? task.time_switch_buffer_ms() : 50;

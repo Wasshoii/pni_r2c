@@ -37,6 +37,7 @@ openpni::AcquisitionInfo MakeAcquisitionInfo(const NodeAcquisitionConfig &config
 ```
 
 - `ALGORITHM_TYPE_DPDK` → `RuntimeType::Dpdk`；其余（含未指定）→ Socket。
+- `min_packet_size` 任务为 0 时回退 **1**（与 AppConfig 一致），避免默默丢掉小于 1024 的 UDP。
 - `MakeAcquisitionInfo` 始终设置 `hostMemoryType = CUDAHost`，供后续 H2D 走 pinned DMA，见 [采集到R2S](../../通路/采集到R2S.md)。
 - `time_switch_buffer_ms` 任务字段为 0 时回退 **50ms**（`MakeAcquisitionInfo` 再夹到 ≥10）。200 Gib/s 下 200ms 一片会超过默认 4 GiB 池。
 - `rx_rings_per_port > 1` 时 DPDKNew 打开 RSS（UDP+IP 与网卡 capa 取交）；默认仍为 1。200 Gib/s 建议每 100GbE 口 4 对 RX/Copy，见 [DPDK采集配置与使用](../../../app以及实验配置/DPDK采集配置与使用.md)。
@@ -57,8 +58,9 @@ class DistributedAcquisitionNode {
 ```
 
 - `SetDeferRawDataRelease(true)`：写文件（若启用）先于 callback；callback 成功则由调用方 `Release(count)`，失败则本节点立即归还。
-- `MakeRawDataReleaseFn()` 绑定到当前 `AlgoType::Release`，供 `AsyncRawDataToR2SBridge` 在 R2S 完成后按 **Read 顺序** 归还。
-- DPDKNew 的 `Read()` 在无包时会阻塞到下一时间片或 `Stop()`；空 `optional` 上的 sleep 主要给 Socket。
+- `MakeRawDataReleaseFn()` 接线时建一次，绑定到 `ReleasePackets` → `AlgoType::Release`，供 `AsyncRawDataToR2SBridge` 在 R2S 完成后按 **Read 顺序** 归还。
+- DPDKNew 的 `Read()` 在无包时会阻塞到下一时间片或 `Stop()`；空结果不再 `sleep`。Socket 仍保留 15–100ms 退避 sleep。
+- `Status()` 在 DPDKNew 下额外填 `imissed` / `ierrors`（`rte_eth_stats`）；MonitorLoop 写入 `NodeStatus.imissed_packets` / `ierrors_packets`。生产 coin 状态行不打印这两项。
 
 ## 使用提示
 

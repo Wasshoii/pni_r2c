@@ -17,6 +17,8 @@ class AcquisitionGrpcNode {
   std::function<void(uint64_t)> makeRawDataReleaseFn();
   bool run();
   void stop();
+  NodeState state() const;
+  NodeStatus lastStatus() const;
 };
 ```
 
@@ -31,5 +33,7 @@ class AcquisitionGrpcNode {
 | 请求 DPDK 但 libpni 未开 DPDK | 配置阶段报错 |
 
 `InitDPDKNew` 使用 `DpdkOptions.bind_ips`、`rx_rings_per_port`、`mbuf_pool_size`、`mbuf_cache_size`、`local_loopback_iface`、`extra_eal_args`。`extra_eal_args` 用于绑核 / hugepage / `--file-prefix`，避免和 R2S、RDMA 抢 lcore。
+
+`strictBindIpsOwnershipCheck` 默认 false：vfio 后内核看不到 bind IP，未命中只 WARNING。已设 `cpuAffinityCores` 时，Configure 要求核数 ≥ `1 + 2 × rx_rings_per_port × bind_ips.size()`。
 
 旧 `DPDKAcquisition` / `InitDPDK` 不再调用。部署与 hugepage 见 [DPDK采集配置与使用](../../app以及实验配置/DPDK采集配置与使用.md)。通路见 [采集到R2S](../通路/采集到R2S.md)。

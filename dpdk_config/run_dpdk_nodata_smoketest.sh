@@ -368,9 +368,12 @@ cat > "${NODE_CFG}" <<EOF
     "saveData2SingleFile": false,
     "asyncFileWrite": false
   },
+  "source": {
+    "type": "acquisition"
+  },
   "bridge": {
     "enabled": false,
-    "leaseQueueCapacity": 2,
+    "leaseQueueCapacity": 4,
     "blockWhenQueueFull": true,
     "queueFullWarnEvery": 5000,
     "inputChannelCount": 1

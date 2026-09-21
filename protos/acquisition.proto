@@ -142,7 +142,9 @@ message NodeStatus {
     // Error statistics
     uint64 total_rx_packets = 9;
     uint64 total_rx_bytes = 10;
-    uint64 error_packets = 11; // unknown + dpdk errors
+    uint64 error_packets = 11; // unknown (unmapped / filtered)
+    uint64 imissed_packets = 12; // NIC HW missed (DPDK)
+    uint64 ierrors_packets = 13; // NIC HW errors (DPDK)
 }
 
 service AcquisitionControlService {

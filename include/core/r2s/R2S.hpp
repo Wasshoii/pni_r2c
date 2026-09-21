@@ -566,7 +566,7 @@ namespace openpni::distributed::r2s
 
         struct Config
         {
-            size_t leaseQueueCapacity = 2;  // 在途段数（建议 1～2）
+            size_t leaseQueueCapacity = 4;  // 在途段数；须使 lease*时间片*线速 < maxBufferSize
             bool blockWhenQueueFull = true; // true: 反压等待空槽；false: 立即返回
             bool dropWhenQueueFull = false; // 仅在 !blockWhenQueueFull 时生效
             uint32_t queueFullBackoffUs = 50;

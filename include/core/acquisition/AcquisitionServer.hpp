@@ -16,6 +16,7 @@
 #include <thread>
 #include <chrono>
 #include <stdexcept>
+#include <type_traits>
 
 #include <pni/node/acquisition/Socket.hpp>
 #if PNI_STANDARD_CONFIG_ENABLE_DPDK
@@ -39,7 +40,7 @@ namespace openpni::distributed::acquisition
         bool overwrite_existing_file = true; // 是否允许覆盖已存在的输出文件
         uint64_t total_reserved_gib = 20;  // 磁盘保留空间 (GiB)
         uint16_t channel_num = 0;          // 通道数（自动填充）
-        bool enable_raw_file_write = true; // 是否写 raw 文件，false 时仅通过内存回调输出
+        bool enable_raw_file_write = false; // 是否写 raw 文件，false 时仅通过内存回调输出
         // Sharding options: 如果 output_roots 非空，将启用分盘写入（每个 entry 为一个 SSD 根目录）
         std::vector<std::string> output_roots; // 多盘根目录列表，优先于 output_root
         enum class ShardStrategy
@@ -77,7 +78,7 @@ namespace openpni::distributed::acquisition
         };
 
         RuntimeType runtime_type = RuntimeType::Socket;
-        uint32_t min_packet_size = 1024;
+        uint32_t min_packet_size = 1;
         uint32_t max_packet_size = 1024; // 对应 storageUnitSize
         uint64_t max_buffer_size = 4ull * 1024 * 1024 * 1024;
         uint32_t time_switch_buffer_ms = 50;
@@ -201,12 +202,17 @@ namespace openpni::distributed::acquisition
         {
             return [this](uint64_t packetCount)
             {
-                std::lock_guard<std::mutex> lock(algo_mutex_);
-                if (algo_)
-                {
-                    algo_->Release(packetCount);
-                }
+                ReleasePackets(packetCount);
             };
+        }
+
+        void ReleasePackets(uint64_t packetCount)
+        {
+            std::lock_guard<std::mutex> lock(algo_mutex_);
+            if (algo_)
+            {
+                algo_->Release(packetCount);
+            }
         }
 
         // 启动采集
@@ -402,8 +408,17 @@ namespace openpni::distributed::acquisition
                 }
                 else
                 {
-                    const auto sleepMs = std::max<int>(std::min<int>(missTime++, 100), 15);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+#if PNI_STANDARD_CONFIG_ENABLE_DPDK
+                    if constexpr (::std::is_same_v<AlgoType, openpni::DPDKAcquisitionNew>)
+                    {
+                        // Read() already waited on the time-slice condvar; empty means stop.
+                    }
+                    else
+#endif
+                    {
+                        const auto sleepMs = std::max<int>(std::min<int>(missTime++, 100), 15);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+                    }
                 }
             }
 
@@ -482,6 +497,8 @@ namespace openpni::distributed::acquisition
                         // If AlgoType is DPDK, we might want to sum up other errors, but requires specialization or SFINAE.
                         // For simplicity, we stick to common fields for now.
                         node_status.set_error_packets(total_errors);
+                        node_status.set_imissed_packets(status.imissed);
+                        node_status.set_ierrors_packets(status.ierrors);
 
                         status_report_callback_(node_status);
 

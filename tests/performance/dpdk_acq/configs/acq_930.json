@@ -1,0 +1,46 @@
+{
+  "master": {
+    "listenAddress": "0.0.0.0:50093",
+    "expectedNodeCount": 1,
+    "statusIntervalMs": 1000,
+    "startDurationMs": 0,
+    "waitConnectTimeoutMs": 30000,
+    "shutdownGraceMs": 1000
+  },
+  "node": {
+    "masterAddress": "127.0.0.1:50093",
+    "nodeId": "dpdk-acq-node-0",
+    "nodeAddress": "__BIND_IP__",
+    "enableRawFileWrite": false,
+    "outputRoot": "Data/raw_data",
+    "sessionNamePrefix": "dpdk_acq_930",
+    "maxFileSizeMb": 1024,
+    "overwriteExisting": true,
+    "reservedStorageGiB": 20,
+    "fsyncEachSegment": false,
+    "enableCpuAffinity": true,
+    "cpuAffinityCores": [0, 1, 2, 3],
+    "strictBindIpsOwnershipCheck": false,
+    "strictNumaTopologyCheck": false,
+    "requireBindIpsSingleNuma": true,
+    "requireCpuAffinityOnNuma": false,
+    "expectedNumaNode": -1
+  },
+  "acquisition": {
+    "channelCount": 144,
+    "sourceIp": "__SOURCE_IP__",
+    "sourcePortBase": 17100,
+    "destinationIp": "__BIND_IP__",
+    "destinationPortBase": 18100,
+    "sessionName": "dpdk_acq_930",
+    "storageUnitSize": 2048,
+    "minPacketSize": 1,
+    "maxBufferSize": 4294967296,
+    "timeSwitchBufferMs": 50,
+    "dpdkRxRingsPerPort": 1,
+    "dpdkMbufPoolSize": 65535,
+    "dpdkMbufCacheSize": 250,
+    "dpdkBindIps": ["__BIND_IP__"],
+    "dpdkExtraEalArgs": ["-l", "0,1,2,3", "--file-prefix", "dpdk_acq_rx_930"]
+  }
+}

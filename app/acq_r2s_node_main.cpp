@@ -19,7 +19,6 @@
 #include <sched.h>
 
 #include "app/common/AppConfig.hpp"
-#include "core/acquisition/RawIngress.hpp"
 #include "core/r2s/R2S.hpp"
 #include "core/streaming/SyntheticSingles.hpp"
 #include "grpcNode/acquisitionNode.hpp"
@@ -35,8 +34,6 @@ namespace
     namespace grpcnode = openpni::distributed::grpcnode;
     namespace r2s = openpni::distributed::r2s;
     namespace streaming = openpni::distributed::streaming;
-    namespace acq = openpni::distributed::acquisition;
-
     std::atomic<bool> g_stopRequested{false};
 
     void onSignal(int /*sig*/)
@@ -571,11 +568,6 @@ int main(int argc, char **argv)
             std::cerr << "[AcqR2SNode] coinClient must be enabled for synthetic/replay" << std::endl;
             return 2;
         }
-        if (cfg.source.type == appcfg::WorkerSourceType::Acquisition)
-        {
-            std::cerr << "[AcqR2SNode] acquisition source is not implemented; use synthetic or lsingle_replay" << std::endl;
-            return 2;
-        }
         if (cfg.rawIngress.enabled)
         {
             std::cout << "[AcqR2SNode] rawIngress.enabled ignored for synthetic/replay" << std::endl;
@@ -674,24 +666,11 @@ int main(int argc, char **argv)
         return sent ? 0 : 5;
     }
 
-    if (cfg.source.type == appcfg::WorkerSourceType::Acquisition)
+    if (cfg.rawIngress.enabled)
     {
-        std::cerr << "[AcqR2SNode] source.type=acquisition is reserved; "
-                     "this phase only provides StubRawIngress. Use synthetic or lsingle_replay."
+        std::cout << "[AcqR2SNode] rawIngress.enabled ignored for acquisition; "
+                     "data comes from AcquisitionMaster via gRPC+DPDK/Socket"
                   << std::endl;
-        if (cfg.rawIngress.enabled)
-        {
-            auto stub = acq::makeStubRawIngress();
-            stub->start();
-            std::cout << "[AcqR2SNode] StubRawIngress started (no raw data)" << std::endl;
-            while (!g_stopRequested.load(std::memory_order_relaxed))
-            {
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            }
-            stub->stop();
-            return 0;
-        }
-        return 2;
     }
 
     const auto detectorType = parseDetectorType(cfg.coinClient.detectorType);

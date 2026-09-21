@@ -38,7 +38,7 @@ namespace openpni::distributed::grpcnode
             size_t maxFileSizeMb = 1024;
             bool overwriteExisting = true;
             uint64_t reservedStorageGiB = 20;
-            bool enableRawFileWrite = true;
+            bool enableRawFileWrite = false; // 与 AppConfig 对齐：实时路径默认不写 raw
             size_t asyncQueueDepth = 1024;
             size_t writerThreadsPerShard = 1;
             bool useSpillToDisk = true;
@@ -47,7 +47,7 @@ namespace openpni::distributed::grpcnode
 
             uint32_t statusIntervalMs = 1000;
 
-            bool strictBindIpsOwnershipCheck = true;
+            bool strictBindIpsOwnershipCheck = false; // vfio 后内核无该 IP；默认未命中只 WARNING
             bool strictNumaTopologyCheck = false;
             bool requireBindIpsSingleNuma = true;
             bool requireCpuAffinityOnNuma = false;
@@ -69,6 +69,7 @@ namespace openpni::distributed::grpcnode
         void stop();
 
         acqproto::NodeState state() const;
+        acqproto::NodeStatus lastStatus() const;
 
     private:
         class Impl;

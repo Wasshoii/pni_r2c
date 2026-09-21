@@ -24,7 +24,7 @@ tests/
 | `app_coin_master` | 符合-only：RDMA 收 + 对齐 + 符合 | 编排握手、L2 收包、符合 GPU、L3 回放、R2S→coin |
 | `app_coin_node` | 与 `app_coin_master` 同一 `coin_master_main.cpp`，JSON `role=compute` | 时间分片被控符合节点 RegisterCoin / 收包 |
 
-timesync、AcquisitionMaster **现行 app 未接线或会忽略**，对应测试只保模块。
+timesync、AcquisitionMaster **现行 app 未接线或会忽略**，对应测试只保模块。DPDK 仅采集不改 `app_acq_r2s_node` / `app_coin_master`，走 `test_dpdk_acq_master` / `test_dpdk_acq_node`。
 
 ```mermaid
 flowchart TB
@@ -126,6 +126,7 @@ flowchart TB
 |------|------|
 | `test_r2s_50100_single_ring` | 50100 单环 R2S 吞吐（生产 `processSegment` 多 GPU；预读真实 segment，不扩包） |
 | `test_coin_9120_aligner` | 9120 双节点符合吞吐（生产 `StreamingTimeAligner`；预读 `.lsingle`，burst push；事件驱动触发，段大小受 `maxSegmentSingles` 约束） |
+| `test_dpdk_acq_master` / `test_dpdk_acq_node` | 双机 DPDK 仅采集（精简 AcquisitionMaster + 采集节点；不跑 coin/R2S）。见 [performance/dpdk_acq/README.md](../performance/dpdk_acq/README.md) |
 
 ## 编译
 

@@ -559,7 +559,7 @@ namespace openpni::distributed::app
                 {
                     return fail(err, "bridge.queueCapacity must be non-negative integer");
                 }
-                if (legacyQueueCapacity > 0 && cfg->bridge.leaseQueueCapacity == 2)
+                if (legacyQueueCapacity > 0 && cfg->bridge.leaseQueueCapacity == 4)
                 {
                     cfg->bridge.leaseQueueCapacity = legacyQueueCapacity;
                 }

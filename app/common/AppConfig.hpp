@@ -32,7 +32,7 @@ namespace openpni::distributed::app
 
     struct SourceSection
     {
-        WorkerSourceType type = WorkerSourceType::Synthetic;
+        WorkerSourceType type = WorkerSourceType::Acquisition; // 缺省走真实采集（gRPC + DPDK/Socket）
         WorkerSourceMode mode = WorkerSourceMode::Pairs;
         std::string lsinglePath;
         uint64_t promptPairs = 10000;
@@ -69,7 +69,7 @@ namespace openpni::distributed::app
         bool overwriteExisting = true;
         uint64_t reservedStorageGiB = 20;
         uint32_t statusIntervalMs = 500;
-        bool enableRawFileWrite = false;
+        bool enableRawFileWrite = false; // 实时路径默认不在采集循环里同步写 raw
         size_t asyncQueueDepth = 1024;
         size_t writerThreadsPerShard = 1;
         bool useSpillToDisk = true;
@@ -92,7 +92,7 @@ namespace openpni::distributed::app
     struct BridgeSection
     {
         bool enabled = true;
-        size_t leaseQueueCapacity = 2;
+        size_t leaseQueueCapacity = 4; // 在途段数；lease*时间片*线速须 < maxBufferSize
         bool blockWhenQueueFull = true;
         uint64_t queueFullWarnEvery = 5000;
         uint16_t inputChannelCount = 4;
@@ -132,7 +132,7 @@ namespace openpni::distributed::app
         uint32_t shutdownGraceMs = 1000;
         bool enableCpuAffinity = false;
         std::vector<uint16_t> cpuAffinityCores;
-        bool strictBindIpsOwnershipCheck = true;
+        bool strictBindIpsOwnershipCheck = false; // vfio 后内核无该 IP；默认未命中只 WARNING
         bool strictNumaTopologyCheck = false;
         bool requireBindIpsSingleNuma = true;
         bool requireCpuAffinityOnNuma = false;

@@ -1,9 +1,9 @@
 # RDMA 多机实验
 
 本阶段跨机热路径是 **16 字节 packed singles + RoCE**，不是 raw UDP。  
-Coin 进程只做符合；worker 仍是 `app_acq_r2s_node`（采集预留 + R2S + RDMA 发送），**不要**再拆独立 singles 进程。
+Coin 进程只做符合；worker 仍是 `app_acq_r2s_node`（采集 + R2S + RDMA 发送），**不要**再拆独立 singles 进程。
 
-采集收发包/落盘（阶段 1）不在本目录。本目录覆盖通路、正确性、回放、接收稳定性与符合极限（阶段 2/3），共用同一条 `worker → RoCE → coin`。
+本目录覆盖通路、正确性、回放、接收稳定性与符合极限（阶段 2/3），共用同一条 `worker → RoCE → coin`。真实 NIC 采集（`source.type=acquisition`）走 AcquisitionMaster + DPDKNew，步骤见 [DPDK采集配置与使用.md](DPDK采集配置与使用.md) 与 [采集到R2S](../接口说明/通路/采集到R2S.md)。
 
 进程测试（握手/PAUSE、不替代跨机 soak）见 [测试/README.md](../测试/README.md)。状态行判读见 [状态机与调试.md](状态机与调试.md)。
 
@@ -12,9 +12,9 @@ Coin 进程只做符合；worker 仍是 `app_acq_r2s_node`（采集预留 + R2S 
 | 机器 | 进程 | 职责 |
 |------|------|------|
 | Coin | `app_coin_master` | Register / OpenDataPlane / Start / Drain；RDMA recv + 对齐 + 符合 |
-| Worker | `app_acq_r2s_node` | `source.type=synthetic` 或 `lsingle_replay`；握手后再发数 |
+| Worker | `app_acq_r2s_node` | 本目录剖面用 `synthetic` 或 `lsingle_replay`（须显式写出）；握手后再发数 |
 
-采集 `source.type=acquisition` 本阶段只留 `StubRawIngress`，不接 AcquisitionMaster。
+`source.type=acquisition`（JSON 缺省）是真实采集路径，接 AcquisitionMaster；本目录的 RDMA 剖面仍显式写 `synthetic` / `lsingle_replay`。
 
 ## 握手顺序
 

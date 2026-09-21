@@ -15,7 +15,7 @@ namespace openpni::distributed::acquisition
 
     /**
      * Reserved raw-ingress slot for the worker app.
-     * Real AcquisitionGrpcNode will implement this later; StubRawIngress is a no-op.
+     * Test-only no-op. Production acquisition uses AcquisitionGrpcNode.
      */
     class IRawIngress
     {

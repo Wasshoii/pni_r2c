@@ -189,7 +189,7 @@ sudo dpdk-devbind.py --status
 
 1. 启动 `app_coin_master`。
 2. 启动一个或多个 `app_acq_r2s_node`。
-3. 最后启动 `app_udp_raw_replayer` 回放 raw 文件发包。
+3. 最后启动 `tool_udp_raw_replayer`（历史上常写成 `app_udp_raw_replayer`）回放已有 `.raw` 文件。这是**内核 UDP**，只能打到仍在内核驱动上的口；网卡绑了 vfio 后发不进去。DPDK 性能测试的发包是另一条路：TX 机 `tool_dpdk_tx_replayer` **现场填字节组包**，不读 raw，见 §9.3。
 
 示例（复用现有 raw 回放参数风格）：
 
@@ -389,7 +389,7 @@ cmake --build --preset build-tools --target tool_dpdk_tx_replayer
 
 产物：`bin/tools/tool_dpdk_tx_replayer`。
 
-功能：DPDK 口发送固定 UDP 负载；按 channel 映射 `source-port-base` / `destination-port-base`；`--pps` 限速或 `0` 满速。
+功能：在 DPDK 口上**现场组包**发送 UDP，按 channel 轮转 `source-port-base+i` / `destination-port-base+i`；`--pps` 限速或 `0` 满速。载荷是 `memset` 填的定长字节（默认 512B，填充值 = 通道号），**不读 `.raw` 文件**。名字里的 replayer 只表示“按探测器四元组格式发包”，不是 raw 回放。真机 `.raw` 回放走内核工具 `tool_udp_raw_replayer`（§4.4），进不了已绑 vfio 的口。
 
 ```bash
 ./bin/tools/tool_dpdk_tx_replayer --help
@@ -439,11 +439,12 @@ cmake --build --preset build-tools --target tool_dpdk_tx_replayer
 约束语义：
 
 1. `enableCpuAffinity=true`：节点进程启动时执行 `sched_setaffinity`。
-2. `strictBindIpsOwnershipCheck=true`：配置下发的 `dpdkBindIps` 必须命中本机网卡 IPv4，否则配置失败。
-3. `strictNumaTopologyCheck=true`：启用 NUMA 拓扑校验。
-4. `requireBindIpsSingleNuma=true`：要求所有 `bind_ips` 落在同一 NUMA 节点。
-5. `requireCpuAffinityOnNuma=true`：要求 `cpuAffinityCores` 与 `bind_ips`（或 `expectedNumaNode`）NUMA 一致。
-6. `expectedNumaNode>=0`：显式指定目标 NUMA 节点；为 `-1` 表示不强制指定。
+2. `strictBindIpsOwnershipCheck` **默认 false**：`dpdkBindIps` 未出现在内核网卡 IPv4 时只 WARNING（vfio 后内核没有该 IP）。设 `true` 则配置失败，给 Socket / 未绑 vfio 排查用。
+3. Configure 时若已设 `cpuAffinityCores`，核数必须 ≥ `1 + 2 × rx_rings_per_port × bind_ips.size()`（main + 每 queue 一对 RX/Copy），不够则配置失败，避免 EAL 起一半。
+4. `strictNumaTopologyCheck=true`：启用 NUMA 拓扑校验。
+5. `requireBindIpsSingleNuma=true`：要求所有 `bind_ips` 落在同一 NUMA 节点。
+6. `requireCpuAffinityOnNuma=true`：要求 `cpuAffinityCores` 与 `bind_ips`（或 `expectedNumaNode`）NUMA 一致。
+7. `expectedNumaNode>=0`：显式指定目标 NUMA 节点；为 `-1` 表示不强制指定。
 
 可行落地方案：
 
@@ -462,11 +463,88 @@ cmake --build --preset build-tools --target tool_dpdk_tx_replayer
 5. 默认 `dpdkRxRingsPerPort` 提到 4（依赖核数，先不上）。
 6. 加深 `leaseQueueCapacity` / `computePipelineDepth`（R2S 反压）。
 
-## 9. 后续双机测试（本轮不实现代码）
+## 9. 双机仅采集测试（已落地，不改生产 app）
 
-详细断言见 [采集到R2S](../接口说明/通路/采集到R2S.md)。摘要：
+生产 `app_acq_r2s_node` 仍走采集→R2S→RDMA，本测试不改它。采集节点不能单独 Start，测试目录自带精简 `AcquisitionMaster`。脚本与配置见 [tests/performance/dpdk_acq/README.md](../../tests/performance/dpdk_acq/README.md)。
 
-1. A 机 `dpdk_tx_replayer` 按探测器 IP/端口发包。
-2. B 机 `app_acq_r2s_node`，`ALGORITHM_TYPE_DPDK`，`CUDAHost` 池。
-3. 期望日志 `direct pinned H2D`，`unknown` 接近 0，缓冲不顶满。
-4. 扫 `timeSwitchBufferMs`（20–100ms，默认 50）与 `extra_eal_args` 绑核；多 queue 时确认 RSS 日志和各 queue 都有流量。
+这里的「双机」只指 **发包机（TX）** 和 **收包机（RX）**。主控与采集节点可以同在 RX 机上，不必再拆第三台控制机。TX 与 RX **不能共用同一块已绑 vfio 的网卡**。
+
+```mermaid
+flowchart LR
+  subgraph txHost [TX机_发包]
+    gen[tool_dpdk_tx_replayer]
+  end
+  subgraph rxHost [RX机_收包]
+    master[test_dpdk_acq_master]
+    node[test_dpdk_acq_node]
+    master -->|"Configure_Start"| node
+  end
+  gen -->|"以太网 UDP 四元组"| node
+```
+
+### 9.1 RX 机做什么
+
+RX 是被测采集栈所在的机器，对应真实系统里的采集节点网卡。它不产生探测器流量，只收包、按四元组映射通道、统计（可选写盘）。
+
+同一台 RX 上跑两个测试进程（贴近分布式控制面，但没有 coin / R2S / RDMA）：
+
+| 进程 | 作用 |
+|------|------|
+| `test_dpdk_acq_master` | 精简 AcquisitionMaster。节点连上后立刻 Distribute + `SendStart`（不绑符合 Start）。周期打印 `speed_mpps`、带宽、`total_rx_packets`、`unknown`、`imissed` / `ierrors`、buffer。 |
+| `test_dpdk_acq_node` | 精简 AcquisitionGrpcNode + `DPDKNew`。把 `bind_ips` 对应的口绑进 EAL，按任务里的 `detector_sources` / 端口基址建通道映射，循环 `Read()`。默认不写盘；`--write-raw` 才落 raw 分卷。 |
+
+`run_rx.sh` 会按 `--bind-ip` / `--source-ip` 渲染 JSON，先起 master 再起 node。`--bind-ip` 是本机 DPDK 逻辑 IP（也是包的目的 IP）；`--source-ip` 必须和 TX 填进 UDP 头的源 IP 一致，否则映射失败、`unknown` 上涨。
+
+`--profile 930` = 144 通道、1 个 RX ring；`9120_2ring` = 288 通道、2 ring。实验室用同一 `sourceIp` + `sourcePortBase+i` 模拟多通道；上 930 真机时在 JSON 里改成真实 `detectorSources[].sourceIp`，TX 机不再扮演探测器。
+
+### 9.2 TX 机做什么
+
+TX 扮演实验室里的「假探测器」：用第二块（或另一台机器上的）DPDK 口，把 UDP 包打到 RX 口的 MAC / IP / 端口。RX 已 START 后再发，否则启动窗口里的包会计入 `imissed` 或端到端丢失。
+
+`run_tx.sh` 调用 `bin/tools/tool_dpdk_tx_replayer`：
+
+- `--dst-mac`：RX 那块数据面网卡的链路 MAC（不是管理网 MAC）。
+- `--destination-ip`：与 RX `--bind-ip` 相同。
+- `--source-ip`：与 RX `--source-ip` 相同，写入 IPv4 源地址。
+- `--profile`：决定通道数（144 或 288），从而决定源/目的 UDP 端口个数。
+- `--pps`：目标包速，`0` 为该口能打的满速；`--duration-sec` 发多久。
+
+TX 只负责把包送上线，不跑采集、不连 gRPC。打完后日志里有 `[DPDK-TX] sent=` / `done, totalSent=`，拷到 RX 的 `tests/performance/dpdk_acq/logs/` 后用 `summarize_logs.sh` 和 RX 的 `total_rx_packets` 对表。
+
+### 9.3 性能测试的包从哪来：自动生成，不回放 raw
+
+**本性能测试不读任何 `.raw` / ListMode 文件。** `tool_dpdk_tx_replayer` 在内存里组以太网帧：
+
+1. 以太头：源 MAC = TX 口 MAC，目的 MAC = `--dst-mac`。
+2. IPv4/UDP：源/目的 IP 与端口如上；通道 `i` 使用 `sourcePortBase+i`、`destinationPortBase+i`（默认 17100 / 18100），按包序号对通道数取模轮转。
+3. 载荷：定长（`run_tx.sh` 默认 `--payload-size 512`），`memset` 成单字节 `通道号 & 0xFF`，没有晶体能量、时间戳等真实探测器内容。
+
+这样测的是 NIC → DPDKNew 的收包、四元组映射和环缓冲，不是解码正确性。载荷填什么几乎不影响 pps；通道数、包长、RSS ring 数和绑核才影响吞吐。`unknown` 只说明四元组或 `min_packet_size` 对不上，不说明「内容不像 raw」。
+
+另外两条路径不要和本测试混用：
+
+| 场景 | 发包端 | 数据来源 | 能否进 vfio 口 |
+|------|--------|----------|----------------|
+| 仅采集性能测试（本节） | `tool_dpdk_tx_replayer` | 运行时自动填充的假 UDP | 能（DPDK 口对 DPDK 口） |
+| 内核 UDP 回放（§4.4） | `tool_udp_raw_replayer` | 已有 `.raw` 分卷按通道重放 | 不能；内核套接字进不了已绑 vfio 的口 |
+| 930 真机 | 探测器电子学 | 现场真实事件 | 能；RX 用测试节点，JSON 填真实 `detectorSources`，TX 机不发包 |
+
+930 若要在测试节点上存盘：RX 加 `--write-raw`。写盘不当 144/288 通道吞吐门槛。真机实验验证的是分卷出现、包 `channel` 落在 `0..143`，而不是 TX 合成载荷的内容。
+
+### 9.4 命令
+
+RX 机：
+
+```bash
+bash tests/performance/dpdk_acq/run_rx.sh --bind-ip 10.10.1.20 --source-ip 10.10.1.10 --profile 930 --duration-sec 20
+```
+
+TX 机（RX 已 START 后再发）：
+
+```bash
+bash tests/performance/dpdk_acq/run_tx.sh --dst-mac aa:bb:cc:dd:ee:ff --destination-ip 10.10.1.20 --source-ip 10.10.1.10 --profile 930 --pps 500000 --duration-sec 10
+```
+
+统计：master / node 日志里的 `speed_mpps`、`unknown`、`imissed`；端到端丢包率 `(tx_sent - total_rx_packets) / tx_sent`。通过标准（无硬阈值）：`unknown` 相对 sent 可忽略；把 `imissed` 与端到端 loss 写入报告；`buffer_used` 不顶满。
+
+带 R2S/H2D 的双机断言仍见 [采集到R2S](../接口说明/通路/采集到R2S.md)，本目录测试不跑那条路径。

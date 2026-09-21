@@ -13,6 +13,7 @@ option(R2C_BUILD_TEST_BASIC "Build mock clock-sync test" ON)
 option(R2C_BUILD_TEST_STREAMING "Build streaming coincidence test (requires libpni, nvcc)" OFF)
 option(R2C_BUILD_TEST_LOCAL_GRPC_COIN "Build local gRPC coin receiver test (requires libpni, tbb, nvcc)" OFF)
 option(R2C_BUILD_TEST_ACQ_CONTROL_INIT "Build acquisition control init test (requires libpni, tbb)" OFF)
+option(R2C_BUILD_TEST_DPDK_ACQ_PERF "Build DPDK-only acquisition dual-machine performance tests (requires libpni, libdpdk, tbb)" OFF)
 
 # - cuda (nvcc + libpni + tbb + openmp)
 option(R2C_BUILD_TEST_PNI_R2C "Build PNI R2C test (requires libpni, nvcc, tbb)" OFF)
@@ -927,7 +928,7 @@ if(R2C_BUILD_TEST_STREAMING OR R2C_BUILD_TEST_LOCAL_GRPC_COIN OR R2C_BUILD_APP_C
   endif()
 endif()
 
-if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE)
+if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE OR R2C_BUILD_TEST_DPDK_ACQ_PERF)
   r2c_require_libpni()
   find_library(R2C_TBB_LIBRARY NAMES tbb REQUIRED)
   find_package(OpenMP REQUIRED)
@@ -1058,6 +1059,75 @@ if(R2C_BUILD_TEST_ACQ_CONTROL_INIT OR R2C_BUILD_TEST_BDM50100_ONLINE_PIPELINE)
         ${R2C_TBB_LIBRARY}
         dl
     )
+  endif()
+
+  if(R2C_BUILD_TEST_DPDK_ACQ_PERF)
+    pkg_check_modules(R2C_DPDK QUIET libdpdk)
+    if(NOT R2C_DPDK_FOUND)
+      message(WARNING "R2C_BUILD_TEST_DPDK_ACQ_PERF=ON but libdpdk was not found; skip test_dpdk_acq_*")
+    else()
+      add_executable(test_dpdk_acq_master
+        tests/performance/dpdk_acq/test_dpdk_acq_master.cpp
+        tests/performance/dpdk_acq/DpdkAcqTestConfig.cpp
+        $<TARGET_OBJECTS:r2c_grpc_service_acq_master_objs>
+        $<TARGET_OBJECTS:r2c_proto_objs>
+      )
+      target_include_directories(test_dpdk_acq_master
+        PRIVATE
+          "${CMAKE_CURRENT_SOURCE_DIR}"
+          "${R2C_PROTO_GEN_ROOT}"
+          "${R2C_PROTO_GEN_DIR}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include"
+          "${CMAKE_CURRENT_SOURCE_DIR}/src"
+      )
+      target_compile_options(test_dpdk_acq_master PRIVATE -O3 -march=native -fopenmp)
+      target_link_libraries(test_dpdk_acq_master
+        PRIVATE
+          PkgConfig::R2C_PNI
+          PkgConfig::R2C_GRPC
+          PkgConfig::R2C_IBVERBS
+          PkgConfig::R2C_GLOG
+          OpenMP::OpenMP_CXX
+          ${R2C_TBB_LIBRARY}
+          dl
+      )
+
+      add_executable(test_dpdk_acq_node
+        tests/performance/dpdk_acq/test_dpdk_acq_node.cpp
+        tests/performance/dpdk_acq/DpdkAcqTestConfig.cpp
+        $<TARGET_OBJECTS:r2c_core_acq_objs>
+        $<TARGET_OBJECTS:r2c_grpc_node_acq_objs>
+        $<TARGET_OBJECTS:r2c_proto_objs>
+      )
+      target_include_directories(test_dpdk_acq_node
+        PRIVATE
+          "${CMAKE_CURRENT_SOURCE_DIR}"
+          "${R2C_PROTO_GEN_ROOT}"
+          "${R2C_PROTO_GEN_DIR}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include_override"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include"
+          "${CMAKE_CURRENT_SOURCE_DIR}/src"
+      )
+      target_compile_options(test_dpdk_acq_node PRIVATE -O3 -march=native -fopenmp)
+      target_link_libraries(test_dpdk_acq_node
+        PRIVATE
+          PkgConfig::R2C_PNI
+          PkgConfig::R2C_GRPC
+          PkgConfig::R2C_IBVERBS
+          PkgConfig::R2C_GLOG
+          OpenMP::OpenMP_CXX
+          ${R2C_TBB_LIBRARY}
+          dl
+      )
+      target_link_directories(test_dpdk_acq_node PRIVATE ${R2C_DPDK_LIBRARY_DIRS})
+      target_link_options(test_dpdk_acq_node PRIVATE -Wl,--no-as-needed)
+      target_link_libraries(test_dpdk_acq_node
+        PRIVATE
+          PkgConfig::R2C_PNI
+          ${R2C_DPDK_LINK_LIBRARIES}
+      )
+    endif()
   endif()
 
 endif()
@@ -1709,6 +1779,8 @@ r2c_set_output_dir(test_app_config_parse test)
 r2c_set_output_dir(test_app_inprocess_smoke test)
 r2c_set_output_dir(test_app_time_shard_smoke test)
 r2c_set_output_dir(test_acq_control_init test)
+r2c_set_output_dir(test_dpdk_acq_master test)
+r2c_set_output_dir(test_dpdk_acq_node test)
 r2c_set_output_dir(test_pni_r2s_offline test)
 r2c_set_output_dir(test_pni_coin_offline test)
 r2c_set_output_dir(test_coin_carry_boundary test)
@@ -1760,6 +1832,8 @@ if(BUILD_TESTING AND TARGET test_app_time_shard_smoke)
   set_tests_properties(test_app_time_shard_smoke PROPERTIES TIMEOUT 180)
 endif()
 r2c_register_test(test_acq_control_init pni correctness)
+r2c_register_test(test_dpdk_acq_master pni performance manual)
+r2c_register_test(test_dpdk_acq_node pni performance manual)
 
 r2c_register_test(test_pni_r2s_offline cuda manual correctness)
 r2c_register_test(test_pni_coin_offline cuda manual correctness)

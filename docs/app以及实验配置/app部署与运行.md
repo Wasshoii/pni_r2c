@@ -5,9 +5,9 @@
 app 目录包含两个当前实验用的可执行程序：
 
 1. `bin/app/app_acq_r2s_node`（worker）
-   - 同一进程：采集预留（`IRawIngress` stub）+ R2S + CoincidenceClient RDMA 发送
-   - 本阶段数据源：`synthetic` 或 `lsingle_replay`；`acquisition` 未实现
-   - 启动顺序：Coincidence 握手（Register → OpenDataPlane → Start）后再发数
+   - 同一进程：采集（`AcquisitionGrpcNode`）+ R2S + CoincidenceClient RDMA 发送
+   - 默认数据源：`source.type=acquisition`（省略 `source` 即真实采集，连 AcquisitionMaster，走 gRPC + DPDKNew/Socket）
+   - `synthetic` / `lsingle_replay` 须在 JSON 里显式写出；握手后再发数
 
 2. `bin/app/app_coin_master`
    - 符合 + 可选 `AcquisitionMaster`（`acquisitionControl.enabled=true` 时在 `masterAddress` 上启动采集控制）
@@ -25,8 +25,8 @@ app 目录包含两个当前实验用的可执行程序：
    - `app/config/rdma_cluster/*.json`
    - 启动脚本：`app/experiments/rdma_cluster/`
 
-3. DPDK 无数据冒烟（采集预留）
-   - `app/config/experiments/no_data_auto/*.json`
+3. DPDK 无数据冒烟（真实采集路径）
+   - `app/config/experiments/no_data_auto/*.json`（worker 写明 `"source": { "type": "acquisition" }`）
 
 ## 编译
 

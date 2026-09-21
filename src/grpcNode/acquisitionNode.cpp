@@ -146,7 +146,7 @@ namespace openpni::distributed::grpcnode
 
             void ReleaseRawData(uint64_t packetCount) override
             {
-                m_node->MakeRawDataReleaseFn()(packetCount);
+                m_node->ReleasePackets(packetCount);
             }
 
         private:
@@ -292,6 +292,14 @@ namespace openpni::distributed::grpcnode
         acqproto::NodeState state() const
         {
             return state_.load(std::memory_order_acquire);
+        }
+
+        acqproto::NodeStatus lastStatus() const
+        {
+            std::lock_guard<std::mutex> lock(statusMutex_);
+            acqproto::NodeStatus copy = lastStatus_;
+            copy.set_state(state_.load(std::memory_order_acquire));
+            return copy;
         }
 
     private:
@@ -511,6 +519,25 @@ namespace openpni::distributed::grpcnode
                     return false;
                 }
                 LOG(WARNING) << "[AcquisitionNode/DPDK] " << oss.str();
+            }
+
+            if (!init_.cpuAffinityCores.empty())
+            {
+                const size_t rings = config.dpdk.rx_rings_per_port > 0
+                                         ? static_cast<size_t>(config.dpdk.rx_rings_per_port)
+                                         : 1;
+                const size_t ports = config.dpdk.bind_ips.size();
+                const size_t required = 1 + 2 * rings * ports;
+                if (init_.cpuAffinityCores.size() < required)
+                {
+                    std::ostringstream oss;
+                    oss << "cpuAffinityCores has " << init_.cpuAffinityCores.size()
+                        << " cores, need at least " << required
+                        << " (1 main + 2 * rx_rings_per_port * bind_ips.size(); rings="
+                        << rings << ", ports=" << ports << ")";
+                    setError(oss.str());
+                    return false;
+                }
             }
 
             if (!init_.strictNumaTopologyCheck)
@@ -1098,6 +1125,8 @@ namespace openpni::distributed::grpcnode
                 status.set_total_rx_packets(lastStatus_.total_rx_packets());
                 status.set_total_rx_bytes(lastStatus_.total_rx_bytes());
                 status.set_error_packets(lastStatus_.error_packets());
+                status.set_imissed_packets(lastStatus_.imissed_packets());
+                status.set_ierrors_packets(lastStatus_.ierrors_packets());
             }
 
             {
@@ -1233,6 +1262,11 @@ namespace openpni::distributed::grpcnode
     acqproto::NodeState AcquisitionGrpcNode::state() const
     {
         return m_impl->state();
+    }
+
+    acqproto::NodeStatus AcquisitionGrpcNode::lastStatus() const
+    {
+        return m_impl->lastStatus();
     }
 
 } // namespace openpni::distributed::grpcnode

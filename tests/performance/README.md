@@ -9,5 +9,6 @@
 | 目标 | 用途 |
 |------|------|
 | `test_r2s_50100_single_ring` | 50100 单环 R2S 吞吐（生产 `processSegment` 多 GPU；预读真实 segment；callback 做类 RDMA 填槽） |
+| `test_dpdk_acq_master` / `test_dpdk_acq_node` | 双机 DPDK 仅采集（自带精简 AcquisitionMaster，不跑 R2S/RDMA）。见 [dpdk_acq/README.md](dpdk_acq/README.md) |
 
 跨机 RoCE soak 仍走 `app/experiments/rdma_cluster/`，见 `docs/app以及实验配置/RDMA多机实验.md`。

@@ -22,7 +22,7 @@
 - txSlotCount: 本地 TX 槽数（0 用 RdmaWriteSender 默认 **2**）。device D2H 管线深等于该槽数。上机可 A/B `2` vs `4`；若 `waitForCredit` 变长则改回 2。不要把默认改成几十槽。TX 不用 hugepage。slotCount / slotBytes: 向 coin 请求的接收环尺寸（0 表示服务端默认，当前服务端忽略请求值）。
 
 ### source
-- type: `synthetic` | `lsingle_replay` | `acquisition`（本阶段 acquisition 只留 StubRawIngress）。
+- type: `synthetic` | `lsingle_replay` | `acquisition`。**缺省为 `acquisition`**（省略 `source` 即真实采集：连 `AcquisitionMaster`，走 gRPC + DPDKNew/Socket）。`synthetic` / `lsingle_replay` 必须在 JSON 里显式写出。
 - mode: `pairs`（默认，有限 prompt/delay 对）| `stream`（按时长边生成边发；必须 `singlesPerSec>0` 且 `runSeconds>0`）。
 - lsinglePath: replay 时的 `.lsingle` 文件或目录（按 segment 发送，不一次读入全部）。
 - promptPairs / delayPairs / delayTimePs: synthetic 配对公式；`stream` 下时间戳按同一公式递增。
@@ -34,9 +34,9 @@
 - peerNodeId / localChannel / peerChannel: 双节点 synthetic 配对。
 
 ### rawIngress
-- enabled: 仅 `source.type=acquisition` 时有意义。本阶段启动 stub、不产生 raw。
+- enabled: 采集模式下会打日志并忽略，不当成数据源。真实 raw 来自 `AcquisitionMaster` 下发的任务。
 
-### acqNode（采集预留，synthetic/replay 不用）
+### acqNode（`source.type=acquisition` 使用；synthetic/replay 不用）
 - masterAddress: 采集控制主控地址（gRPC）。
 - nodeId: 采集节点 ID（用于日志和业务标识）。
 - nodeAddress: 节点对外上报码/对齐使用的地址。
@@ -48,12 +48,12 @@
 - maxFileSizeMb: 单文件分卷大小阈值（MB）。
 - reservedStorageGiB: 磁盘保留空间（GiB）。
 - statusIntervalMs: 状态上报间隔（毫秒）。
-- enableRawFileWrite: 是否写 raw 文件。false 时仅走内存回调链路。
+- enableRawFileWrite: 是否写 raw 文件。**默认 false**（实时路径只走内存回调；同步落盘会拖死热路径）。
 - asyncQueueDepth: 异步队列深度（分盘写入时每节点总队列深度）。
 - writerThreadsPerShard: 每个分片的写线程数。
 - useSpillToDisk: 队列满时是否允许落盘溢写（true 时不阻塞）。
 - failOnQueueFull: 队列满时是否阻塞/报错（true 时优先保证一致性）。
-- fsyncEachSegment: 每段写入后是否 fsync。
+- fsyncEachSegment: 每段写入后是否 fsync。仅在真正写 raw 时有意义。
 
 ### r2s
 - calibrationDir: 标定文件目录。
@@ -65,9 +65,7 @@
 
 ### bridge
 - enabled: 是否启用 RawData 到 R2S 的异步桥接。
-- queueCapacity: 队列容量（slot 数）。
-- reservePacketsPerSlot: 每个 slot 预留包数。
-- reserveBytesPerSlot: 每个 slot 预留字节数。
+- leaseQueueCapacity: 在途段数，**默认 4**。在途字节约 `lease × 时间片 × 线速`，必须小于采集 `maxBufferSize`（默认 4GiB）。8 卡管线 2 段太浅；再深容易超过默认池。不按 GPU 数自动推。兼容旧字段 `queueCapacity`（仅当未显式写 `leaseQueueCapacity` 时生效）。
 - blockWhenQueueFull: 队列满时是否阻塞写入。
 - queueFullWarnEvery: 队列满警告间隔。
 - inputChannelCount: 进入桥接的通道数。
@@ -93,8 +91,8 @@
 ### runtime
 - shutdownGraceMs: 退出前等待时间。
 - enableCpuAffinity: 是否绑定 CPU 亲和性。
-- cpuAffinityCores: 绑定的 CPU core 列表。
-- strictBindIpsOwnershipCheck: 严格检查 DPDK bind IP。
+- cpuAffinityCores: 绑定的 CPU core 列表。Configure DPDK 时若已设置，核数必须 ≥ `1 + 2 × rx_rings_per_port × bind_ips.size()`（main + 每 queue 一对 RX/Copy），不够则配置失败。
+- strictBindIpsOwnershipCheck: 严格检查 DPDK bind IP 是否出现在内核 `getifaddrs`。**默认 false**（未命中只 WARNING，vfio 后内核看不到该 IP）。`true` 时硬失败，给 Socket / 未绑 vfio 排查用。
 - strictNumaTopologyCheck: 严格 NUMA 拓扑检查。
 - requireBindIpsSingleNuma: 要求 bind IP 在单 NUMA。
 - requireCpuAffinityOnNuma: 要求 CPU 亲和性与 NUMA 对齐。

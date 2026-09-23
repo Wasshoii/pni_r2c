@@ -56,7 +56,7 @@ K=1 时时间分片层为空操作，行为与今日单机兼容。
 
 **只按固定时间片切换** 更接近 Flink 滚动窗 / correlator dump，适合容量规划与下游排序；单独使用会在注射峰值丢数、空白扫描空转。
 
-本系统单机路径里已经是混合：水位线管正确性，`minSegmentSingles` 攒批，`bufferHighWaterRatio` / `maxProcessLatencyMs` 管实时。时间分片把同一套语义抬到整机租约。
+本系统单机路径里已经是混合：水位线管正确性，`minSegmentSingles` 攒批，`bufferHighWaterRatio` / `maxProcessLatencyMs` 管实时。时间分片把同一套语义抬到整机租约。节点内重叠窗、多机按时间片轮转，以及片长与节点数的调度关系见 [TIME_SHARD_THEORY.md](TIME_SHARD_THEORY.md)。
 
 ### 3.2 推荐：事件时间租约 + 高压抢占
 

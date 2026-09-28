@@ -72,11 +72,16 @@ namespace
         {
             return r2s::DetectorType::BDM2;
         }
-        if (value == "BDM50100")
+        if (value == "BDM50100" || value == "BDM50100_9120")
         {
             return r2s::DetectorType::BDM50100;
         }
         return r2s::DetectorType::Unknown;
+    }
+
+    bool isBdm50100_9120(const std::string &detectorType)
+    {
+        return detectorType == "BDM50100_9120";
     }
 
     const char *sourceStateName(openpni::distributed::coincidence::SourceState s)
@@ -534,8 +539,17 @@ int main(int argc, char **argv)
     coinClientConfig.nodeAddress = cfg.coinClient.nodeAddress;
     coinClientConfig.channelCount = cfg.coinClient.channelCount;
     coinClientConfig.detectorType = cfg.coinClient.detectorType;
-    coinClientConfig.remapLocalToGlobalChannels = cfg.coinClient.remapLocalToGlobalChannels;
-    coinClientConfig.globalChannelOffset = cfg.coinClient.globalChannelOffset;
+    const bool use9120FullChannels = isBdm50100_9120(cfg.coinClient.detectorType);
+    if (use9120FullChannels)
+    {
+        coinClientConfig.remapLocalToGlobalChannels = false;
+        coinClientConfig.globalChannelOffset = 0;
+    }
+    else
+    {
+        coinClientConfig.remapLocalToGlobalChannels = cfg.coinClient.remapLocalToGlobalChannels;
+        coinClientConfig.globalChannelOffset = cfg.coinClient.globalChannelOffset;
+    }
     coinClientConfig.crystalsPerChannel = cfg.coinClient.crystalsPerChannel;
     coinClientConfig.maxPendingChunks = cfg.coinClient.maxPendingChunks;
     coinClientConfig.batchSize = cfg.coinClient.batchSize;
@@ -675,7 +689,20 @@ int main(int argc, char **argv)
 
     const auto detectorType = parseDetectorType(cfg.coinClient.detectorType);
     r2s::R2SProcessConfig r2sConfig;
-    switch (detectorType)
+    if (use9120FullChannels)
+    {
+        // 包里的 channel 已是整机 0..575。四个校正目录铺满 576 路，不再收成局部号。
+        const std::vector<std::string> calibrationDirs(
+            4, cfg.r2s.calibrationDir);
+        r2sConfig = r2s::createBDM50100_9120Config(
+            "",
+            cfg.r2s.resultDir,
+            calibrationDirs,
+            cfg.acqNode.nodeId,
+            {});
+        std::cout << "[AcqR2SNode] 9120 full-channel R2S, channelIndices empty, remap off" << std::endl;
+    }
+    else switch (detectorType)
     {
     case r2s::DetectorType::BDM2:
         r2sConfig = r2s::createBDM2Config(

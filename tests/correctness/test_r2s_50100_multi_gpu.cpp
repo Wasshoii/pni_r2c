@@ -84,22 +84,31 @@ namespace
         return false;
     }
 
-    std::vector<uint16_t> makeNode0ChannelIndices()
+    std::vector<uint16_t> makeChannelRange(uint16_t begin, uint16_t end)
     {
         std::vector<uint16_t> channel_indices;
-        channel_indices.reserve(288);
-        for (uint16_t ch = 0; ch < 288; ++ch)
+        channel_indices.reserve(static_cast<size_t>(end - begin));
+        for (uint16_t ch = begin; ch < end; ++ch)
         {
             channel_indices.push_back(ch);
         }
         return channel_indices;
     }
 
-    bool ensureMergedNode0Raw(bool allow_merge)
+    std::vector<uint16_t> makeNode0ChannelIndices()
+    {
+        return makeChannelRange(0, 288);
+    }
+
+    bool ensureMergedNodeRaw(
+        int ring_a,
+        int ring_b,
+        const std::string &node_dir_name,
+        bool allow_merge)
     {
         namespace fs = std::filesystem;
 
-        const std::string merged_dir = out_path + "/pni_raw_node0";
+        const std::string merged_dir = out_path + "/" + node_dir_name;
         const auto existing = openpni::distributed::r2s::collectRawDataFiles(merged_dir);
         if (!existing.empty())
         {
@@ -114,20 +123,21 @@ namespace
             return false;
         }
 
-        const std::string ring0_dir = path_pre + "/pni_raw_ring0";
-        const std::string ring1_dir = path_pre + "/pni_raw_ring1";
-        if (!fs::exists(ring0_dir) || !fs::is_directory(ring0_dir) ||
-            !fs::exists(ring1_dir) || !fs::is_directory(ring1_dir))
+        const std::string ring_a_dir = path_pre + "/pni_raw_ring" + std::to_string(ring_a);
+        const std::string ring_b_dir = path_pre + "/pni_raw_ring" + std::to_string(ring_b);
+        if (!fs::exists(ring_a_dir) || !fs::is_directory(ring_a_dir) ||
+            !fs::exists(ring_b_dir) || !fs::is_directory(ring_b_dir))
         {
             std::cerr << "Merged raw not found and ring dirs missing:\n"
-                      << "  " << ring0_dir << '\n'
-                      << "  " << ring1_dir << '\n';
+                      << "  " << ring_a_dir << '\n'
+                      << "  " << ring_b_dir << '\n';
             return false;
         }
 
-        std::cout << "Merging ring0+ring1 into " << merged_dir << " ...\n";
+        std::cout << "Merging ring" << ring_a << "+ring" << ring_b
+                  << " into " << merged_dir << " ...\n";
         const bool ok = merge_rawdata_dirs_by_clock(
-            {ring0_dir, ring1_dir},
+            {ring_a_dir, ring_b_dir},
             merged_dir,
             576,
             "pniRaw-",
@@ -141,6 +151,11 @@ namespace
         }
 
         return !openpni::distributed::r2s::collectRawDataFiles(merged_dir).empty();
+    }
+
+    bool ensureMergedNode0Raw(bool allow_merge)
+    {
+        return ensureMergedNodeRaw(0, 1, "pni_raw_node0", allow_merge);
     }
 
     openpni::distributed::r2s::R2SProcessConfig make9120Node0Config(bool use_legacy_single_gpu)
@@ -228,6 +243,170 @@ namespace
         }
 
         return processor.finalize();
+    }
+
+    openpni::distributed::r2s::R2SProcessConfig make9120CompareConfig(
+        const std::vector<uint16_t> &channel_indices,
+        bool full_instrument)
+    {
+        const std::vector<std::string> cali_dirs = full_instrument
+                                                       ? std::vector<std::string>{cali_path, cali_path, cali_path, cali_path}
+                                                       : std::vector<std::string>{cali_path, cali_path};
+        auto config = openpni::distributed::r2s::createBDM50100_9120Config(
+            "",
+            out_path + "/pni_singles_full_channel_test",
+            cali_dirs,
+            full_instrument ? "singles_9120_full_channel" : "singles_9120_subset_channel",
+            full_instrument ? std::vector<uint16_t>{} : channel_indices,
+            4);
+
+        config.saveData2SingleFile = false;
+        config.asyncFileWrite = false;
+        config.enableMultiGpu = true;
+        config.useEnergyCut = true;
+        config.energyCutLow = 421000.0f;
+        config.energyCutHigh = 1000000.0f;
+        config.progressLogInterval = 0;
+        return config;
+    }
+
+    bool run9120WithConfig(
+        const openpni::distributed::r2s::R2SProcessConfig &config,
+        const std::string &raw_file_path,
+        uint32_t max_segments,
+        std::vector<openpni::Single> &out_singles)
+    {
+        out_singles.clear();
+
+        openpni::distributed::coreio::RawDataFileReader raw_file_reader;
+        try
+        {
+            raw_file_reader.Open(raw_file_path);
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "Failed to open raw file: " << raw_file_path
+                      << " error=" << e.what() << '\n';
+            return false;
+        }
+
+        const auto channel_num = raw_file_reader.Info().channelNum;
+        const uint32_t segment_num = raw_file_reader.SegmentNum();
+        const uint32_t segments_to_process = max_segments == 0
+                                                 ? segment_num
+                                                 : std::min(max_segments, segment_num);
+
+        auto runtime_config = config;
+        runtime_config.onSinglesSpanReady = [&](std::span<const openpni::Single> singles,
+                                                uint64_t,
+                                                uint32_t) -> bool {
+            if (openpni::distributed::r2s::isDevicePointer(singles.data()))
+            {
+                const auto host_singles = openpni::distributed::r2s::materializeSinglesOnHost(singles);
+                out_singles.insert(out_singles.end(), host_singles.begin(), host_singles.end());
+            }
+            else
+            {
+                out_singles.insert(out_singles.end(), singles.begin(), singles.end());
+            }
+            return true;
+        };
+
+        openpni::distributed::r2s::R2SStreamProcessor processor(runtime_config);
+        if (!processor.initialize(static_cast<uint16_t>(channel_num)))
+        {
+            std::cerr << "Failed to initialize R2S processor (full_instrument="
+                      << (config.channelIndices.empty() ? "true" : "false") << ")\n";
+            return false;
+        }
+
+        for (uint32_t seg = 0; seg < segments_to_process; ++seg)
+        {
+            auto segment = raw_file_reader.ReadSegment(seg, seg + 1);
+            const auto view = segment.View();
+            if (!processor.processSegment(view))
+            {
+                std::cerr << "processSegment failed at segment " << seg << '\n';
+                return false;
+            }
+        }
+
+        return processor.finalize();
+    }
+
+    bool channelsStayInRange(
+        const std::vector<openpni::Single> &singles,
+        uint16_t begin,
+        uint16_t end)
+    {
+        for (const auto &single : singles)
+        {
+            if (single.channelIndex < begin || single.channelIndex >= end)
+            {
+                std::cerr << "channelIndex " << single.channelIndex
+                          << " outside [" << begin << ", " << end << ")\n";
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool compareSubsetWithFullInstrument(
+        const std::string &raw_file_path,
+        uint16_t channel_begin,
+        uint16_t channel_end,
+        uint32_t max_segments)
+    {
+        const auto channel_indices = makeChannelRange(channel_begin, channel_end);
+        std::cout << "\n========== Full-channel vs subset ["
+                  << channel_begin << ", " << channel_end << ") ==========\n";
+        std::cout << "Raw file: " << raw_file_path << '\n';
+
+        std::vector<openpni::Single> subset_singles;
+        std::vector<openpni::Single> full_singles;
+
+        if (!run9120WithConfig(
+                make9120CompareConfig(channel_indices, false),
+                raw_file_path,
+                max_segments,
+                subset_singles))
+        {
+            return false;
+        }
+        if (!run9120WithConfig(
+                make9120CompareConfig(channel_indices, true),
+                raw_file_path,
+                max_segments,
+                full_singles))
+        {
+            return false;
+        }
+
+        std::cout << "subset singles=" << subset_singles.size()
+                  << " full-channel singles=" << full_singles.size() << '\n';
+
+        if (!channelsStayInRange(full_singles, channel_begin, channel_end))
+        {
+            return false;
+        }
+        if (!compareSinglesHistograms(countSingles(subset_singles), countSingles(full_singles)))
+        {
+            return false;
+        }
+
+        std::cout << "Full-channel R2S matches subset remap for ["
+                  << channel_begin << ", " << channel_end << ")\n";
+        return true;
+    }
+
+    std::optional<std::string> firstRawFileIn(const std::string &dir)
+    {
+        const auto raw_files = openpni::distributed::r2s::collectRawDataFiles(dir);
+        if (raw_files.empty())
+        {
+            return std::nullopt;
+        }
+        return raw_files.front().path;
     }
 }
 
@@ -357,5 +536,28 @@ int main(int argc, char **argv)
     }
 
     std::cout << "BDM50100 9120 two-ring multi-GPU consistency test passed\n";
+
+    if (!compareSubsetWithFullInstrument(raw_file_path, 0, 288, max_segments))
+    {
+        return 1;
+    }
+
+    if (ensureMergedNodeRaw(2, 3, "pni_raw_node1", allow_merge))
+    {
+        const auto node1_raw = firstRawFileIn(out_path + "/pni_raw_node1");
+        if (!node1_raw)
+        {
+            std::cerr << "SKIP: no raw files in node1 dir after merge\n";
+        }
+        else if (!compareSubsetWithFullInstrument(*node1_raw, 288, 576, max_segments))
+        {
+            return 1;
+        }
+    }
+    else if (raw_file_override.empty())
+    {
+        std::cerr << "SKIP: node1 raw (channels 288..575) is not available\n";
+    }
+
     return 0;
 }

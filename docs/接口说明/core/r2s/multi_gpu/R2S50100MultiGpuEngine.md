@@ -18,6 +18,7 @@ BDM50100 的多 GPU 任务并行入口：把一段 `RawDataView` 提交给共享
 struct R2S50100MultiGpuEngineConfig {
   openpni::device::bdm50100_v2::BDM50100R2SParams r2s_params;
   std::vector<std::string> local_calib_files;
+  std::vector<uint16_t> channel_indices;
   std::vector<uint32_t> gpu_ids;
   uint32_t instance_per_gpu = 1;
   long double max_input_gibits = 0.0L;
@@ -27,7 +28,8 @@ struct R2S50100MultiGpuEngineConfig {
 };
 ```
 
-- `local_calib_files`：本节点要处理的通道校正，与 `R2SProcessConfig::channelIndices` 对齐。
+- `local_calib_files`：要加载的通道校正，顺序与 `channels_to_process` 一致。`channelIndices` 为空时这是整机 576 路。
+- `channel_indices`：传给 `SetChannelIndex`。全通道模式为全局号；子集模式为局部 `0..N-1`。
 - `gpu_ids` 空则由工厂填全部可见设备。
 - `instance_per_gpu`：每张卡上的 compute 实例数（SPSC worker 数 = `gpu_ids.size() * instance_per_gpu`）。
 - `max_input_gibits==0`：不为 singles 缓冲预留上限；`>0` 时按包长估算（policy 内保留，device `d_singles` 在 worker 上按实际条数 `Reserve`）。
@@ -66,10 +68,12 @@ size_t gpuCount() const;
 ```cpp
 R2S50100MultiGpuEngineConfig makeMultiGpuEngineConfig(
     const R2SProcessConfig &config,
-    const std::vector<uint16_t> &channels_to_process);
+    const std::vector<uint16_t> &channels_to_process,
+    bool keepGlobalChannelIndex);
 bool shouldUseMultiGpu50100(const R2SProcessConfig &config);
 ```
 
+- `keepGlobalChannelIndex`：为 true 时 `channel_indices` 用全局通道号（`channelIndices` 为空的全通道路径）。为 false 时用局部 `0..N-1`。
 - `shouldUseMultiGpu50100`：探测器为 BDM50100 且 `enableMultiGpu==true`。
 
 ## 计算缩放

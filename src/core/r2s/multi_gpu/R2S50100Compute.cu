@@ -25,6 +25,12 @@ R2S50100Compute::R2S50100Compute(const R2S50100ComputeConfig &config)
     }
 
     const int num_channels = static_cast<int>(config.local_calib_files.size());
+    if (!config.channel_indices.empty() &&
+        config.channel_indices.size() != config.local_calib_files.size())
+    {
+        throw std::invalid_argument(
+            "R2S50100Compute: channel_indices size must match local_calib_files");
+    }
 
     for (int c = 0; c < num_channels; ++c)
     {
@@ -38,9 +44,12 @@ R2S50100Compute::R2S50100Compute(const R2S50100ComputeConfig &config)
                 " channel " + std::to_string(c));
         }
 
-        // Kernel indexes caliViews via channelMap[packet.channel]. Packet channels must
-        // already be remapped to this local 0..N-1 (R2SStreamProcessor::fillEffectiveView).
-        gen->SetChannelIndex(static_cast<uint16_t>(c));
+        // channelMap[packet.channel] 取校正。全通道时 index 是全局号；
+        // 子集模式时 index 是局部 0..N-1，包通道已由 fillEffectiveView 收过。
+        const uint16_t channel_index = config.channel_indices.empty()
+                                           ? static_cast<uint16_t>(c)
+                                           : config.channel_indices[static_cast<size_t>(c)];
+        gen->SetChannelIndex(channel_index);
 
         if (!config.local_calib_files[static_cast<size_t>(c)].empty())
         {

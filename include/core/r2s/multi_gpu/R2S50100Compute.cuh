@@ -101,6 +101,9 @@ using IComputeR2S = ICompute<RawDataView, SinglesResult>;
 struct R2S50100ComputeConfig
 {
     std::vector<std::string> local_calib_files;
+    // 与 local_calib_files 等长。kernel 用 channelMap[packet.channel] 取校正。
+    // 全通道模式填全局号；子集模式填局部 0..N-1（包通道已由 fillEffectiveView 收过）。
+    std::vector<uint16_t> channel_indices;
     openpni::device::bdm50100_v2::BDM50100R2SParams r2s_params;
     int gpuId = 0;
 };

@@ -700,7 +700,8 @@ namespace openpni::distributed::r2s
      * @brief 创建 9120 处理配置
      *
      * channelNums 固定为整机通道数：48*3*instrumentRingCount（默认 576）。
-     * 本节点职责由 channelIndices 表达（例如 Node0: 0..287，Node1: 288..575）。
+     * channelIndices 为空时处理 [0, channelNums)，SetChannelIndex 使用全局号，包通道不再映射。
+     * 非空时仍把包通道收成局部 0..N-1（例如 Node0: 0..287，Node1: 288..575）。
      *
      * 校正目录 calibrationDirs：
      * - 若 size == instrumentRingCount：第 k 个目录对应环 k，空串表示该环不加载；

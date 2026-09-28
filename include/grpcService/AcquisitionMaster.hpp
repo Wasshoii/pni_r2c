@@ -99,6 +99,9 @@ namespace openpni::distributed::acquisition
 
         std::vector<AcquisitionControlServiceImpl::ConnectedNode> SnapshotNodes() const;
 
+        // 按全局通道表把通道切给各节点。channel_index 保持整机编号，不改成节点内 0..N-1。
+        std::vector<AcquisitionTask> BuildNodeTasks(const std::vector<std::string> &nodeIds) const;
+
     private:
         static std::vector<std::string> SortNodeIds(std::vector<std::string> nodeIds);
         static MasterCommand MakeConfigureCommand(const AcquisitionTask &task, const std::string &message);
@@ -107,8 +110,6 @@ namespace openpni::distributed::acquisition
         static MasterCommand MakeShutdownCommand(const std::string &reason);
         static uint32_t CheckedSteppedValue(uint32_t base, uint32_t stride, size_t index, const char *field);
         static AcquisitionTask BuildEffectiveGlobalTask(const AcquisitionTask &task);
-
-        std::vector<AcquisitionTask> BuildNodeTasks(const std::vector<std::string> &nodeIds) const;
 
         std::shared_ptr<AcquisitionControlServiceImpl> service_;
         std::unique_ptr<grpc::Server> server_;

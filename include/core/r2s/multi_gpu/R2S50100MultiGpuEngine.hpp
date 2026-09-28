@@ -29,6 +29,7 @@ struct R2S50100MultiGpuEngineConfig
 {
     openpni::device::bdm50100_v2::BDM50100R2SParams r2s_params;
     std::vector<std::string> local_calib_files;
+    std::vector<uint16_t> channel_indices;
     std::vector<uint32_t> gpu_ids;
     uint32_t instance_per_gpu = 1;
     long double max_input_gibits = 0.0L;
@@ -66,7 +67,8 @@ private:
 
 R2S50100MultiGpuEngineConfig makeMultiGpuEngineConfig(
     const R2SProcessConfig &config,
-    const std::vector<uint16_t> &channels_to_process);
+    const std::vector<uint16_t> &channels_to_process,
+    bool keepGlobalChannelIndex);
 
 bool shouldUseMultiGpu50100(const R2SProcessConfig &config);
 

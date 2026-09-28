@@ -90,7 +90,7 @@ public:
 };
 ```
 
-- `initialize`：按 `channelIndices` 建 **global↔local 通道表**，再创建 generator 或 50100 多 GPU 引擎，可选打开 `.lsingle` 输出。`channelIndices` 非空时，提交 GPU 前把 `packet.channel` 映到本地 `0..N-1`（与 `R2S50100Compute::SetChannelIndex` / libpni `channelMap` 一致）。未做 energy cut / 外部 sort 时，device span 上的 `Single.channelIndex` **保持本地编号**，由 `CoincidenceClient` 的 `globalChannelOffset` 在 D2H 后加回全局号。host 后处理路径会在 cut/sort 之后把 singles 映回全局号（例如 `test_r2s_rdma_send`）。
+- `initialize`：按 `channelIndices` 建 **global↔local 通道表**，再创建 generator 或 50100 多 GPU 引擎，可选打开 `.lsingle` 输出。`channelIndices` 为空（9120 全通道）时处理 `[0, channelNums)`，`SetChannelIndex` 使用全局号，`packet.channel` 原样进 kernel，`Single.channelIndex` 已是全局号。此时 `CoincidenceClient.remapLocalToGlobalChannels` 必须为 false，否则会再加一次偏移。`channelIndices` 非空时，提交 GPU 前把 `packet.channel` 映到本地 `0..N-1`（与 `R2S50100Compute::SetChannelIndex` / libpni `channelMap` 一致）。未做 energy cut / 外部 sort 时，device span 上的 `Single.channelIndex` **保持本地编号**，由 `CoincidenceClient` 的 `globalChannelOffset` 在 D2H 后加回全局号。host 后处理路径会在 cut/sort 之后把 singles 映回全局号（例如 `test_r2s_rdma_send`）。采集节点任务保留整机 `channel_index`。`acq_r2s_node` 在 `detectorType=BDM50100_9120` 时调用 `createBDM50100_9120Config`，`channelIndices` 留空，四个校正目录都给，并强制 `remapLocalToGlobalChannels=false`。BDM2 仍走 `channelIndices` 子集；各节点 JSON 里的 `channelIndices` 必须写成该节点实际拿到的全局号。
 - `processSegment`：转换本段 raw；结果经 span/vector 回调和/或写盘。
 - `reopenOutput`：目录批处理切换输出前缀。
 - `finalize`：刷写异步队列、释放 generator。
@@ -139,7 +139,7 @@ R2SProcessConfig createBDM50100_9120Config(..., uint16_t instrumentRingCount = 4
 
 - `processR2S`：读单个 raw 文件。
 - `processR2SDirectory`：扫描 `pniRaw-<clock>.bin`，一次 initialize、按 `inputClock` 切换输出前缀。
-- `createBDM50100_9120Config`：`channelNums = 48*3*instrumentRingCount`（默认 576）；本节点职责由 `channelIndices` 表达。校正目录按环落到 `calibrationFiles` 全局下标。
+- `createBDM50100_9120Config`：`channelNums = 48*3*instrumentRingCount`（默认 576）。`channelIndices` 为空且校正目录数等于环数时，四环校正铺到全局下标，输出通道号不再映射。非空时本节点职责仍由 `channelIndices` 表达，包通道会收成局部号再还原。校正目录按环落到 `calibrationFiles` 全局下标。
 
 `AsyncSingleFileWriter`：独立线程写 `.lsingle`，`submit` 在队列满时返回 false。
 

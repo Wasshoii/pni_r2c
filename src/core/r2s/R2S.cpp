@@ -714,7 +714,8 @@ namespace openpni::distributed::r2s
                 try
                 {
                     const auto engine_config =
-                        multi_gpu::makeMultiGpuEngineConfig(m_config, m_channelsToProcess);
+                        multi_gpu::makeMultiGpuEngineConfig(
+                            m_config, m_channelsToProcess, !m_filterUnassignedChannels);
 
                     std::ostringstream gpu_list;
                     for (size_t i = 0; i < engine_config.gpu_ids.size(); ++i)
@@ -1153,8 +1154,9 @@ namespace openpni::distributed::r2s
                     singlesSpan = std::span<Single const>(
                         m_multiGpuHostSingles.data(), m_multiGpuHostSingles.size());
                 }
-                // Device-span hot path keeps local channelIndex (0..N-1). CoincidenceClient
-                // applies globalChannelOffset after D2H. Do not D2H solely to remap.
+                // channelIndices 为空时 device span 上的 channelIndex 已是全局号，不要再加
+                // CoincidenceClient::globalChannelOffset。子集模式保持局部号，由 host 还原
+                // 或调用方的 globalChannelOffset 加回。不要仅为了映射而 D2H。
             }
         }
 
@@ -1238,7 +1240,8 @@ namespace openpni::distributed::r2s
             {
                 m_channelsToProcess.push_back(i);
             }
-            LOG(INFO) << "Processing all channels [0, " << m_config.channelNums << ")";
+            LOG(INFO) << "Processing all channels [0, " << m_config.channelNums
+                      << "); packet channel kept as global index";
         }
         else
         {
@@ -1358,7 +1361,10 @@ namespace openpni::distributed::r2s
         {
             try
             {
-                auto generator = createSingleGenerator(m_config, localIdx, channelIndex);
+                // 子集模式：kernel 看到的是局部号。全通道模式：包通道已是全局号。
+                const uint16_t kernelChannelIndex =
+                    m_filterUnassignedChannels ? localIdx : channelIndex;
+                auto generator = createSingleGenerator(m_config, kernelChannelIndex, channelIndex);
                 m_generatorsVector.push_back(generator);
             }
             catch (const std::exception &e)

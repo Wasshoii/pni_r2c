@@ -56,6 +56,8 @@ This draft focuses on:
       - `port_destination = destination_rule.port_destination_base + i * max(1, destination_rule.port_destination_stride)`
       - `channel_index = channel_index_rule.channel_index_base + i * max(1, channel_index_rule.channel_index_stride)`
       - default when `channel_index_rule` is omitted: `base=0`, `stride=1` (same sequential indexing style as `acquisition.cpp`)
+  - splitting onto nodes keeps that global `channel_index`. Each node task only contains the IP/port tuples assigned to it. The index is not rewritten to `0..assigned-1`.
+  - the node sets `totalChannelNum` to `max(channel_index)+1`, not to the number of channels on that node. A node that owns channels `288..575` therefore uses `totalChannelNum=576`, so those packets are accepted.
   - node validates fields
   - node builds `NodeAcquisitionConfig` and `AcquisitionInfo`
   - node creates acquisition runtime but does not start yet

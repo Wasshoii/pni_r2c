@@ -65,6 +65,77 @@ namespace
                std::to_string(ip & 0xFF);
     }
 
+    acq::AcquisitionTask makeSourceTask(uint16_t sourceCount)
+    {
+        acq::AcquisitionTask task;
+        for (uint16_t i = 0; i < sourceCount; ++i)
+        {
+            auto *source = task.add_detector_sources();
+            source->set_detector_id("detector-" + std::to_string(i));
+            source->set_ip_source(ipToInt("10.10." + std::to_string((i / 250) + 1) + "." + std::to_string((i % 250) + 1)));
+            source->set_port_source(static_cast<uint32_t>(7000 + i));
+        }
+        auto *dest = task.mutable_destination_rule();
+        dest->set_ip_destination(ipToInt("239.255.0.1"));
+        dest->set_port_destination_base(8100);
+        dest->set_port_destination_stride(1);
+        return task;
+    }
+
+    bool expectChannel(const acq::AcquisitionTask &task, int slot, uint32_t channelIndex)
+    {
+        if (slot >= task.channels_size())
+        {
+            std::cerr << "[ChannelIndex] missing slot " << slot << std::endl;
+            return false;
+        }
+        if (task.channels(slot).channel_index() != channelIndex)
+        {
+            std::cerr << "[ChannelIndex] slot " << slot << " got "
+                      << task.channels(slot).channel_index() << " expected " << channelIndex << std::endl;
+            return false;
+        }
+        return true;
+    }
+
+    bool checkGlobalChannelIndices()
+    {
+        acq::AcquisitionMaster master;
+        master.Initialize(makeSourceTask(4));
+        const auto tasks = master.BuildNodeTasks({"node-0", "node-1"});
+        if (tasks.size() != 2 || tasks[0].channels_size() != 2 || tasks[1].channels_size() != 2)
+        {
+            std::cerr << "[ChannelIndex] expected 2 nodes with 2 channels each" << std::endl;
+            return false;
+        }
+        if (!expectChannel(tasks[0], 0, 0) || !expectChannel(tasks[0], 1, 1) ||
+            !expectChannel(tasks[1], 0, 2) || !expectChannel(tasks[1], 1, 3))
+        {
+            return false;
+        }
+
+        acq::AcquisitionMaster wide;
+        wide.Initialize(makeSourceTask(576));
+        const auto wideTasks = wide.BuildNodeTasks({"node-0", "node-1"});
+        if (wideTasks.size() != 2 || wideTasks[1].channels_size() != 288)
+        {
+            std::cerr << "[ChannelIndex] expected the second node to own 288 of 576 channels" << std::endl;
+            return false;
+        }
+        if (!expectChannel(wideTasks[1], 0, 288) || !expectChannel(wideTasks[1], 287, 575))
+        {
+            return false;
+        }
+        const auto info = acq::MakeAcquisitionInfo(acq::MakeNodeAcquisitionConfig(wideTasks[1]));
+        if (info.totalChannelNum != 576)
+        {
+            std::cerr << "[ChannelIndex] totalChannelNum=" << info.totalChannelNum << " expected 576" << std::endl;
+            return false;
+        }
+        std::cout << "[ChannelIndex] global indices kept; tail span totalChannelNum=576" << std::endl;
+        return true;
+    }
+
     void fillDetectorMapping(acq::AcquisitionTask &task)
     {
         for (uint16_t i = 0; i < 8; ++i)
@@ -153,6 +224,11 @@ namespace
 
 int main()
 {
+    if (!checkGlobalChannelIndices())
+    {
+        return 1;
+    }
+
     const std::string masterAddress = "127.0.0.1:50091";
 
     acq::AcquisitionTask globalTask;

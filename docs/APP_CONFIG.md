@@ -58,7 +58,7 @@
 ### r2s
 - calibrationDir: 标定文件目录。
 - resultDir: R2S 输出目录。
-- channelIndices: 本节点采集通道索引列表。
+- channelIndices: 本节点采集通道索引列表。BDM2 必须写成该节点实际拿到的全局号。`detectorType=BDM50100_9120` 时忽略此项，按全通道处理。
 - sortDataByTime: 是否在 libpni 段内排序之外再按时间排序（默认 false；50100 段内已排序）。
 - saveData2SingleFile: 是否写到单文件。
 - asyncFileWrite: R2S 写盘是否异步。
@@ -76,7 +76,7 @@
 - nodeId: Coin 节点 ID。
 - nodeAddress: Coin 节点地址。
 - channelCount: 通道数。
-- detectorType: 探测器类型（BDM2 / BDM50100）。
+- detectorType: 探测器类型（BDM2 / BDM50100 / BDM50100_9120）。`BDM50100_9120` 走 576 路全通道 R2S，并关闭通道偏移。
 - remapLocalToGlobalChannels: 是否重映射通道。
 - globalChannelOffset: 全局通道偏移。
 - crystalsPerChannel: 每通道晶体数。

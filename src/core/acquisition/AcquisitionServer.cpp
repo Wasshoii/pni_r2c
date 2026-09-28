@@ -73,11 +73,23 @@ namespace openpni::distributed::acquisition
             throw std::invalid_argument("max_packet_size must be >= min_packet_size");
         }
 
+        uint32_t channelSpan = 0;
+        for (const auto &chan : config.channels)
+        {
+            const uint32_t next = static_cast<uint32_t>(chan.channel_index) + 1u;
+            if (next > channelSpan)
+            {
+                channelSpan = next;
+            }
+        }
+
         openpni::AcquisitionInfo info;
         info.storageUnitSize = config.max_packet_size;
         info.maxBufferSize = config.max_buffer_size;
         info.timeSwitchBuffer_ms = std::max<uint32_t>(config.time_switch_buffer_ms, 10);
-        info.totalChannelNum = config.channels.size();
+        // 通道号可以是整机全局号，不必从 0 连续排到本节点个数。
+        // 上界必须盖住最大 channelIndex，否则 DPDK 会把高通道号当成未知包丢掉。
+        info.totalChannelNum = static_cast<uint16_t>(channelSpan);
         info.hostMemoryType = openpni::tools::HostMemoryType::CUDAHost;
 
         for (const auto &chan : config.channels)

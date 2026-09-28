@@ -37,6 +37,7 @@ struct SinglesResult {
 ```cpp
 struct R2S50100ComputeConfig {
   std::vector<std::string> local_calib_files;
+  std::vector<uint16_t> channel_indices;
   openpni::device::bdm50100_v2::BDM50100R2SParams r2s_params;
   int gpuId = 0;
 };
@@ -45,7 +46,7 @@ void compute(const RawDataView *data, SinglesResult *out) override;
 ```
 
 - 绑定 `gpuId`，内部持有 `BDM50100R2SArray` 与每通道 `BDM50100R2S`（libpni）。
-- 每通道 `SetChannelIndex(local 0..N-1)`，**不是** 整机全局号。kernel 用 `channelMap[packet.channel]` 取校正；`packet.channel` 必须已是本地下标（由 `R2SStreamProcessor` 在 H2D 前 remap）。因此 1 张 GPU 处理 node1（全局 288..575）是支持的，前提是 remap 已做。
+- `channel_indices` 与 `local_calib_files` 等长，写入 `SetChannelIndex`。9120 全通道（`channelIndices` 为空）时这里是全局号 `0..575`，`packet.channel` 不再 remap。子集模式这里是局部 `0..N-1`，`packet.channel` 必须已由 `R2SStreamProcessor` 收成同一下标。kernel 用 `channelMap[packet.channel]` 取校正。
 - `compute`：host `RawDataView` → [DPacketsAsync](DPacketsAsync.md) 上 GPU → libpni device R2S → **device** `d_singles`。禁止在 `compute()` 里 `acquireTxSlot`（完成序 ≠ 段序）。
 - 算法细节（晶体、串扰、能量）在 libpni，此处不展开。
 

@@ -45,7 +45,8 @@ bool shouldUseMultiGpu50100(const R2SProcessConfig &config)
 
 R2S50100MultiGpuEngineConfig makeMultiGpuEngineConfig(
     const R2SProcessConfig &config,
-    const std::vector<uint16_t> &channels_to_process)
+    const std::vector<uint16_t> &channels_to_process,
+    bool keepGlobalChannelIndex)
 {
     R2S50100MultiGpuEngineConfig engine_config;
     engine_config.r2s_params.matchXTalkEnabled = config.matchXTalkEnabled;
@@ -71,8 +72,10 @@ R2S50100MultiGpuEngineConfig makeMultiGpuEngineConfig(
     }
 
     engine_config.local_calib_files.reserve(channels_to_process.size());
-    for (const auto global_channel : channels_to_process)
+    engine_config.channel_indices.reserve(channels_to_process.size());
+    for (size_t i = 0; i < channels_to_process.size(); ++i)
     {
+        const auto global_channel = channels_to_process[i];
         if (static_cast<size_t>(global_channel) >= config.calibrationFiles.size() ||
             config.calibrationFiles[global_channel].empty())
         {
@@ -81,6 +84,14 @@ R2S50100MultiGpuEngineConfig makeMultiGpuEngineConfig(
                 std::to_string(global_channel));
         }
         engine_config.local_calib_files.push_back(config.calibrationFiles[global_channel]);
+        if (keepGlobalChannelIndex)
+        {
+            engine_config.channel_indices.push_back(global_channel);
+        }
+        else
+        {
+            engine_config.channel_indices.push_back(static_cast<uint16_t>(i));
+        }
     }
 
     return engine_config;
@@ -126,6 +137,7 @@ bool R2S50100MultiGpuEngine::initialize(const R2S50100MultiGpuEngineConfig &conf
             (void)instance_id;
             R2S50100ComputeConfig compute_config{};
             compute_config.local_calib_files = config.local_calib_files;
+            compute_config.channel_indices = config.channel_indices;
             compute_config.r2s_params = r2s_params;
             compute_config.gpuId = static_cast<int>(gpu_id);
             computes.push_back(std::make_unique<R2S50100Compute>(compute_config));

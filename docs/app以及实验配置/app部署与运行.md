@@ -2,16 +2,20 @@
 
 ## 目录与程序
 
-app 目录包含两个当前实验用的可执行程序：
+app 目录包含三个当前实验用的可执行程序，符合侧两个名字来自同一份 `coin_master_main.cpp`：
 
 1. `bin/app/app_acq_r2s_node`（worker）
    - 同一进程：采集（`AcquisitionGrpcNode`）+ R2S + CoincidenceClient RDMA 发送
    - 默认数据源：`source.type=acquisition`（省略 `source` 即真实采集，连 AcquisitionMaster，走 gRPC + DPDKNew/Socket）
    - `synthetic` / `lsingle_replay` 须在 JSON 里显式写出；握手后再发数
 
-2. `bin/app/app_coin_master`
-   - 符合 + 可选 `AcquisitionMaster`（`acquisitionControl.enabled=true` 时在 `masterAddress` 上启动采集控制）
+2. `bin/app/app_coin_master`（`role=master`，默认）
+   - 符合主控；`acquisitionControl.enabled=true` 时在 `masterAddress` 上内嵌 `AcquisitionMaster`
    - DPDK 无数据冒烟见 `dpdk_config/run_dpdk_nodata_smoketest.sh`
+
+3. `bin/app/app_coin_node`（`role=compute`）
+   - 与 `app_coin_master` 同一二进制，JSON 里写成被控符合节点
+   - 向 master `RegisterCoin`，只排空分到的时间片。K=1 实验不用它。契约见 [TIME_SHARD_COINCIDENCE.md](../TIME_SHARD_COINCIDENCE.md)
 
 跨机实验见 `RDMA多机实验.md`。DPDK 无业务 raw 冒烟见 `dpdk_config/run_dpdk_nodata_smoketest.sh`。
 
@@ -58,16 +62,16 @@ cmake --build --preset build-apps-cuda
    使用dpdk采集测试时，程序可能无法直接退出，可以使用如下指令停止程序
 ```bash
    # 查看是否还在跑
-pgrep -a -f 'app_coin_master|app_acq_r2s_node|tool_dpdk_tx_replayer'
+pgrep -a -f 'app_coin_master|app_coin_node|app_acq_r2s_node|tool_dpdk_tx_replayer'
 
 # 优雅停止
-pkill -INT -f 'app_coin_master|app_acq_r2s_node|tool_dpdk_tx_replayer'
+pkill -INT -f 'app_coin_master|app_coin_node|app_acq_r2s_node|tool_dpdk_tx_replayer'
 
 # 若还在，升级为 TERM
-pkill -TERM -f 'app_coin_master|app_acq_r2s_node|tool_dpdk_tx_replayer'
+pkill -TERM -f 'app_coin_master|app_coin_node|app_acq_r2s_node|tool_dpdk_tx_replayer'
 
 # 最后兜底强杀
-pkill -KILL -f 'app_coin_master|app_acq_r2s_node|tool_dpdk_tx_replayer'
+pkill -KILL -f 'app_coin_master|app_coin_node|app_acq_r2s_node|tool_dpdk_tx_replayer'
 ```
 
 ## 关联文档

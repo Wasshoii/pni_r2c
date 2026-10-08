@@ -51,7 +51,7 @@ flowchart LR
 
 ## 潜在风险
 
-- **网卡**：ConnectX-6 及以上 + 驱动 / `nvidia_peermem`。Intel E810 **不能** 作为本端 GDR 源。现 [四机推荐配置](../../../app以及实验配置/四机推荐配置.md) 允许 E810 **或** CX-6，因此 GDR **不能当默认路径**。
+- **网卡**：ConnectX-6 及以上 + 驱动 / `nvidia_peermem`。Intel E810 **不能** 作为本端 GDR 源，因此 GDR **不能当默认路径**。
 - **拓扑**：GDR 要求 GPU 与 RNIC 有 PCIe P2P。8 卡一 NIC 时，跨 socket / 无 P2P 的卡会 **绕回 host**，可能比档 1 更慢。启动时探测 P2P；**失败则整节点拒绝 GDR 并报错**，不静默混用档 1/档 2（混用难以测准）。
 - **IOMMU / ACS / BAR1**：映射失败或性能断崖；运维清单须覆盖关 ACS、确认 IOMMU 策略、BAR1 大小。
 - **显存占用与反压**：信用不足时 device 槽不回收 → 该卡 `compute` ring 停。8 卡 × 每段 150 槽不现实，必须 **槽环深度有限 + 按槽流水 post**，不能「整段显存等一次 CQ」。

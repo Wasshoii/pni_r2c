@@ -4,7 +4,7 @@
 
 ## 1. 问题与约束
 
-当前拓扑已完成 **按探测器几何的空间分片**（R2S `channelIndices` → 多台 `app_acq_r2s_node`），**未完成按时间分片**：所有空间片仍汇入 **一台** `app_coin_master` 做水位线对齐与 GPU 符合。
+空间分片把通道拆到多台 `app_acq_r2s_node`（9120 上由采集任务划分，不是 R2S `channelIndices`）。按时间分片的租约、跨进程 Ship 与 K=2 控制面已落地，范围见 §9。实时路径上任一时刻仍只有一台 active ingest 接收全部空间片，其余 `app_coin_node` 排空自己的 epoch。K=1 不填 destinations，行为与单机 `app_coin_master` 相同。
 
 符合不能按空间再拆：一对符合可能来自任意两个探测器，任一时间窗内必须在 **同一符合进程** 看到全部空间片。因此水平扩展只剩时间轴。
 

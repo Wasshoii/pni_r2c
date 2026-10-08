@@ -58,7 +58,7 @@
 ### r2s
 - calibrationDir: 标定文件目录。
 - resultDir: R2S 输出目录。
-- channelIndices: 本节点采集通道索引列表。BDM2 必须写成该节点实际拿到的全局号。`detectorType=BDM50100_9120` 时忽略此项，按全通道处理。
+- channelIndices: 本节点采集通道索引列表。BDM2 必须写成该节点实际拿到的全局号，R2S 按这个子集加载校正并把包通道收成局部号，再由 `globalChannelOffset` 加回。`detectorType=BDM50100_9120` 时忽略此项：每台 worker 加载四环全部校正，通道号保持全局号，并强制 `remapLocalToGlobalChannels=false`。9120 只处理分到的通道，靠 coin 上 `AcquisitionMaster` 把采集任务按通道拆开，节点只收到自己的 UDP/DPDK 流；R2S 不再按通道丢包。校正目录必须是整机四环，不能按节点裁成半表。
 - sortDataByTime: 是否在 libpni 段内排序之外再按时间排序（默认 false；50100 段内已排序）。
 - saveData2SingleFile: 是否写到单文件。
 - asyncFileWrite: R2S 写盘是否异步。
@@ -76,9 +76,9 @@
 - nodeId: Coin 节点 ID。
 - nodeAddress: Coin 节点地址。
 - channelCount: 通道数。
-- detectorType: 探测器类型（BDM2 / BDM50100 / BDM50100_9120）。`BDM50100_9120` 走 576 路全通道 R2S，并关闭通道偏移。
-- remapLocalToGlobalChannels: 是否重映射通道。
-- globalChannelOffset: 全局通道偏移。
+- detectorType: 探测器类型（BDM2 / BDM50100 / BDM50100_9120）。`BDM50100_9120` 走 576 路全通道校正，通道号保持全局号，并关闭通道偏移。
+- remapLocalToGlobalChannels: 是否把局部通道号加回全局号。9120 强制为 false。
+- globalChannelOffset: 全局通道偏移。9120 强制为 0。BDM2 子集路径才使用。
 - crystalsPerChannel: 每通道晶体数。
 - maxPendingChunks: JSON 兼容字段；热路径不再作为发送队列深度（`pend` 为本地 TX busy / `txSlotCount`）。
 - batchSize: 批量发送大小。
@@ -150,7 +150,10 @@ Worker `coinClient.destinations`: `[{coinId, address}, ...]`，预连所有 coin
 - statusIntervalMs: 状态打印间隔。
 
 ### acquisitionControl
-- **本阶段忽略**。若 `enabled=true` 会 warn 并强制关闭。采集主控不再是 coin 的默认职责。
+- enabled: 默认关闭。`true` 时 `app_coin_master` 在 `masterAddress`（默认 `127.0.0.1:50093`）上启动 `AcquisitionMaster`，worker 连上后下发 Configure；符合 Start 发出后（`autoStartOnCoinStartSignal`）再下发 Start。不会 warn 后关掉。字段说明见 [DPDK采集配置与使用.md](app以及实验配置/DPDK采集配置与使用.md)。
+- 采集侧等待的节点数用 `coinMaster.expectedNodeCount`（或被 `cluster.expectedNodeCount` 覆盖后的值）。当前一台 worker 同时是采集客户端和符合生产者，这个绑定是对的。
+
+同一 JSON 里后出现的段覆盖先出现的段：worker 上 `cluster` 覆盖 `coinClient` 的地址、nodeId、`activeCoinId`、`destinations`；coin 上 `cluster` 覆盖 `coinMaster` 的监听地址、`expectedNodeCount` 和时间片字段，`coincidence` 覆盖 `aligner` 的输出目录、存盘开关和 `protocol`。探测器型号只认 `coincidence.detectorProfile`；写在 `coinMaster.detectorProfile` 里不会被读入，缺省仍是结构体默认值 `BDM2`。
 
 旧 `coinMaster` / `aligner` 段仍可解析，便于过渡。`aligner.networkLatencyMarginPico` 默认 0（皮秒）：不是 RDMA 等包，只是可选的额外 PET 水位裕量；`getTotalSafetyMargin` 仍加上符合窗 `max(timeWindow, delayTime)`。
 

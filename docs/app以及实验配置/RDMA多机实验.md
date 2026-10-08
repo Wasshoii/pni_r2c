@@ -1,7 +1,7 @@
 # RDMA 多机实验
 
 本阶段跨机热路径是 **16 字节 packed singles + RoCE**，不是 raw UDP。  
-Coin 进程只做符合；worker 仍是 `app_acq_r2s_node`（采集 + R2S + RDMA 发送），**不要**再拆独立 singles 进程。
+本目录剖面里 Coin 做符合；worker 仍是 `app_acq_r2s_node`（采集 + R2S + RDMA 发送），**不要**再拆独立 singles 进程。真实采集时 `app_coin_master` 可内嵌 AcquisitionMaster（`acquisitionControl.enabled=true`），步骤见 [DPDK采集配置与使用.md](DPDK采集配置与使用.md)。`app_coin_node`（同一二进制，`role=compute`）与时间片不在本目录剖面里，见 [TIME_SHARD_COINCIDENCE.md](../TIME_SHARD_COINCIDENCE.md)。
 
 本目录覆盖通路、正确性、回放、接收稳定性与符合极限（阶段 2/3），共用同一条 `worker → RoCE → coin`。真实 NIC 采集（`source.type=acquisition`）走 AcquisitionMaster + DPDKNew，步骤见 [DPDK采集配置与使用.md](DPDK采集配置与使用.md) 与 [采集到R2S](../接口说明/通路/采集到R2S.md)。
 
@@ -32,7 +32,7 @@ Coin 进程只做符合；worker 仍是 `app_acq_r2s_node`（采集 + R2S + RDMA
 - `coincidence`：探测器 profile、输出目录、时间/能量窗、`savePrompt` / `saveDelay`
 - `source`：`synthetic` / `lsingle_replay`；`mode=pairs|stream`；速率与错开字段见 `APP_CONFIG.md`
 
-Coin JSON 里的 `acquisitionControl` 会被 warn 并忽略。
+本目录的 synthetic / replay 剖面不打开 `acquisitionControl`。该段默认关闭；`enabled=true` 时 coin 会在 `masterAddress` 上启动 AcquisitionMaster，并随符合 Start 下发 Configure / Start。真实采集见 DPDK 文档，不会被忽略。
 
 ## 三种「延迟」（不要混用）
 
@@ -70,7 +70,7 @@ cmake --preset linux-release-apps-cuda
 cmake --build --preset build-apps-cuda
 ```
 
-产物默认：`build/apps/basic/bin/app/app_coin_master`、`build/apps/cuda/bin/app/app_acq_r2s_node`。
+产物默认：`bin/app/app_coin_master`、`bin/app/app_coin_node`、`bin/app/app_acq_r2s_node`。启动脚本优先用仓库根下的 `bin/app/`；找不到时才回退 `build/apps/basic/bin/app/` 或 `build/apps/cuda/bin/app/`。
 
 ## Preflight（每台 RoCE 机器）
 

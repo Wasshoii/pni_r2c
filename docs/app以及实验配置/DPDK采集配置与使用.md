@@ -114,7 +114,9 @@ sudo dpdk-devbind.py --status
 8. 200 Gib/s：每 100GbE 口建议 `dpdkRxRingsPerPort=4`（8 个 worker lcore），`extra_eal_args` 绑在网卡 NUMA。默认仍为 1，避免低速场景默默多占核。
 9. `storageUnitSize` 应贴近最大 UDP 载荷；槽比包大时 `DPacketsAsync` H2D 会带 padding。
 
-并确保发包端（`dpdk_tx_replayer` 或 `app_udp_raw_replayer`）端口与采集控制下发端口匹配。
+并确保发包端（`tool_dpdk_tx_replayer` 或 `bin/tools/tool_udp_raw_replayer`）端口与采集控制下发端口匹配。
+
+端到端 singles（采集 → R2S → RDMA）需要 worker `bridge.enabled=true`。无数据冒烟只验证采集初始化，可以把 `bridge.enabled` 关掉。
 
 `dpdkCopyThreadNum` 与 mbuf 双指针乘数仍可写在旧配置里，运行时忽略。
 
@@ -189,12 +191,12 @@ sudo dpdk-devbind.py --status
 
 1. 启动 `app_coin_master`。
 2. 启动一个或多个 `app_acq_r2s_node`。
-3. 最后启动 `tool_udp_raw_replayer`（历史上常写成 `app_udp_raw_replayer`）回放已有 `.raw` 文件。这是**内核 UDP**，只能打到仍在内核驱动上的口；网卡绑了 vfio 后发不进去。DPDK 性能测试的发包是另一条路：TX 机 `tool_dpdk_tx_replayer` **现场填字节组包**，不读 raw，见 §9.3。
+3. 最后启动 `bin/tools/tool_udp_raw_replayer` 回放已有 `.raw` 文件。这是**内核 UDP**，只能打到仍在内核驱动上的口；网卡绑了 vfio 后发不进去。DPDK 性能测试的发包是另一条路：TX 机 `tool_dpdk_tx_replayer` **现场填字节组包**，不读 raw，见 §9.3。
 
 示例（复用现有 raw 回放参数风格）：
 
 ```bash
-./bin/app_udp_raw_replayer \
+./bin/tools/tool_udp_raw_replayer \
   --raw-path "Data/bdm2/split_Data/2_PET_2Bed pet 600s-bed0_ch0_ch1_ch2_ch3.raw" \
   --source-ip 127.0.0.1 --destination-ip 127.0.0.1 \
   --source-port-base 17100 --destination-port-base 18100 \

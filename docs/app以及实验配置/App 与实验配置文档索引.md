@@ -9,7 +9,8 @@
 ## 文档导航
 
 1. `RDMA多机实验.md`
-   - Coin 符合-only + worker（synthetic / lsingle_replay）
+   - 本目录剖面：Coin 符合 + worker（synthetic / lsingle_replay）
+   - 真实采集时 Coin 可内嵌 AcquisitionMaster，步骤在 DPDK 文档
    - 剖面：通路 / 正确性 / 回放 / soak / rate
    - preflight 与启动脚本
 
@@ -23,20 +24,19 @@
    - 用 pend / rdma / buf / lag 判瓶颈
 
 4. `app部署与运行.md`
-   - app 目录结构
+   - app 目录结构（`app_acq_r2s_node`、`app_coin_master`、`app_coin_node`）
    - 可执行程序说明
    - 配置文件分层
    - 编译与基础运行
 
-5. `四机推荐配置.md`
-   - 每台机器推荐硬件配置
-   - 网卡/网线/交换机要求
-   - DPDK 场景网络建议
-
-6. `DPDK采集配置与使用.md`
+5. `DPDK采集配置与使用.md`
    - DPDK 安装后检查项（工具链/网卡/大页）
    - 本项目 DPDK 采集接入要点
    - 联调步骤与常见排障
+
+6. [TIME_SHARD_COINCIDENCE.md](../TIME_SHARD_COINCIDENCE.md)
+   - 多符合机按 PET 时间片轮转；`app_coin_node` 为 `role=compute`
+   - 不在本目录的 RDMA 剖面里
 
 7. [接口说明](../接口说明/README.md)
    - R2S → packed singles → RDMA 槽
@@ -48,6 +48,6 @@
 2. 跨机 RDMA 读 `RDMA多机实验.md`
 3. 进程测试读 [测试/README.md](../测试/README.md)；剖面判据读 `RDMA多机实验.md`
 4. 看状态行、调缓冲/槽位读 `状态机与调试.md`
-5. 实验计划硬件选型读 `四机推荐配置.md`
-6. 准备启用 DPDK 采集时读 `DPDK采集配置与使用.md`
+5. 准备启用 DPDK 采集时读 `DPDK采集配置与使用.md`
+6. 多符合机时间片读 [TIME_SHARD_COINCIDENCE.md](../TIME_SHARD_COINCIDENCE.md)
 7. 模块契约读 [接口说明](../接口说明/README.md)（R2S → RDMA 从 [通路](../接口说明/通路/R2S到RDMA.md) 起）

@@ -129,7 +129,7 @@ ctest --test-dir build/tests/cuda -R test_r2s_50100_multi_gpu --output-on-failur
 ### Apps 预设（部署构建建议）
 
 1. Basic Apps（无 CUDA）
-- 目标：`app_coin_master`、`app_udp_raw_replayer`、`tool_sharded_raw_merge`
+- 目标：`app_coin_master`、`app_coin_node`（同一份 `coin_master_main.cpp`）。UDP raw 回放是 `bin/tools/tool_udp_raw_replayer`，由 `build-tools` 构建，不是 app 目标。
 
 ```bash
 cmake --preset linux-release-apps-basic

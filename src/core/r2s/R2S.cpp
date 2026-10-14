@@ -296,6 +296,9 @@ namespace openpni::distributed::r2s
             params.crossTalkTimeWindow = config.crossTalkTimeWindow;
             params.__deviceId = config.__deviceId;
             params.energyThresholds = config.energyThresholds;
+            params.energyWindowEnabled = config.useEnergyCut;
+            params.energyWindowLow_eV = config.energyCutLow;
+            params.energyWindowHigh_eV = config.energyCutHigh;
             g50100->setParams(params);
             generator = g50100;
             break;
@@ -457,7 +460,10 @@ namespace openpni::distributed::r2s
                 return true;
             }
 
-            if (!config.useEnergyCut && !config.sortDataByTime)
+            // 50100 能窗已在 maskingValidRawSingle_kernel 中完成，这里不再滤一次。
+            const bool energyCutInPost =
+                config.useEnergyCut && config.detectorType != DetectorType::BDM50100;
+            if (!energyCutInPost && !config.sortDataByTime)
             {
                 out.assign(hostSingles.begin(), hostSingles.end());
                 return true;
@@ -492,7 +498,7 @@ namespace openpni::distributed::r2s
                 }
 
                 uint64_t count = out.size();
-                if (config.useEnergyCut)
+                if (energyCutInPost)
                 {
                     count = d_filterSinglesByEnergy_R2S(
                         d_singles,
@@ -976,7 +982,7 @@ namespace openpni::distributed::r2s
                 auto &deviceSinglesSpan = r2sResults[m_config.r2sResultIndex];
                 singlesSpan = deviceSinglesSpan;
 
-                if (m_config.useEnergyCut)
+                if (m_config.useEnergyCut && m_config.detectorType != DetectorType::BDM50100)
                 {
                     if (!singlesSpan.empty() && isDevicePointer(singlesSpan.data()))
                     {
@@ -1126,7 +1132,9 @@ namespace openpni::distributed::r2s
                     }
                 }
 
-                const bool needHostPost = m_config.useEnergyCut || m_config.sortDataByTime;
+                const bool needHostPost =
+                    (m_config.useEnergyCut && m_config.detectorType != DetectorType::BDM50100) ||
+                    m_config.sortDataByTime;
                 const bool needHostRemap =
                     m_filterUnassignedChannels && !m_localToGlobalChannel.empty();
                 if (needHostPost)

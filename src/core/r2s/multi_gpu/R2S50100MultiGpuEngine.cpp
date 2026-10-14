@@ -55,6 +55,9 @@ R2S50100MultiGpuEngineConfig makeMultiGpuEngineConfig(
     engine_config.r2s_params.crossTalkEnabled = config.crossTalkEnabled;
     engine_config.r2s_params.crossTalkTimeWindow = config.crossTalkTimeWindow;
     engine_config.r2s_params.energyThresholds = config.energyThresholds;
+    engine_config.r2s_params.energyWindowEnabled = config.useEnergyCut;
+    engine_config.r2s_params.energyWindowLow_eV = config.energyCutLow;
+    engine_config.r2s_params.energyWindowHigh_eV = config.energyCutHigh;
     engine_config.gpu_ids = resolveGpuIds(config);
     engine_config.instance_per_gpu = std::max<uint32_t>(1u, config.instancePerGpu);
     engine_config.max_input_gibits = config.maxInputGibits;

@@ -151,7 +151,7 @@ namespace openpni::distributed::r2s
         float timeShift = 25.0f;          // 时间偏移
         bool crossTalkEnabled = false;    // 是否启用串扰校正
         float crossTalkTimeWindow = 2.0f; // 串扰时间窗口 (ns)
-        bool useEnergyCut = false;                   // 是否启用能量窗过滤
+        bool useEnergyCut = false;                   // 是否启用能量窗过滤。50100 在 maskingValidRawSingle_kernel 内完成，不再做后处理过滤
         float energyCutLow = 0.0f;                    // 能量窗下限 eV
         float energyCutHigh = 0.0f;                   // 能量窗上限 eV
         uint32_t __deviceId = 0; // CUDA设备ID（后处理/回退路径主 GPU）
